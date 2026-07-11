@@ -8,10 +8,10 @@ from pathlib import Path
 from statistics import mean
 from typing import Iterable, Optional, Sequence, Union
 
-from .imatest import parse_imatest_csv
+from .imatest import ImatestCSVError, parse_imatest_csv
 from .models import OptimizationConfig
 from .optimizer import optimize_ccm
-from .qualcomm_xml import QualcommCCDocument
+from .qualcomm_xml import QualcommCCDocument, QualcommXMLError
 
 
 @dataclass(frozen=True)
@@ -81,8 +81,24 @@ def _unique_files(directories: Iterable[Union[str, Path]], suffix: str) -> list[
 
 
 def discover_golden_inputs(source_directories: Sequence[Union[str, Path]]) -> tuple[list[Path], list[Path]]:
-    csv_files = _unique_files(source_directories, ".csv")
-    xml_files = _unique_files(source_directories, ".xml")
+    # Source folders can also contain Stepchart/Gamma CSVs or XMLs for other
+    # ISP modules.  Golden CCM regression still traverses the whole tree, but
+    # only compatible ColorChecker and Qualcomm CC inputs become test cases.
+    csv_files: list[Path] = []
+    for path in _unique_files(source_directories, ".csv"):
+        try:
+            parse_imatest_csv(path)
+        except (OSError, ImatestCSVError):
+            continue
+        csv_files.append(path)
+
+    xml_files: list[Path] = []
+    for path in _unique_files(source_directories, ".xml"):
+        try:
+            QualcommCCDocument.load(path)
+        except (OSError, QualcommXMLError):
+            continue
+        xml_files.append(path)
     return csv_files, xml_files
 
 

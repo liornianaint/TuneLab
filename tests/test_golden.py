@@ -14,6 +14,7 @@ class GoldenRegressionTests(unittest.TestCase):
         csv_files, xml_files = discover_golden_inputs([ROOT / "Source", ROOT / "source"])
         self.assertGreaterEqual(len(csv_files), 8)
         self.assertGreaterEqual(len(xml_files), 1)
+        self.assertNotIn("gray_summary.csv", {path.name.lower() for path in csv_files})
         suite = run_golden_suite([ROOT / "Source", ROOT / "source"])
         self.assertEqual(suite.status, "PASS", [(case.case_id, case.reasons) for case in suite.cases])
         self.assertEqual(len(suite.cases), len(csv_files) * len(xml_files))

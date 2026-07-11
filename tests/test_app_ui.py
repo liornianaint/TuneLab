@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from matrixcorrect.app import LabViewState, MatrixCorrectApp, calculate_lab_bounds
+from matrixcorrect.imatest import parse_imatest_csv
+from matrixcorrect.optimizer import optimize_ccm
 from matrixcorrect.qualcomm_xml import QualcommCCDocument
 
 from .test_settings_history import ROOT
@@ -23,15 +25,24 @@ class LabViewTests(unittest.TestCase):
             self.assertLess(b_min, b_value)
             self.assertGreater(b_max, b_value)
 
-    def test_zoom_pan_and_one_click_reset_keep_square_shared_view(self) -> None:
+    def test_zoom_limits_and_reset_keep_square_shared_view(self) -> None:
         view = LabViewState()
         view.fit([(-30.0, -52.0), (44.0, 32.0)])
         original = view.bounds
-        view.zoom(0.5, 0.0, -10.0)
+        auto_span = original[1] - original[0]
+        for _ in range(30):
+            view.zoom(0.5, 0.0, -10.0)
         self.assertAlmostEqual(view.bounds[1] - view.bounds[0], view.bounds[3] - view.bounds[2])
-        view.pan_to(12.0, -8.0)
-        self.assertAlmostEqual((view.bounds[0] + view.bounds[1]) / 2.0, 12.0)
-        self.assertAlmostEqual((view.bounds[2] + view.bounds[3]) / 2.0, -8.0)
+        self.assertAlmostEqual(view.bounds[1] - view.bounds[0], auto_span * 0.20)
+        for _ in range(30):
+            view.zoom(2.0, original[1], original[3])
+        self.assertAlmostEqual(view.bounds[1] - view.bounds[0], auto_span * 2.0)
+        auto_a_center = (original[0] + original[1]) / 2.0
+        auto_b_center = (original[2] + original[3]) / 2.0
+        current_a_center = (view.bounds[0] + view.bounds[1]) / 2.0
+        current_b_center = (view.bounds[2] + view.bounds[3]) / 2.0
+        self.assertLessEqual(abs(current_a_center - auto_a_center), auto_span / 2.0 + 1e-9)
+        self.assertLessEqual(abs(current_b_center - auto_b_center), auto_span / 2.0 + 1e-9)
         view.reset()
         self.assertEqual(view.bounds, original)
 
@@ -98,6 +109,78 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.app.document = document
         self.app._select_region(0)
         self.assertIn("当前 Region：#0", self.app.active_region_var.get())
+
+    def test_comparison_tab_contains_plots_and_complete_scrollable_patch_table(self) -> None:
+        tabs = [self.app.notebook.tab(tab_id, "text").strip() for tab_id in self.app.notebook.tabs()]
+        self.assertEqual(tabs[0], "色差对比")
+        self.assertNotIn("色块明细", tabs)
+        self.assertEqual(int(self.app.patch_table_panel.cget("width")), 520)
+        self.assertEqual(
+            self.app.tree.cget("columns"),
+            ("zone", "name", "category", "weight", "before", "after", "change", "dl", "dc", "dh", "regression", "status", "module"),
+        )
+        self.assertTrue(self.app.tree.cget("xscrollcommand"))
+        self.assertTrue(self.app.tree.cget("yscrollcommand"))
+        self.assertTrue(self.app.before_plot.canvas.bind("<MouseWheel>"))
+        self.assertTrue(self.app.before_plot.canvas.bind("<Double-Button-1>"))
+        self.assertFalse(self.app.before_plot.canvas.bind("<B1-Motion>"))
+        self.assertFalse(self.app.before_plot.canvas.bind("<B2-Motion>"))
+        self.assertFalse(self.app.before_plot.canvas.bind("<B3-Motion>"))
+        original_bounds = self.app.lab_view.bounds
+        left, top, side = self.app.before_plot._geometry
+        self.app.before_plot._on_mousewheel(
+            SimpleNamespace(delta=120, x=left + side / 2.0, y=top + side / 2.0)
+        )
+        self.assertNotEqual(self.app.lab_view.bounds, original_bounds)
+        self.assertIs(self.app.before_plot.view_state, self.app.after_plot.view_state)
+        self.app.before_plot._reset_view(SimpleNamespace())
+        self.assertEqual(self.app.lab_view.bounds, original_bounds)
+
+    def test_plot_and_table_patch_selection_are_bidirectionally_linked(self) -> None:
+        dataset = parse_imatest_csv(ROOT / "Source" / "D65_normal_summary.csv")
+        document = QualcommCCDocument.load(ROOT / "Source" / "cc13_ipe_v2.xml")
+        region, _mode = document.find_region_for_cct(6500)
+        self.app.dataset = dataset
+        self.app.document = document
+        self.app.selected_region = region
+        self.app.result = optimize_ccm(dataset, region.matrix)
+        self.app._render_result()
+
+        for plot in (self.app.before_plot, self.app.after_plot):
+            left, top, side = plot._geometry
+            for zone in range(1, 25):
+                patch_box = plot.canvas.bbox(f"patch-{zone}")
+                self.assertIsNotNone(patch_box)
+                assert patch_box is not None
+                self.assertGreaterEqual(patch_box[0], left - 2)
+                self.assertGreaterEqual(patch_box[1], top - 2)
+                self.assertLessEqual(patch_box[2], left + side + 2)
+                self.assertLessEqual(patch_box[3], top + side + 2)
+
+        self.app.tree.selection_set("patch-13")
+        self.app._on_patch_table_selected()
+        self.assertEqual(self.app.before_plot.selected_zone, 13)
+        self.assertEqual(self.app.after_plot.selected_zone, 13)
+        self.assertIn("focus", self.app.tree.item("patch-13", "tags"))
+
+        self.app._show_patch_detail(14)
+        self.assertEqual(self.app.tree.selection(), ("patch-14",))
+        self.assertEqual(self.app.before_plot.selected_zone, 14)
+        self.assertEqual(self.app.after_plot.selected_zone, 14)
+
+        for _ in range(10):
+            self.app.lab_view.zoom(0.5, 0.0, 0.0)
+        self.app._redraw_plots()
+        for plot in (self.app.before_plot, self.app.after_plot):
+            left, top, side = plot._geometry
+            for zone in range(1, 25):
+                patch_box = plot.canvas.bbox(f"patch-{zone}")
+                if patch_box is None:
+                    continue
+                self.assertGreaterEqual(patch_box[0], left - 2)
+                self.assertGreaterEqual(patch_box[1], top - 2)
+                self.assertLessEqual(patch_box[2], left + side + 2)
+                self.assertLessEqual(patch_box[3], top + side + 2)
 
 
 if __name__ == "__main__":
