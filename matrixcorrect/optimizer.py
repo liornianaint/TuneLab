@@ -4,7 +4,7 @@ import math
 from collections import Counter
 from dataclasses import dataclass, replace
 from statistics import mean
-from typing import Optional
+from typing import Iterable, Optional
 
 from .color import (
     delta_e_2000,
@@ -39,6 +39,7 @@ from .models import (
     PassRateStatistics,
     PatchResult,
     Vector3,
+    safe_improvement_percent,
 )
 
 
@@ -48,6 +49,9 @@ class OptimizationError(ValueError):
 
 AUTO_REGULARIZATION = (0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0)
 PASS_THRESHOLDS = (2.0, 3.0, 5.0, 10.0)
+PASS_RATE_COMPARATOR = "<="
+NEUTRAL_PATCHES = frozenset(range(19, 25))
+NEUTRAL_PATCH_REGRESSION_LIMIT = 0.50
 
 
 @dataclass(frozen=True)
@@ -132,6 +136,12 @@ def _fit_target(source: Vector3, ideal: Vector3, saturation_factor: float) -> Ve
     scaled = tuple(value * scale for value in ideal)
     neutral = (source_luma, source_luma, source_luma)
     return tuple(neutral[index] + saturation_factor * (scaled[index] - neutral[index]) for index in range(3))  # type: ignore[return-value]
+
+
+def saturation_target_chroma(ideal_chroma: float, saturation_factor: float) -> float:
+    """Apply saturation_factor exactly once to the ideal chroma target."""
+
+    return ideal_chroma * saturation_factor
 
 
 def _fit_constrained_matrix(
@@ -220,6 +230,8 @@ def _build_patch_results(
         regression = max(0.0, after_e - before_e)
         if patch.zone in config.focus_patches:
             regression_limit = config.focus_patch_regression
+        elif patch.zone in NEUTRAL_PATCHES:
+            regression_limit = min(config.good_patch_regression, NEUTRAL_PATCH_REGRESSION_LIMIT)
         elif before_e < 3.0:
             regression_limit = config.good_patch_regression
         else:
@@ -239,7 +251,7 @@ def _build_patch_results(
                 ideal_lab=ideal_lab,
                 delta_e_before=before_e,
                 delta_e_after=after_e,
-                improvement_percent=0.0 if before_e <= 1e-12 else (before_e - after_e) / before_e * 100.0,
+                improvement_percent=safe_improvement_percent(before_e, after_e),
                 delta_l_before=before_lab[0] - ideal_lab[0],
                 delta_l_after=after_lab[0] - ideal_lab[0],
                 delta_c_before=before_c - ideal_c,
@@ -260,10 +272,18 @@ def _build_patch_results(
 def _pass_rates(patches: list[PatchResult]) -> PassRateStatistics:
     return PassRateStatistics(
         thresholds=PASS_THRESHOLDS,
-        before_counts=tuple(sum(patch.delta_e_before < threshold for patch in patches) for threshold in PASS_THRESHOLDS),
-        after_counts=tuple(sum(patch.delta_e_after < threshold for patch in patches) for threshold in PASS_THRESHOLDS),
+        before_counts=pass_rate_counts((patch.delta_e_before for patch in patches)),
+        after_counts=pass_rate_counts((patch.delta_e_after for patch in patches)),
         sample_count=len(patches),
     )
+
+
+def pass_rate_counts(
+    errors: Iterable[float],
+    thresholds: tuple[float, ...] = PASS_THRESHOLDS,
+) -> tuple[int, ...]:
+    values = tuple(float(value) for value in errors)
+    return tuple(sum(value <= threshold for value in values) for threshold in thresholds)
 
 
 def _category_statistics(patches: list[PatchResult]) -> tuple[CategoryStatistics, ...]:
@@ -280,8 +300,8 @@ def _category_statistics(patches: list[PatchResult]) -> tuple[CategoryStatistics
                 mean_after=mean(patch.delta_e_after for patch in group),
                 improved=sum(patch.delta_e_after < patch.delta_e_before - 1e-9 for patch in group),
                 regressed=sum(patch.regression > 0.05 for patch in group),
-                pass_rate_before_3=sum(patch.delta_e_before < 3.0 for patch in group) / len(group),
-                pass_rate_after_3=sum(patch.delta_e_after < 3.0 for patch in group) / len(group),
+                pass_rate_before_3=sum(patch.delta_e_before <= 3.0 for patch in group) / len(group),
+                pass_rate_after_3=sum(patch.delta_e_after <= 3.0 for patch in group) / len(group),
             )
         )
     return tuple(output)
@@ -318,7 +338,12 @@ def _loss_breakdown(
     ratio = _saturation_ratio(patches, after=True)
     global_sat = abs(ratio - config.saturation_factor) * 10.0
     local_sat = sum(
-        patch.priority_weight * max(0.0, patch.chroma_after - patch.chroma_ideal * config.saturation_factor - config.local_saturation_tolerance)
+        patch.priority_weight * max(
+            0.0,
+            patch.chroma_after
+            - saturation_target_chroma(patch.chroma_ideal, config.saturation_factor)
+            - config.local_saturation_tolerance,
+        )
         for patch in colors
     ) / total_weight
     saturation = global_sat + 0.12 * local_sat
@@ -345,8 +370,14 @@ def _loss_breakdown(
     return LossBreakdown(total, de, dc, dh, dl, p90, regression, saturation, matrix_term, smoothness, engineering)
 
 
-def _compose(correction: Matrix3, original: Matrix3, composition: str) -> Matrix3:
+def compose_correction_matrix(correction: Matrix3, original: Matrix3, composition: str = "pre") -> Matrix3:
+    if composition not in {"pre", "post_transposed"}:
+        raise OptimizationError(f"未知矩阵组合约定: {composition}")
     return mat_mul(correction, original) if composition == "pre" else mat_mul(original, transpose(correction))
+
+
+def _compose(correction: Matrix3, original: Matrix3, composition: str) -> Matrix3:
+    return compose_correction_matrix(correction, original, composition)
 
 
 def _correction_for_final(original: Matrix3, final: Matrix3, composition: str) -> Matrix3:
@@ -416,6 +447,18 @@ def _protection_failure(
                 return "focus-delta-c"
             if abs(patch.delta_h_after) > abs(patch.delta_h_before) + config.focus_delta_h_regression:
                 return "focus-delta-h"
+    neutral = [patch for patch in candidate.patch_results if patch.zone in NEUTRAL_PATCHES]
+    baseline_neutral_by_zone = {
+        patch.zone: patch for patch in baseline.patch_results if patch.zone in NEUTRAL_PATCHES
+    }
+    neutral_limit = min(config.good_patch_regression, NEUTRAL_PATCH_REGRESSION_LIMIT)
+    for patch in neutral:
+        if patch.regression > neutral_limit + 1e-12:
+            return "neutral-regression"
+    if neutral and mean(patch.delta_e_after for patch in neutral) > mean(
+        baseline_neutral_by_zone[patch.zone].delta_e_after for patch in neutral
+    ) + 0.10:
+        return "neutral-mean-regression"
     if sum(patch.regression > config.regression_epsilon for patch in colors) > config.max_regressed_patches:
         return "regression-count"
     candidate_pass = _pass_rates(candidate.patch_results)
@@ -429,7 +472,7 @@ def _protection_failure(
     if after_ratio > max(config.saturation_factor + config.saturation_tolerance, before_ratio + 0.01):
         return "over-saturation"
     for patch in colors:
-        target = patch.chroma_ideal * config.saturation_factor
+        target = saturation_target_chroma(patch.chroma_ideal, config.saturation_factor)
         before = next(item for item in baseline.patch_results if item.zone == patch.zone)
         allowed_growth = config.focus_delta_c_regression if patch.zone in config.focus_patches else 1.0
         if patch.chroma_after - target > max(
@@ -512,6 +555,10 @@ def _fallback_score(candidate: _Candidate, config: OptimizationConfig) -> float:
                 0.0,
                 abs(patch.delta_h_after) - abs(patch.delta_h_before) - config.focus_delta_h_regression,
             ) ** 2
+    neutral_limit = min(config.good_patch_regression, NEUTRAL_PATCH_REGRESSION_LIMIT)
+    for patch in candidate.patch_results:
+        if patch.zone in NEUTRAL_PATCHES:
+            score += 80.0 * max(0.0, patch.regression - neutral_limit) ** 2
     score += 2.0 * abs(_saturation_ratio(candidate.patch_results, after=True) - config.saturation_factor)
     score += 0.05 * candidate.health.smoothness ** 2
     if candidate.health.status == "FAIL":
@@ -578,6 +625,28 @@ def _engineering_boundary_search(
 
     failure = _protection_failure(current, baseline, config)
     if failure:
+        # A direct boundary optimum can sit just beyond a regression gate.  A
+        # deterministic backoff along the already-computed Delta CCM direction
+        # preserves the fit semantics while finding the strongest safe point;
+        # this is especially important for Neutral Patch 19-24 protection.
+        safe_candidates: list[_Candidate] = []
+        for fraction in (0.95, 0.90, 0.85, 0.80, 0.75, 0.70, 0.65, 0.60, 0.55, 0.50, 0.45, 0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10, 0.05):
+            backed_off = _evaluate_candidate(
+                dataset,
+                original,
+                matrix_blend(current.correction, fraction),
+                composition,
+                config,
+                current.regularization,
+                fraction,
+            )
+            backoff_failure = _protection_failure(backed_off, baseline, config)
+            if backoff_failure:
+                rejected[f"backoff-{backoff_failure}"] += 1
+                continue
+            safe_candidates.append(backed_off)
+        if safe_candidates:
+            return replace(min(safe_candidates, key=lambda item: item.loss.total), search_method="safety-backoff")
         rejected[f"boundary-{failure}"] += 1
         return None
     return replace(current, search_method="engineering-boundary")
@@ -693,6 +762,12 @@ def optimize_ccm(
     if abs(after_ratio - config.saturation_factor) > config.saturation_tolerance:
         warnings.append(f"After Chroma ratio={after_ratio:.3f}，仍偏离目标 {config.saturation_factor:.3f}。")
 
+    # The solver composes against a ppm-normalized copy of the source matrix so
+    # Row Sum remains exact.  Re-express the displayed/exported Delta correction
+    # against the literal XML matrix; this makes the stated A×M (or M×Aᵀ)
+    # relationship numerically exact instead of differing by XML rounding ppm.
+    result_correction = _correction_for_final(original_matrix, best.optimized, composition)
+
     accepted_count = len(regularizations) * len(blend_steps) - sum(rejected.values())
     explainability = (
         f"Strategy={config.strategy}; 搜索 Regularization={list(regularizations)}，blend <= {config.max_blend:.2f}。",
@@ -700,10 +775,12 @@ def optimize_ccm(
         f"Saturation target={config.saturation_factor:.3f}; Chroma ratio {before_ratio:.3f}->{after_ratio:.3f}。",
         f"候选接受约 {max(0, accepted_count)}，拒绝 {sum(rejected.values())}；主要原因：{dict(rejected.most_common(5))}。",
         f"选择 method={best.search_method}, lambda={best.regularization:g}, blend={best.blend:.2f}, loss={baseline.loss.total:.3f}->{best.loss.total:.3f}。",
+        "Delta correction 已按原 XML 矩阵重新表达，严格满足 "
+        + ("M_new=A×M_old。" if composition == "pre" else "M_new=M_old×Aᵀ。"),
         f"Matrix {best.health.status}: coeff=[{best.health.coefficient_min:.3f},{best.health.coefficient_max:.3f}], cond={best.health.condition_number:.3f}, det={best.health.determinant:.4f}。",
     )
     return OptimizationResult(
-        correction_matrix=best.correction,
+        correction_matrix=result_correction,
         original_matrix=original_matrix,
         optimized_matrix=best.optimized,
         composition=composition,

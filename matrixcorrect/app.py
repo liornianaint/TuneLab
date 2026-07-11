@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tkinter as tk
 import math
 from dataclasses import dataclass, replace
@@ -37,7 +38,8 @@ class MatrixPanel(ttk.Frame):
         header = ttk.Frame(self, style="Card.TFrame")
         header.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 5))
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text=title, style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.title_var = tk.StringVar(value=title)
+        ttk.Label(header, textvariable=self.title_var, style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Button(header, text="复制", command=self.copy, style="Quiet.TButton").grid(row=0, column=1)
         for row in range(3):
             for col in range(3):
@@ -54,6 +56,10 @@ class MatrixPanel(ttk.Frame):
         for row in range(3):
             for col in range(3):
                 self.variables[row][col].set("—" if matrix is None else f"{matrix[row][col]: .7f}")
+
+    def set_title(self, title: str) -> None:
+        self.title = title
+        self.title_var.set(title)
 
     def copy(self) -> None:
         text = "\n".join(" ".join(self.variables[row][col].get() for col in range(3)) for row in range(3))
@@ -166,6 +172,7 @@ class LabPlot(ttk.Frame):
         self.mode = "before"
         self.show_motion = True
         self.selected_zone: Optional[int] = None
+        self.focus_zones: set[int] = {13, 14, 15}
         self._resize_after_id: Optional[str] = None
         self._geometry = (self.LEFT_MARGIN, self.TOP_MARGIN, 420.0)
         self.canvas = tk.Canvas(
@@ -215,10 +222,19 @@ class LabPlot(ttk.Frame):
         b_value = b_max - (y_pos - top) / side * (b_max - b_min)
         return a_value, b_value
 
-    def draw(self, patch_results: list[PatchResult], *, mode: str, show_motion: bool) -> None:
+    def draw(
+        self,
+        patch_results: list[PatchResult],
+        *,
+        mode: str,
+        show_motion: bool,
+        focus_zones: Optional[Iterable[int]] = None,
+    ) -> None:
         self.patch_results = patch_results
         self.mode = mode
         self.show_motion = show_motion
+        if focus_zones is not None:
+            self.focus_zones = set(focus_zones)
         self.redraw()
 
     def redraw(self) -> None:
@@ -294,7 +310,7 @@ class LabPlot(ttk.Frame):
 
         display_patches = sorted(
             self.patch_results,
-            key=lambda patch: (patch.zone == self.selected_zone, patch.zone in (13, 14, 15)),
+            key=lambda patch: (patch.zone == self.selected_zone, patch.zone in self.focus_zones),
         )
         for patch in display_patches:
             actual_lab = patch.before_lab if self.mode == "before" else patch.after_lab
@@ -310,7 +326,7 @@ class LabPlot(ttk.Frame):
             before_visible = before_visible and left + 9 <= before_x <= right - 9 and top + 9 <= before_y <= bottom - 9
             ideal_color = _rgb_hex(patch.ideal_srgb)
             actual_color = _rgb_hex(patch.before_srgb if self.mode == "before" else patch.after_srgb)
-            is_focus = patch.zone in (13, 14, 15)
+            is_focus = patch.zone in self.focus_zones
             is_selected = patch.zone == self.selected_zone
             tag = f"patch-{patch.zone}"
             if self.show_motion:
@@ -477,6 +493,7 @@ class MatrixCorrectApp:
         style.map("Primary.TButton", background=[("active", "#1D4ED8"), ("disabled", "#98A2B3")])
         style.configure("Quiet.TButton", padding=(8, 4))
         style.configure("Kpi.TLabel", background=PANEL, foreground=INK, font=("TkDefaultFont", 12, "bold"))
+        style.configure("KpiCompact.TLabel", background=PANEL, foreground=INK, font=("TkDefaultFont", 10, "bold"))
         style.configure("KpiCaption.TLabel", background=PANEL, foreground=MUTED)
         style.configure("Treeview", rowheight=27, fieldbackground=PANEL, background=PANEL, foreground=INK)
         style.configure("Treeview.Heading", background="#EAECF0", foreground=INK, font=("TkDefaultFont", 9, "bold"))
@@ -491,6 +508,15 @@ class MatrixCorrectApp:
         file_menu.add_command(label="退出", command=self.close)
         self.file_menu = file_menu
         menu.add_cascade(label="文件", menu=file_menu)
+        config_menu = tk.Menu(menu, tearoff=False)
+        config_menu.add_command(label="导入配置...", command=self.import_settings)
+        config_menu.add_command(label="导出配置...", command=self.export_settings)
+        self.config_menu = config_menu
+        menu.add_cascade(label="配置", menu=config_menu)
+        tools_menu = tk.Menu(menu, tearoff=False)
+        tools_menu.add_command(label="Gamma 优化...", command=self.open_gamma_optimizer)
+        self.tools_menu = tools_menu
+        menu.add_cascade(label="工具", menu=tools_menu)
         help_menu = tk.Menu(menu, tearoff=False)
         help_menu.add_command(label="算法边界", command=self.show_assumptions)
         help_menu.add_command(label="关于", command=lambda: messagebox.showinfo("关于", f"{APP_TITLE}\n版本 0.2.0"))
@@ -613,12 +639,17 @@ class MatrixCorrectApp:
             frame.grid(row=0, column=column, sticky="nsew", padx=(0, 6))
             value_var = tk.StringVar(value="—")
             self.kpi_vars.append(value_var)
-            ttk.Label(frame, textvariable=value_var, style="Kpi.TLabel").pack(anchor="w")
+            ttk.Label(
+                frame,
+                textvariable=value_var,
+                style="KpiCompact.TLabel" if column == 1 else "Kpi.TLabel",
+                justify="left",
+            ).pack(anchor="w")
             ttk.Label(frame, text=caption, style="KpiCaption.TLabel").pack(anchor="w")
 
         self.original_panel = MatrixPanel(summary_row, "改前 CC")
         self.original_panel.grid(row=0, column=4, sticky="nsew", padx=(0, 6))
-        self.correction_panel = MatrixPanel(summary_row, "Delta correction")
+        self.correction_panel = MatrixPanel(summary_row, "Delta correction A · M新=A×M旧")
         self.correction_panel.grid(row=0, column=5, sticky="nsew", padx=(0, 6))
         self.optimized_panel = MatrixPanel(summary_row, "改后 CC")
         self.optimized_panel.grid(row=0, column=6, sticky="nsew")
@@ -638,15 +669,10 @@ class MatrixCorrectApp:
         self.patch_table_panel.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
         self.patch_table_panel.grid_propagate(False)
         self.patch_table_panel.columnconfigure(0, weight=1)
-        self.patch_table_panel.rowconfigure(1, weight=1)
-        ttk.Label(
-            self.patch_table_panel,
-            text="Patch 明细 · ΔE00 = CIEDE2000（越小越好）",
-            style="CardTitle.TLabel",
-        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.patch_table_panel.rowconfigure(0, weight=1)
 
         table_frame = ttk.Frame(self.patch_table_panel, style="Card.TFrame")
-        table_frame.grid(row=1, column=0, sticky="nsew")
+        table_frame.grid(row=0, column=0, sticky="nsew")
         table_frame.columnconfigure(0, weight=1)
         table_frame.rowconfigure(0, weight=1)
         columns = ("zone", "name", "category", "weight", "before", "after", "change", "dl", "dc", "dh", "regression", "status", "module")
@@ -681,9 +707,6 @@ class MatrixCorrectApp:
         vertical_scrollbar.grid(row=0, column=1, sticky="ns")
         horizontal_scrollbar.grid(row=1, column=0, sticky="ew")
         self.tree.bind("<<TreeviewSelect>>", self._on_patch_table_selected)
-
-        self.patch_detail_var = tk.StringVar(value="点击图中或表格中的 Patch，可联动查看 Before → After → Ideal 轨迹。")
-        ttk.Label(overview, textvariable=self.patch_detail_var, style="Subtitle.TLabel").pack(fill="x", pady=(6, 0))
 
         stats_top = ttk.Frame(engineering, style="Root.TFrame")
         stats_top.pack(fill="both", expand=True)
@@ -735,7 +758,7 @@ class MatrixCorrectApp:
         )
         for column, caption, width in (
             ("time", "Time", 165), ("dataset", "Dataset", 210), ("strategy", "Strategy", 100),
-            ("mean", "Average ΔE00", 150), ("pass", "Pass<3", 150), ("matrix", "Matrix", 90),
+            ("mean", "Average ΔE00", 150), ("pass", "Pass≤3", 150), ("matrix", "Matrix", 90),
         ):
             self.history_tree.heading(column, text=caption)
             self.history_tree.column(column, width=width, anchor="w")
@@ -804,6 +827,27 @@ class MatrixCorrectApp:
         )
         for variable in variables:
             variable.trace_add("write", self._schedule_settings_save)
+        self.focus_patches_var.trace_add("write", self._on_focus_patches_changed)
+
+    def _on_focus_patches_changed(self, *_args: str) -> None:
+        # Highlight changes are a display concern and should be visible as soon
+        # as the engineer edits the list, even before the next optimization.
+        self._redraw_plots()
+
+    def _current_focus_zones(self) -> tuple[int, ...]:
+        try:
+            values = tuple(
+                dict.fromkeys(
+                    int(value.strip())
+                    for value in self.focus_patches_var.get().replace("，", ",").split(",")
+                    if value.strip()
+                )
+            )
+            if values and all(1 <= value <= 24 for value in values):
+                return values
+        except ValueError:
+            pass
+        return self.settings.optimization.focus_patches
 
     def _schedule_settings_save(self, *_args: str) -> None:
         if self._closing:
@@ -833,6 +877,78 @@ class MatrixCorrectApp:
             return False
         return True
 
+    def _apply_settings_to_controls(self, settings: AppSettings) -> None:
+        config = settings.optimization
+        composition_label = next(
+            (label for label, value in self.COMPOSITION_LABELS.items() if value == settings.composition),
+            next(iter(self.COMPOSITION_LABELS)),
+        )
+        self.settings = settings
+        self.composition_var.set(composition_label)
+        self.strength_var.set(config.max_blend * 100.0)
+        self.strategy_var.set(config.strategy)
+        self.regularization_var.set("Auto" if config.regularization is None else f"{config.regularization:g}")
+        self.saturation_var.set(f"{config.saturation_factor:g}")
+        self.focus_patches_var.set(",".join(str(zone) for zone in config.focus_patches))
+        self.focus_weight_var.set(f"{config.focus_weight:g}")
+        self.coefficient_min_var.set(f"{config.coefficient_min:g}")
+        self.coefficient_max_var.set(f"{config.coefficient_max:g}")
+        self.show_motion_var.set(settings.show_motion)
+        self._redraw_plots()
+
+    def import_settings(self) -> None:
+        path = filedialog.askopenfilename(
+            title="导入 MatrixCorrect 配置",
+            filetypes=[("JSON 配置", "*.json"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("配置根节点必须是 JSON object。")
+            settings = AppSettings.from_dict(payload)
+            settings.optimization.validate()
+            self._apply_settings_to_controls(settings)
+            save_settings(settings)
+        except (OSError, ValueError, TypeError) as exc:
+            messagebox.showerror("配置导入失败", str(exc))
+            return
+        self._set_status(f"已导入配置并同步到内部 settings.json：{path}")
+
+    def export_settings(self) -> None:
+        try:
+            config = self._config_from_controls()
+            settings = AppSettings(
+                optimization=config,
+                composition=self.COMPOSITION_LABELS[self.composition_var.get()],
+                show_motion=self.show_motion_var.get(),
+                last_report_format=self.settings.last_report_format,
+            )
+        except ValueError as exc:
+            messagebox.showerror("配置无效", str(exc))
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出 MatrixCorrect 配置",
+            defaultextension=".json",
+            initialfile="MatrixCorrect_settings.json",
+            filetypes=[("JSON 配置", "*.json")],
+            confirmoverwrite=True,
+        )
+        if not path:
+            return
+        try:
+            save_settings(settings, path)
+        except OSError as exc:
+            messagebox.showerror("配置导出失败", str(exc))
+            return
+        self._set_status(f"已导出标准 JSON 配置：{path}")
+
+    def open_gamma_optimizer(self) -> None:
+        from .gamma_app import open_gamma_window
+
+        open_gamma_window(self.root)
+
     def close(self) -> None:
         self._closing = True
         if self._settings_save_after_id is not None:
@@ -859,13 +975,29 @@ class MatrixCorrectApp:
         self.lab_view.fit(points)
 
     def _reset_lab_view(self) -> None:
-        self.lab_view.reset()
+        if self.result is not None:
+            # Recompute from the complete Ideal/Before/After set so reset also
+            # acts as a reliable one-click auto-fit after data or window changes.
+            self._fit_lab_view(self.result.patch_results)
+        else:
+            self.lab_view.reset()
         self._redraw_plots()
 
     def _redraw_plots(self) -> None:
         patches = self.result.patch_results if self.result is not None else []
-        self.before_plot.draw(patches, mode="before", show_motion=self.show_motion_var.get())
-        self.after_plot.draw(patches, mode="after", show_motion=self.show_motion_var.get())
+        focus_zones = self._current_focus_zones()
+        self.before_plot.draw(
+            patches,
+            mode="before",
+            show_motion=self.show_motion_var.get(),
+            focus_zones=focus_zones,
+        )
+        self.after_plot.draw(
+            patches,
+            mode="after",
+            show_motion=self.show_motion_var.get(),
+            focus_zones=focus_zones,
+        )
 
     def _show_patch_detail(self, zone: int) -> None:
         if self.result is None:
@@ -873,16 +1005,6 @@ class MatrixCorrectApp:
         patch = next((item for item in self.result.patch_results if item.zone == zone), None)
         if patch is None:
             return
-        self.patch_detail_var.set(
-            f"Patch {patch.zone} {patch.name} [{patch.category}] · "
-            f"Lab Before ({patch.before_lab[0]:.2f}, {patch.before_lab[1]:+.2f}, {patch.before_lab[2]:+.2f}) → "
-            f"After ({patch.after_lab[0]:.2f}, {patch.after_lab[1]:+.2f}, {patch.after_lab[2]:+.2f}) → "
-            f"Ideal ({patch.ideal_lab[0]:.2f}, {patch.ideal_lab[1]:+.2f}, {patch.ideal_lab[2]:+.2f}); "
-            f"ΔE00 (CIEDE2000) {patch.delta_e_before:.3f}→{patch.delta_e_after:.3f}, "
-            f"ΔL {patch.delta_l_before:+.2f}→{patch.delta_l_after:+.2f}, "
-            f"ΔC {patch.delta_c_before:+.2f}→{patch.delta_c_after:+.2f}, "
-            f"Δh {patch.delta_h_before:+.1f}°→{patch.delta_h_after:+.1f}°; {patch.regression_status}."
-        )
         self.before_plot.selected_zone = zone
         self.after_plot.selected_zone = zone
         self._redraw_plots()
@@ -973,8 +1095,22 @@ class MatrixCorrectApp:
             return
         try:
             self.dataset = parse_imatest_csv(path)
-        except (OSError, ImatestCSVError) as exc:
-            messagebox.showerror("CSV 读取失败", str(exc))
+        except (OSError, ImatestCSVError) as cc_exc:
+            # Stepchart CSV belongs to the independent Gamma workflow.  Route
+            # it there when recognized, while retaining the exact CC parser and
+            # all A/CWF/D65/TL84 ColorChecker behavior in this window.
+            try:
+                from .gray_imatest import parse_gray_csv
+
+                parse_gray_csv(path)
+            except (OSError, ValueError):
+                messagebox.showerror("CSV 读取失败", str(cc_exc))
+                return
+            from .gamma_app import open_gamma_window
+
+            gamma_app = open_gamma_window(self.root)
+            gamma_app.load_csv(path)
+            self._set_status(f"{Path(path).name} 是 Gray/Stepchart CSV，已转到独立 Gamma 优化窗口。")
             return
         self.csv_label.configure(text=f"CSV：{Path(path).name} · {len(self.dataset.patches)} patches")
         if self.dataset.inferred_cct is not None:
@@ -1115,6 +1251,9 @@ class MatrixCorrectApp:
         self.lab_view.fit([])
         self.before_plot.selected_zone = None
         self.after_plot.selected_zone = None
+        composition = self.COMPOSITION_LABELS.get(self.composition_var.get(), "pre")
+        relation = "M新=A×M旧" if composition == "pre" else "M新=M旧×Aᵀ"
+        self.correction_panel.set_title(f"Delta correction A · {relation}")
         self.correction_panel.set_matrix(None)
         self.optimized_panel.set_matrix(None)
         self.save_xml_button.configure(state="disabled")
@@ -1124,9 +1263,9 @@ class MatrixCorrectApp:
             self.tree.delete(item)
         for item in self.engineering_tree.get_children():
             self.engineering_tree.delete(item)
-        self.before_plot.draw([], mode="before", show_motion=self.show_motion_var.get())
-        self.after_plot.draw([], mode="after", show_motion=self.show_motion_var.get())
-        self.patch_detail_var.set("点击任一 Patch 可查看 Before → After → Ideal 的详细轨迹。")
+        focus_zones = self._current_focus_zones()
+        self.before_plot.draw([], mode="before", show_motion=self.show_motion_var.get(), focus_zones=focus_zones)
+        self.after_plot.draw([], mode="after", show_motion=self.show_motion_var.get(), focus_zones=focus_zones)
         self._set_statistics("尚未运行优化。")
         self.xml_diff = ""
         self.diff_text.configure(state="normal")
@@ -1140,6 +1279,8 @@ class MatrixCorrectApp:
         self.before_plot.selected_zone = None
         self.after_plot.selected_zone = None
         self.original_panel.set_matrix(result.original_matrix)
+        relation = "M新=A×M旧" if result.composition == "pre" else "M新=M旧×Aᵀ"
+        self.correction_panel.set_title(f"Delta correction A · {relation}")
         self.correction_panel.set_matrix(result.correction_matrix)
         self.optimized_panel.set_matrix(result.optimized_matrix)
         self.kpi_vars[0].set(f"{result.mean_before:.2f} → {result.mean_after:.2f}")
@@ -1147,14 +1288,25 @@ class MatrixCorrectApp:
         self.kpi_vars[2].set(f"{result.mean_improvement_percent:+.1f}%")
         self.kpi_vars[3].set(f"{result.improved_count} / {result.regressed_count}")
         self._fit_lab_view(result.patch_results)
-        self.before_plot.draw(result.patch_results, mode="before", show_motion=self.show_motion_var.get())
-        self.after_plot.draw(result.patch_results, mode="after", show_motion=self.show_motion_var.get())
+        focus_zones = self._current_focus_zones()
+        self.before_plot.draw(
+            result.patch_results,
+            mode="before",
+            show_motion=self.show_motion_var.get(),
+            focus_zones=focus_zones,
+        )
+        self.after_plot.draw(
+            result.patch_results,
+            mode="after",
+            show_motion=self.show_motion_var.get(),
+            focus_zones=focus_zones,
+        )
         self.save_xml_button.configure(state="normal")
         for item in self.tree.get_children():
             self.tree.delete(item)
         for patch in result.patch_results:
             tags = ["neutral"] if patch.zone >= 19 else []
-            if patch.zone in {13, 14, 15} or patch.zone in self.settings.optimization.focus_patches:
+            if patch.zone in focus_zones:
                 tags.append("focus")
             tags.append("improved" if patch.delta_e_after <= patch.delta_e_before else "regressed")
             self.tree.insert(
@@ -1168,7 +1320,7 @@ class MatrixCorrectApp:
                     f"{patch.priority_weight:.2f}",
                     f"{patch.delta_e_before:.3f}",
                     f"{patch.delta_e_after:.3f}",
-                    f"{patch.improvement_percent:+.1f}%",
+                    patch.improvement_text(1),
                     f"{patch.delta_l_before:+.2f}→{patch.delta_l_after:+.2f}",
                     f"{patch.delta_c_before:+.2f}→{patch.delta_c_after:+.2f}",
                     f"{patch.delta_h_before:+.1f}→{patch.delta_h_after:+.1f}",
@@ -1198,7 +1350,7 @@ class MatrixCorrectApp:
         ]
         for index, threshold in enumerate(result.pass_rates.thresholds):
             stats_lines.append(
-                f"· ΔE00<{threshold:g}: {result.pass_rates.before_counts[index]}/{result.pass_rates.sample_count} "
+                f"· ΔE00≤{threshold:g}: {result.pass_rates.before_counts[index]}/{result.pass_rates.sample_count} "
                 f"({result.pass_rates.before_rate(index):.1%}) → {result.pass_rates.after_counts[index]}/{result.pass_rates.sample_count} "
                 f"({result.pass_rates.after_rate(index):.1%})"
             )
@@ -1206,7 +1358,7 @@ class MatrixCorrectApp:
         for category in result.category_statistics:
             stats_lines.append(
                 f"· {category.category}: n={category.count}, mean {category.mean_before:.3f}→{category.mean_after:.3f}, "
-                f"improve={category.improved}, regression={category.regressed}, Pass<3 {category.pass_rate_before_3:.1%}→{category.pass_rate_after_3:.1%}"
+                f"improve={category.improved}, regression={category.regressed}, Pass≤3 {category.pass_rate_before_3:.1%}→{category.pass_rate_after_3:.1%}"
             )
         stats_lines.extend(
             [

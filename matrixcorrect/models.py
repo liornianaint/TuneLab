@@ -7,6 +7,24 @@ from typing import Any, Optional
 
 Vector3 = tuple[float, float, float]
 Matrix3 = tuple[Vector3, Vector3, Vector3]
+PATCH_IMPROVEMENT_PERCENT_MIN_BASE = 0.10
+
+
+def safe_improvement_percent(
+    before_delta_e: float,
+    after_delta_e: float,
+    *,
+    minimum_base: float = PATCH_IMPROVEMENT_PERCENT_MIN_BASE,
+) -> Optional[float]:
+    """Return a stable relative improvement, or None for a tiny baseline.
+
+    Relative percentages become misleading when the original ΔE00 is already
+    close to zero.  Callers display the absolute ΔE change in that case.
+    """
+
+    if before_delta_e < minimum_base:
+        return None
+    return (before_delta_e - after_delta_e) / before_delta_e * 100.0
 
 
 PATCH_NAMES_ZH = (
@@ -219,7 +237,7 @@ class PatchResult:
     ideal_lab: Vector3
     delta_e_before: float
     delta_e_after: float
-    improvement_percent: float
+    improvement_percent: Optional[float]
     delta_l_before: float
     delta_l_after: float
     delta_c_before: float
@@ -232,6 +250,17 @@ class PatchResult:
     regression: float
     regression_status: str
     module_hint: str
+
+    @property
+    def delta_e_improvement(self) -> float:
+        return self.delta_e_before - self.delta_e_after
+
+    def improvement_text(self, decimals: int = 1, *, include_absolute: bool = False) -> str:
+        if self.improvement_percent is None:
+            if include_absolute:
+                return f"N/A (absolute ΔE {self.delta_e_improvement:+.3f})"
+            return "N/A"
+        return f"{self.improvement_percent:+.{decimals}f}%"
 
 
 @dataclass(frozen=True)

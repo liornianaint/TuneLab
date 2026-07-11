@@ -54,7 +54,7 @@ def save_analysis_csv(
         for index, threshold in enumerate(result.pass_rates.thresholds):
             writer.writerow(
                 [
-                    f"ΔE<{threshold:g}",
+                    f"ΔE≤{threshold:g}",
                     result.pass_rates.before_counts[index],
                     result.pass_rates.after_counts[index],
                     f"{result.pass_rates.before_rate(index):.2%}",
@@ -64,7 +64,8 @@ def save_analysis_csv(
         writer.writerow([])
         writer.writerow(["改前 CC 矩阵"])
         writer.writerows([[f"{value:.7f}" for value in row] for row in result.original_matrix])
-        writer.writerow(["Delta correction 矩阵"])
+        relation = "M_new = A × M_old" if result.composition == "pre" else "M_new = M_old × Aᵀ"
+        writer.writerow([f"Delta correction 矩阵 A（{relation}）"])
         writer.writerows([[f"{value:.7f}" for value in row] for row in result.correction_matrix])
         writer.writerow(["改后 CC 矩阵"])
         writer.writerows([[f"{value:.7f}" for value in row] for row in result.optimized_matrix])
@@ -75,7 +76,7 @@ def save_analysis_csv(
             writer.writerow([check.name, check.status, check.value, check.limit, check.message])
         writer.writerow([])
         writer.writerow(["Patch 分类统计"])
-        writer.writerow(["Category", "Count", "Mean Before", "Mean After", "Improve", "Regression", "Pass<3 Before", "Pass<3 After"])
+        writer.writerow(["Category", "Count", "Mean Before", "Mean After", "Improve", "Regression", "Pass≤3 Before", "Pass≤3 After"])
         for category in result.category_statistics:
             writer.writerow(
                 [
@@ -107,7 +108,7 @@ def save_analysis_csv(
                     f"{patch.priority_weight:.2f}",
                     f"{patch.delta_e_before:.4f}",
                     f"{patch.delta_e_after:.4f}",
-                    f"{patch.improvement_percent:.2f}%",
+                    patch.improvement_text(2, include_absolute=True),
                     f"{patch.delta_l_before:.4f}",
                     f"{patch.delta_l_after:.4f}",
                     f"{patch.delta_c_before:.4f}",
@@ -153,7 +154,7 @@ def save_analysis_csv(
         if history:
             writer.writerow([])
             writer.writerow(["Matrix History"])
-            writer.writerow(["Timestamp", "Dataset", "Region", "Strategy", "Method", "Mean Before", "Mean After", "Pass<3 Before", "Pass<3 After", "Matrix Status"])
+            writer.writerow(["Timestamp", "Dataset", "Region", "Strategy", "Method", "Mean Before", "Mean After", "Pass≤3 Before", "Pass≤3 After", "Matrix Status"])
             for record in history:
                 writer.writerow(
                     [
@@ -219,7 +220,7 @@ def save_analysis_html(
     path = Path(destination)
     path.parent.mkdir(parents=True, exist_ok=True)
     pass_rows = "".join(
-        f"<tr><td>ΔE&lt;{threshold:g}</td><td>{result.pass_rates.before_counts[index]} ({result.pass_rates.before_rate(index):.1%})</td><td>{result.pass_rates.after_counts[index]} ({result.pass_rates.after_rate(index):.1%})</td></tr>"
+        f"<tr><td>ΔE&le;{threshold:g}</td><td>{result.pass_rates.before_counts[index]} ({result.pass_rates.before_rate(index):.1%})</td><td>{result.pass_rates.after_counts[index]} ({result.pass_rates.after_rate(index):.1%})</td></tr>"
         for index, threshold in enumerate(result.pass_rates.thresholds)
     )
     engineering_rows = "".join(
@@ -231,7 +232,7 @@ def save_analysis_html(
         for item in result.category_statistics
     )
     patch_rows = "".join(
-        f"<tr class='{patch.regression_status.lower()}'><td>{patch.zone}</td><td>{html.escape(patch.name)}</td><td>{html.escape(patch.category)}</td><td>{patch.priority_weight:.2f}</td><td>{patch.delta_e_before:.3f}</td><td>{patch.delta_e_after:.3f}</td><td>{patch.improvement_percent:+.1f}%</td><td>{patch.delta_l_before:+.2f} → {patch.delta_l_after:+.2f}</td><td>{patch.delta_c_before:+.2f} → {patch.delta_c_after:+.2f}</td><td>{patch.delta_h_before:+.1f} → {patch.delta_h_after:+.1f}</td><td>{patch.regression:.3f}</td><td>{patch.regression_status}</td><td>{html.escape(patch.module_hint)}</td></tr>"
+        f"<tr class='{patch.regression_status.lower()}'><td>{patch.zone}</td><td>{html.escape(patch.name)}</td><td>{html.escape(patch.category)}</td><td>{patch.priority_weight:.2f}</td><td>{patch.delta_e_before:.3f}</td><td>{patch.delta_e_after:.3f}</td><td>{html.escape(patch.improvement_text(1, include_absolute=True))}</td><td>{patch.delta_l_before:+.2f} → {patch.delta_l_after:+.2f}</td><td>{patch.delta_c_before:+.2f} → {patch.delta_c_after:+.2f}</td><td>{patch.delta_h_before:+.1f} → {patch.delta_h_after:+.1f}</td><td>{patch.regression:.3f}</td><td>{patch.regression_status}</td><td>{html.escape(patch.module_hint)}</td></tr>"
         for patch in result.patch_results
     )
     diagnosis_rows = "".join(
@@ -249,17 +250,17 @@ def save_analysis_html(
 :root{{--ink:#172033;--muted:#667085;--blue:#2563eb;--panel:#fff;--bg:#f3f5f8;--line:#dfe5ee;--green:#087a55;--red:#b42318;--amber:#a15c00}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}}main{{max-width:1320px;margin:auto;padding:28px}}header{{background:linear-gradient(120deg,#14274d,#2563eb);color:white;padding:28px;border-radius:16px}}h1{{margin:0 0 4px}}h2{{margin-top:28px}}h3{{margin:4px 0 10px}}.meta{{opacity:.9}}.kpis,.matrices,.plots{{display:grid;gap:12px}}.kpis{{grid-template-columns:repeat(5,1fr);margin-top:16px}}.kpi,.matrix,section.card,figure{{background:white;border:1px solid var(--line);border-radius:12px;padding:14px}}.kpi strong{{font-size:22px;display:block}}.matrices{{grid-template-columns:repeat(3,1fr)}}.plots{{grid-template-columns:repeat(2,1fr)}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{border-bottom:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}}th{{background:#eaf0ff}}.scroll{{overflow:auto;border:1px solid var(--line);border-radius:12px}}.pill{{font-weight:700}}.pass{{color:var(--green)}}.warning{{color:var(--amber)}}.fail{{color:var(--red)}}tr.fail td{{background:#fff2f0}}pre{{white-space:pre-wrap;background:#101828;color:#f2f4f7;padding:14px;border-radius:10px;overflow:auto}}figure{{margin:0}}figcaption{{font-weight:700}}svg{{width:100%;max-width:480px;display:block;margin:auto;background:#fbfcff}}svg .grid{{stroke:#d9e2f0;stroke-width:.6}}svg .frame{{fill:none;stroke:#344054}}svg .motion{{stroke:#98a2b3;stroke-width:.8}}svg .ideal{{fill:white;stroke:#172033}}svg .camera{{fill:#2563eb;stroke:white}}svg text{{font-size:7px;fill:#344054}}svg .axis{{font-size:11px;font-weight:700}}ul{{padding-left:20px}}@media(max-width:900px){{.kpis,.matrices,.plots{{grid-template-columns:1fr}}}}@media print{{body{{background:white}}main{{max-width:none;padding:0}}header{{border-radius:0}}}}
 </style></head><body><main>
 <header><h1>MatrixCorrect 工程分析报告</h1><div class="meta">{html.escape(dataset.source_path.name)} · {html.escape(region_label)} · Strategy {html.escape(result.strategy)} · {html.escape(result.search_method)}</div></header>
-<div class="kpis"><div class="kpi"><span>Average ΔE00</span><strong>{result.mean_before:.2f} → {result.mean_after:.2f}</strong></div><div class="kpi"><span>Improve</span><strong>{result.mean_improvement_percent:+.1f}%</strong></div><div class="kpi"><span>Pass ΔE&lt;3</span><strong>{result.pass_rates.before_rate(1):.0%} → {result.pass_rates.after_rate(1):.0%}</strong></div><div class="kpi"><span>Chroma Ratio</span><strong>{result.saturation_ratio_before:.3f} → {result.saturation_ratio_after:.3f}</strong></div><div class="kpi"><span>Matrix</span><strong class="{result.matrix_health.status.lower()}">{result.matrix_health.status}</strong></div></div>
+<div class="kpis"><div class="kpi"><span>Average ΔE00</span><strong>{result.mean_before:.2f} → {result.mean_after:.2f}</strong></div><div class="kpi"><span>Improve</span><strong>{result.mean_improvement_percent:+.1f}%</strong></div><div class="kpi"><span>Pass ΔE&le;3</span><strong>{result.pass_rates.before_rate(1):.0%} → {result.pass_rates.after_rate(1):.0%}</strong></div><div class="kpi"><span>Chroma Ratio</span><strong>{result.saturation_ratio_before:.3f} → {result.saturation_ratio_after:.3f}</strong></div><div class="kpi"><span>Matrix</span><strong class="{result.matrix_health.status.lower()}">{result.matrix_health.status}</strong></div></div>
 <h2>Before / After a*b*</h2><div class="plots">{_lab_plot_html(result, 'before', 'Before：Camera → Ideal')}{_lab_plot_html(result, 'after', 'After：Camera → Ideal')}</div>
-<h2>CC Matrix</h2><div class="matrices">{_matrix_html('Before CC Matrix', result.original_matrix)}{_matrix_html('Delta Correction', result.correction_matrix)}{_matrix_html('After CC Matrix', result.optimized_matrix)}</div>
+<h2>CC Matrix</h2><div class="matrices">{_matrix_html('Before CC Matrix', result.original_matrix)}{_matrix_html('Delta Correction A · ' + ('M_new=A×M_old' if result.composition == 'pre' else 'M_new=M_old×Aᵀ'), result.correction_matrix)}{_matrix_html('After CC Matrix', result.optimized_matrix)}</div>
 <h2>Pass Rate</h2><div class="scroll"><table><thead><tr><th>Threshold</th><th>Before</th><th>After</th></tr></thead><tbody>{pass_rows}</tbody></table></div>
 <h2>Matrix Engineering Checks</h2><div class="scroll"><table><thead><tr><th>Check</th><th>Status</th><th>Value</th><th>Limit</th><th>Meaning</th></tr></thead><tbody>{engineering_rows}</tbody></table></div>
-<h2>Patch 分类统计</h2><div class="scroll"><table><thead><tr><th>Category</th><th>Count</th><th>Mean Before</th><th>Mean After</th><th>Improve</th><th>Regression</th><th>Pass&lt;3 Before</th><th>Pass&lt;3 After</th></tr></thead><tbody>{category_rows}</tbody></table></div>
+<h2>Patch 分类统计</h2><div class="scroll"><table><thead><tr><th>Category</th><th>Count</th><th>Mean Before</th><th>Mean After</th><th>Improve</th><th>Regression</th><th>Pass&le;3 Before</th><th>Pass&le;3 After</th></tr></thead><tbody>{category_rows}</tbody></table></div>
 <h2>Patch Before / After</h2><div class="scroll"><table><thead><tr><th>Zone</th><th>Name</th><th>Category</th><th>Weight</th><th>ΔE Before</th><th>ΔE After</th><th>Improve%</th><th>ΔL</th><th>ΔC</th><th>Δh</th><th>Regression</th><th>Status</th><th>Module</th></tr></thead><tbody>{patch_rows}</tbody></table></div>
 <h2>Module Diagnosis</h2><div class="scroll"><table><thead><tr><th>Module</th><th>Confidence</th><th>Severity</th><th>Root Cause</th><th>Evidence</th><th>Action</th></tr></thead><tbody>{diagnosis_rows}</tbody></table></div>
 <h2>Explainable Optimization</h2><section class="card"><ul>{''.join(f'<li>{html.escape(line)}</li>' for line in result.explainability)}</ul></section>
 <h2>Warnings</h2><section class="card"><ul>{''.join(f'<li>{html.escape(line)}</li>' for line in result.warnings) or '<li>无额外警告。</li>'}</ul></section>
-{f'<h2>Matrix History</h2><div class="scroll"><table><thead><tr><th>Time</th><th>Dataset</th><th>Strategy / Method</th><th>Average ΔE</th><th>Pass&lt;3</th><th>Matrix</th></tr></thead><tbody>{history_rows}</tbody></table></div>' if history else ''}
+{f'<h2>Matrix History</h2><div class="scroll"><table><thead><tr><th>Time</th><th>Dataset</th><th>Strategy / Method</th><th>Average ΔE</th><th>Pass&le;3</th><th>Matrix</th></tr></thead><tbody>{history_rows}</tbody></table></div>' if history else ''}
 {f'<h2>XML Diff</h2><pre>{html.escape(xml_diff)}</pre>' if xml_diff else ''}
 </main></body></html>"""
     path.write_text(document, encoding="utf-8")
@@ -389,7 +390,7 @@ def save_analysis_pdf(
     matrix_rows = [["", "C0", "C1", "C2"], *[["Before R" + str(index), *[f"{value:.7f}" for value in row]] for index, row in enumerate(result.original_matrix)], *[["After R" + str(index), *[f"{value:.7f}" for value in row]] for index, row in enumerate(result.optimized_matrix)]]
     story.append(styled_table(matrix_rows, [35 * mm, 42 * mm, 42 * mm, 42 * mm]))
     pass_rows = [["Threshold", "Before", "After"]] + [
-        [f"ΔE<{threshold:g}", f"{result.pass_rates.before_counts[index]} ({result.pass_rates.before_rate(index):.1%})", f"{result.pass_rates.after_counts[index]} ({result.pass_rates.after_rate(index):.1%})"]
+        [f"ΔE≤{threshold:g}", f"{result.pass_rates.before_counts[index]} ({result.pass_rates.before_rate(index):.1%})", f"{result.pass_rates.after_counts[index]} ({result.pass_rates.after_rate(index):.1%})"]
         for index, threshold in enumerate(result.pass_rates.thresholds)
     ]
     engineering = [["Check", "Status", "Value", "Limit"]] + [[check.name, check.status, check.value, check.limit] for check in result.matrix_health.checks]
@@ -412,7 +413,7 @@ def save_analysis_pdf(
         patch_table.append(
             [
                 patch.zone, paragraph(patch.name, small), patch.category, f"{patch.priority_weight:.2f}",
-                f"{patch.delta_e_before:.3f}", f"{patch.delta_e_after:.3f}", f"{patch.improvement_percent:+.1f}%",
+                f"{patch.delta_e_before:.3f}", f"{patch.delta_e_after:.3f}", patch.improvement_text(1, include_absolute=True),
                 f"{patch.delta_l_after:+.2f}", f"{patch.delta_c_after:+.2f}", f"{patch.delta_h_after:+.1f}",
                 f"{patch.regression:.3f}", patch.regression_status,
             ]
@@ -435,7 +436,7 @@ def save_analysis_pdf(
         story.extend([PageBreak(), Paragraph("XML Diff", h2), Preformatted(xml_diff, code_style)])
     if history:
         story.append(Paragraph("Matrix History", h2))
-        history_table = [["Time", "Dataset", "Strategy", "Method", "Mean ΔE", "Pass<3", "Matrix"]]
+        history_table = [["Time", "Dataset", "Strategy", "Method", "Mean ΔE", "Pass≤3", "Matrix"]]
         history_table.extend(
             [
                 record.timestamp,
@@ -548,16 +549,17 @@ def save_analysis_xlsx(
         row_number = 15 + index
         summary_rows.append(
             [
-                f"ΔE<{threshold:g}",
+                f"ΔE≤{threshold:g}",
                 threshold,
-                _Formula(f"COUNTIF('Patches'!E$2:E$25,\"<\"&B{row_number})/24", result.pass_rates.before_rate(index)),
-                _Formula(f"COUNTIF('Patches'!F$2:F$25,\"<\"&B{row_number})/24", result.pass_rates.after_rate(index)),
+                _Formula(f"COUNTIF('Patches'!E$2:E$25,\"<=\"&B{row_number})/24", result.pass_rates.before_rate(index)),
+                _Formula(f"COUNTIF('Patches'!F$2:F$25,\"<=\"&B{row_number})/24", result.pass_rates.after_rate(index)),
             ]
         )
     summary_rows.extend([[], ["Before Matrix", "C0", "C1", "C2"]])
     summary_rows.extend([[f"R{index}", *row] for index, row in enumerate(result.original_matrix)])
     summary_rows.append([])
-    summary_rows.append(["Delta Correction", "C0", "C1", "C2"])
+    delta_relation = "M_new=A×M_old" if result.composition == "pre" else "M_new=M_old×Aᵀ"
+    summary_rows.append([f"Delta Correction · {delta_relation}", "C0", "C1", "C2"])
     summary_rows.extend([[f"R{index}", *row] for index, row in enumerate(result.correction_matrix)])
     summary_rows.append([])
     summary_rows.append(["After Matrix", "C0", "C1", "C2"])
@@ -583,7 +585,14 @@ def save_analysis_xlsx(
                 patch.priority_weight,
                 patch.delta_e_before,
                 patch.delta_e_after,
-                _Formula(f"IF(E{index}=0,0,(E{index}-F{index})/E{index})", patch.improvement_percent / 100.0),
+                (
+                    f"N/A (absolute ΔE {patch.delta_e_improvement:+.3f})"
+                    if patch.improvement_percent is None
+                    else _Formula(
+                        f"IF(E{index}<0.1,\"N/A\",(E{index}-F{index})/E{index})",
+                        patch.improvement_percent / 100.0,
+                    )
+                ),
                 patch.delta_l_before,
                 patch.delta_l_after,
                 patch.delta_c_before,
@@ -603,7 +612,7 @@ def save_analysis_xlsx(
     for check in result.matrix_health.checks:
         engineering_rows.append([check.name, check.status, check.value, check.limit, check.message])
         engineering_styles.append([0, {"PASS": 6, "WARNING": 7, "FAIL": 8}.get(check.status, 0), 0, 0, 0])
-    engineering_rows.extend([[], ["Category", "Count", "Mean Before", "Mean After", "Improve", "Regression", "Pass<3 Before", "Pass<3 After"]])
+    engineering_rows.extend([[], ["Category", "Count", "Mean Before", "Mean After", "Improve", "Regression", "Pass≤3 Before", "Pass≤3 After"]])
     engineering_styles.extend([[0] * 8, [2] * 8])
     for item in result.category_statistics:
         engineering_rows.append([item.category, item.count, item.mean_before, item.mean_after, item.improved, item.regressed, item.pass_rate_before_3, item.pass_rate_after_3])
@@ -627,7 +636,7 @@ def save_analysis_xlsx(
         ("Diagnostics", _sheet_xml(diagnosis_rows, styles=diagnosis_styles, widths=[22, 14, 14, 48, 72, 60], freeze_rows=1)),
     ]
     if history:
-        rows: list[list[Any]] = [["Timestamp", "Dataset", "Region", "Strategy", "Method", "Mean Before", "Mean After", "Pass<3 Before", "Pass<3 After", "Matrix Status"]]
+        rows: list[list[Any]] = [["Timestamp", "Dataset", "Region", "Strategy", "Method", "Mean Before", "Mean After", "Pass≤3 Before", "Pass≤3 After", "Matrix Status"]]
         styles = [[2] * 10]
         for record in history:
             rows.append([record.timestamp, record.dataset_name, record.region_label, record.strategy, record.search_method, record.mean_before, record.mean_after, record.pass_rate_before_3, record.pass_rate_after_3, record.matrix_status])

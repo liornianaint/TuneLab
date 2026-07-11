@@ -10,10 +10,14 @@ readme = "README.md"
 requires-python = ">=3.9.6"
 license = { text = "Proprietary" }
 authors = [{ name = "MatrixCorrect" }]
-dependencies = ["reportlab>=3.6"]
+dependencies = []
+
+[project.optional-dependencies]
+pdf = ["reportlab>=3.6"]
 
 [project.scripts]
 matrixcorrect = "matrixcorrect.app:main"
+matrixcorrect-gamma = "matrixcorrect.gamma_app:main"
 matrixcorrect-cli = "matrixcorrect.cli:main"
 matrixcorrect-golden = "matrixcorrect.golden:main"
 

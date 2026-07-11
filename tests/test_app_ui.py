@@ -90,6 +90,12 @@ class DesktopUISmokeTests(unittest.TestCase):
         visit(self.root)
         self.assertEqual(button_labels.count("保存 XML"), 1)
         self.assertNotIn("保存参数", button_labels)
+        config_labels = [
+            self.app.config_menu.entrycget(index, "label")
+            for index in range(self.app.config_menu.index("end") + 1)
+        ]
+        self.assertEqual(config_labels, ["导入配置...", "导出配置..."])
+        self.assertEqual(self.app.tools_menu.entrycget(0, "label"), "Gamma 优化...")
 
     def test_save_as_defaults_to_optimized_xml_without_writing(self) -> None:
         document = QualcommCCDocument.load(ROOT / "Source" / "cc13_ipe_v2.xml")
@@ -114,7 +120,7 @@ class DesktopUISmokeTests(unittest.TestCase):
         tabs = [self.app.notebook.tab(tab_id, "text").strip() for tab_id in self.app.notebook.tabs()]
         self.assertEqual(tabs[0], "色差对比")
         self.assertNotIn("色块明细", tabs)
-        self.assertEqual(int(self.app.patch_table_panel.cget("width")), 520)
+        self.assertEqual(int(str(self.app.patch_table_panel.cget("width"))), 520)
         self.assertEqual(
             self.app.tree.cget("columns"),
             ("zone", "name", "category", "weight", "before", "after", "change", "dl", "dc", "dh", "regression", "status", "module"),
@@ -135,6 +141,12 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertIs(self.app.before_plot.view_state, self.app.after_plot.view_state)
         self.app.before_plot._reset_view(SimpleNamespace())
         self.assertEqual(self.app.lab_view.bounds, original_bounds)
+        visible_text = [
+            str(child.cget("text"))
+            for child in self.app.patch_table_panel.winfo_children()
+            if "text" in child.keys()
+        ]
+        self.assertFalse(any("CIEDE2000" in text for text in visible_text))
 
     def test_plot_and_table_patch_selection_are_bidirectionally_linked(self) -> None:
         dataset = parse_imatest_csv(ROOT / "Source" / "D65_normal_summary.csv")
@@ -167,6 +179,11 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertEqual(self.app.tree.selection(), ("patch-14",))
         self.assertEqual(self.app.before_plot.selected_zone, 14)
         self.assertEqual(self.app.after_plot.selected_zone, 14)
+
+        self.app.focus_patches_var.set("1,13,14,15")
+        self.app._redraw_plots()
+        self.assertIn(1, self.app.before_plot.focus_zones)
+        self.assertIn(1, self.app.after_plot.focus_zones)
 
         for _ in range(10):
             self.app.lab_view.zoom(0.5, 0.0, 0.0)

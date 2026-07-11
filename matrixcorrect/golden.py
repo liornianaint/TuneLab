@@ -10,7 +10,13 @@ from typing import Iterable, Optional, Sequence, Union
 
 from .imatest import ImatestCSVError, parse_imatest_csv
 from .models import OptimizationConfig
-from .optimizer import optimize_ccm
+from .optimizer import (
+    NEUTRAL_PATCHES,
+    NEUTRAL_PATCH_REGRESSION_LIMIT,
+    PASS_RATE_COMPARATOR,
+    PASS_THRESHOLDS,
+    optimize_ccm,
+)
 from .qualcomm_xml import QualcommCCDocument, QualcommXMLError
 
 
@@ -57,6 +63,11 @@ class GoldenSuiteResult:
             "xml_count": self.xml_count,
             "passed_count": self.passed_count,
             "case_count": len(self.cases),
+            "pass_rate_rule": {
+                "metric": "CIEDE2000",
+                "operator": PASS_RATE_COMPARATOR,
+                "thresholds": list(PASS_THRESHOLDS),
+            },
             "cases": [asdict(case) for case in self.cases],
         }
 
@@ -119,6 +130,9 @@ def _validate_result(result: object, config: OptimizationConfig) -> tuple[str, .
     failed_patches = [patch.zone for patch in optimization.patch_results if patch.regression_status == "FAIL"]
     if failed_patches:
         reasons.append("明显退化 Patch: " + ",".join(str(zone) for zone in failed_patches))
+    neutral = [patch for patch in optimization.patch_results if patch.zone in NEUTRAL_PATCHES]
+    if any(patch.regression > NEUTRAL_PATCH_REGRESSION_LIMIT + 1e-9 for patch in neutral):
+        reasons.append("Neutral Patch 19-24 明显退化")
     before_saturation_error = abs(optimization.saturation_ratio_before - config.saturation_factor)
     after_saturation_error = abs(optimization.saturation_ratio_after - config.saturation_factor)
     if after_saturation_error > before_saturation_error + 0.008:
@@ -221,7 +235,7 @@ def save_golden_html(destination: Union[str, Path], suite: GoldenSuiteResult) ->
         f"<tr class='{case.status.lower()}'><td>{html.escape(case.case_id)}</td><td>{case.cct}</td><td>{case.mean_before:.3f} → {case.mean_after:.3f}</td><td>{case.improvement_percent:+.1f}%</td><td>{case.pass_before} → {case.pass_after}</td><td>{case.saturation_before:.3f} → {case.saturation_after:.3f}</td><td>{case.matrix_status}</td><td>[{case.coefficient_min:.3f}, {case.coefficient_max:.3f}]</td><td>{html.escape('; '.join(case.reasons) or 'All acceptance checks passed')}</td></tr>"
         for case in suite.cases
     )
-    document = f"""<!doctype html><meta charset='utf-8'><title>MatrixCorrect Golden Regression</title><style>body{{font:14px system-ui;margin:28px;color:#172033}}h1{{margin-bottom:4px}}.pass{{color:#087a55}}.fail{{color:#b42318}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #d8e0eb;padding:8px;text-align:left}}th{{background:#173b74;color:white}}tr.fail td{{background:#fff0ee}}</style><h1>MatrixCorrect Golden Regression</h1><h2 class='{suite.status.lower()}'>{suite.status} · {suite.passed_count}/{len(suite.cases)} cases</h2><p>{suite.csv_count} CSV × {suite.xml_count} XML</p><table><thead><tr><th>Case</th><th>CCT</th><th>Average ΔE</th><th>Improve</th><th>Pass counts</th><th>Saturation</th><th>Matrix</th><th>Range</th><th>Acceptance</th></tr></thead><tbody>{rows}</tbody></table>"""
+    document = f"""<!doctype html><meta charset='utf-8'><title>MatrixCorrect Golden Regression</title><style>body{{font:14px system-ui;margin:28px;color:#172033}}h1{{margin-bottom:4px}}.pass{{color:#087a55}}.fail{{color:#b42318}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #d8e0eb;padding:8px;text-align:left}}th{{background:#173b74;color:white}}tr.fail td{{background:#fff0ee}}</style><h1>MatrixCorrect Golden Regression</h1><h2 class='{suite.status.lower()}'>{suite.status} · {suite.passed_count}/{len(suite.cases)} cases</h2><p>{suite.csv_count} CSV × {suite.xml_count} XML · Pass Rate: CIEDE2000 {PASS_RATE_COMPARATOR} {PASS_THRESHOLDS}</p><table><thead><tr><th>Case</th><th>CCT</th><th>Average ΔE</th><th>Improve</th><th>Pass counts</th><th>Saturation</th><th>Matrix</th><th>Range</th><th>Acceptance</th></tr></thead><tbody>{rows}</tbody></table>"""
     path.write_text(document, encoding="utf-8")
     return path
 
@@ -242,7 +256,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         save_golden_json(args.json, suite)
     if args.html:
         save_golden_html(args.html, suite)
-    print(f"Golden Regression: {suite.status} ({suite.passed_count}/{len(suite.cases)})")
+    print(f"Golden Regression: {suite.status} ({suite.passed_count}/{len(suite.cases)}); Pass Rate uses ΔE00 {PASS_RATE_COMPARATOR} {PASS_THRESHOLDS}")
     for case in suite.cases:
         print(
             f"[{case.status}] {case.case_id}: ΔE {case.mean_before:.3f}->{case.mean_after:.3f} "

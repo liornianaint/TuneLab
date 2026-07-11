@@ -28,7 +28,9 @@ class OptimizerTests(unittest.TestCase):
         self.assertGreater(result.mean_improvement_percent, 5.0)
         self.assertGreaterEqual(result.improved_count, 10)
         for total in row_sums(result.correction_matrix):
-            self.assertAlmostEqual(total, 1.0, places=8)
+            # Delta is re-expressed against the literal 7-decimal XML matrix;
+            # its row sum may carry the source's ppm serialization residual.
+            self.assertAlmostEqual(total, 1.0, places=5)
         for total in row_sums(result.optimized_matrix):
             self.assertAlmostEqual(total, 1.0, places=5)
 
