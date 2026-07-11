@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.tmp/
+# Local analysis renders generated from the source PPTX files.
+Source/20210817-CCM色彩矩阵调试分享-韦启宝/
+Source/CC矩阵测试/
+build/
+dist/
+*.spec
+outputs/
+.DS_Store
+Source/
+examples/
