@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import tkinter as tk
-from dataclasses import replace
+import math
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 from .color import lab_to_srgb
 from .history import load_history, record_from_result, save_history
@@ -60,90 +61,225 @@ class MatrixPanel(ttk.Frame):
         self.clipboard_append(text)
 
 
+def calculate_lab_bounds(
+    points: Iterable[tuple[float, float]],
+    *,
+    minimum_span: float = 60.0,
+) -> tuple[float, float, float, float]:
+    """Return padded, square a*b* bounds that contain every supplied point."""
+
+    values = list(points)
+    if not values:
+        half_span = minimum_span / 2.0
+        return (-half_span, half_span, -half_span, half_span)
+    a_values = [point[0] for point in values]
+    b_values = [point[1] for point in values]
+    a_low, a_high = min(a_values), max(a_values)
+    b_low, b_high = min(b_values), max(b_values)
+    raw_span = max(a_high - a_low, b_high - b_low)
+    # The fixed unit margin protects Patch symbols, number labels and arrowheads
+    # even when all samples are tightly grouped.  The percentage margin keeps
+    # wide-gamut datasets comfortable without imposing an arbitrary [-100,100]
+    # crop.
+    span = max(minimum_span, raw_span * 1.30, raw_span + 16.0)
+    a_center = (a_low + a_high) / 2.0
+    b_center = (b_low + b_high) / 2.0
+    half_span = span / 2.0
+    return (
+        a_center - half_span,
+        a_center + half_span,
+        b_center - half_span,
+        b_center + half_span,
+    )
+
+
+@dataclass
+class LabViewState:
+    auto_bounds: tuple[float, float, float, float] = (-30.0, 30.0, -30.0, 30.0)
+    bounds: tuple[float, float, float, float] = (-30.0, 30.0, -30.0, 30.0)
+
+    def fit(self, points: Iterable[tuple[float, float]]) -> None:
+        self.auto_bounds = calculate_lab_bounds(points)
+        self.bounds = self.auto_bounds
+
+    def reset(self) -> None:
+        self.bounds = self.auto_bounds
+
+    def zoom(self, factor: float, anchor_a: float, anchor_b: float) -> None:
+        a_min, a_max, b_min, b_max = self.bounds
+        old_span = a_max - a_min
+        new_span = max(8.0, min(old_span * factor, 800.0))
+        ratio_a = (anchor_a - a_min) / old_span
+        ratio_b = (anchor_b - b_min) / old_span
+        new_a_min = anchor_a - ratio_a * new_span
+        new_b_min = anchor_b - ratio_b * new_span
+        self.bounds = (new_a_min, new_a_min + new_span, new_b_min, new_b_min + new_span)
+
+    def pan_to(self, a_center: float, b_center: float) -> None:
+        a_min, a_max, b_min, b_max = self.bounds
+        half_span = (a_max - a_min) / 2.0
+        self.bounds = (
+            a_center - half_span,
+            a_center + half_span,
+            b_center - half_span,
+            b_center + half_span,
+        )
+
+
+def _nice_tick_step(span: float) -> float:
+    target = max(span / 7.0, 1e-9)
+    magnitude = 10.0 ** math.floor(math.log10(target))
+    normalized = target / magnitude
+    if normalized <= 1.0:
+        multiplier = 1.0
+    elif normalized <= 2.0:
+        multiplier = 2.0
+    elif normalized <= 5.0:
+        multiplier = 5.0
+    else:
+        multiplier = 10.0
+    return multiplier * magnitude
+
+
 class LabPlot(ttk.Frame):
-    A_MIN = -100.0
-    A_MAX = 100.0
-    B_MIN = -100.0
-    B_MAX = 100.0
-    PLOT_WIDTH = 420
-    PLOT_HEIGHT = 420
-    LEFT = 52
-    TOP = 38
+    LEFT_MARGIN = 58
+    RIGHT_MARGIN = 18
+    TOP_MARGIN = 48
+    BOTTOM_MARGIN = 50
 
     def __init__(
         self,
         master: tk.Misc,
         title: str,
-        background: tk.PhotoImage,
+        view_state: LabViewState,
+        view_changed: Callable[[], None],
         patch_callback: Optional[Callable[[int], None]] = None,
     ) -> None:
         super().__init__(master, style="Card.TFrame")
         self.title = title
-        self.background = background
+        self.view_state = view_state
+        self.view_changed = view_changed
         self.patch_callback = patch_callback
+        self.patch_results: list[PatchResult] = []
+        self.mode = "before"
+        self.show_motion = True
+        self._resize_after_id: Optional[str] = None
+        self._pan_start: Optional[tuple[float, float, float, float]] = None
+        self._geometry = (self.LEFT_MARGIN, self.TOP_MARGIN, 420.0)
         self.canvas = tk.Canvas(
             self,
-            width=self.PLOT_WIDTH + self.LEFT + 22,
-            height=self.PLOT_HEIGHT + self.TOP + 48,
+            width=500,
+            height=500,
             background=PANEL,
             highlightthickness=0,
         )
         self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Configure>", self._on_resize)
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind("<Button-4>", lambda event: self._zoom_at(event, 0.84))
+        self.canvas.bind("<Button-5>", lambda event: self._zoom_at(event, 1.0 / 0.84))
+        for button in (1, 2, 3):
+            self.canvas.bind(f"<ButtonPress-{button}>", self._start_pan, add="+")
+            self.canvas.bind(f"<B{button}-Motion>", self._pan, add="+")
+            self.canvas.bind(f"<ButtonRelease-{button}>", self._end_pan, add="+")
         self.draw([], mode="before", show_motion=True)
 
-    def _clamp_a(self, value: float) -> float:
-        return max(self.A_MIN, min(self.A_MAX, value))
-
-    def _clamp_b(self, value: float) -> float:
-        return max(self.B_MIN, min(self.B_MAX, value))
+    def _plot_geometry(self) -> tuple[float, float, float]:
+        width = max(float(self.canvas.winfo_width()), 320.0)
+        height = max(float(self.canvas.winfo_height()), 300.0)
+        available_width = max(80.0, width - self.LEFT_MARGIN - self.RIGHT_MARGIN)
+        available_height = max(80.0, height - self.TOP_MARGIN - self.BOTTOM_MARGIN)
+        side = min(available_width, available_height)
+        left = self.LEFT_MARGIN + max(0.0, (available_width - side) / 2.0)
+        top = self.TOP_MARGIN + max(0.0, (available_height - side) / 2.0)
+        self._geometry = (left, top, side)
+        return self._geometry
 
     def _x(self, a_value: float) -> float:
-        a_value = self._clamp_a(a_value)
-        return self.LEFT + (a_value - self.A_MIN) / (self.A_MAX - self.A_MIN) * self.PLOT_WIDTH
+        left, _top, side = self._geometry
+        a_min, a_max, _b_min, _b_max = self.view_state.bounds
+        return left + (a_value - a_min) / (a_max - a_min) * side
 
     def _y(self, b_value: float) -> float:
-        b_value = self._clamp_b(b_value)
-        return self.TOP + (self.B_MAX - b_value) / (self.B_MAX - self.B_MIN) * self.PLOT_HEIGHT
+        _left, top, side = self._geometry
+        _a_min, _a_max, b_min, b_max = self.view_state.bounds
+        return top + (b_max - b_value) / (b_max - b_min) * side
+
+    def _data_at(self, x_pos: float, y_pos: float) -> tuple[float, float]:
+        left, top, side = self._geometry
+        a_min, a_max, b_min, b_max = self.view_state.bounds
+        a_value = a_min + (x_pos - left) / side * (a_max - a_min)
+        b_value = b_max - (y_pos - top) / side * (b_max - b_min)
+        return a_value, b_value
 
     def draw(self, patch_results: list[PatchResult], *, mode: str, show_motion: bool) -> None:
+        self.patch_results = patch_results
+        self.mode = mode
+        self.show_motion = show_motion
+        self.redraw()
+
+    def redraw(self) -> None:
         canvas = self.canvas
         canvas.delete("all")
-        canvas.create_text(self.LEFT, 15, text=self.title, fill=INK, anchor="w", font=("TkDefaultFont", 12, "bold"))
-        canvas.create_image(self.LEFT, self.TOP, image=self.background, anchor="nw")
-        for value in range(-100, 101, 25):
-            if self.A_MIN <= value <= self.A_MAX:
-                x_pos = self._x(value)
-                canvas.create_line(x_pos, self.TOP, x_pos, self.TOP + self.PLOT_HEIGHT, fill="#FFFFFF", stipple="gray50")
-                canvas.create_text(x_pos, self.TOP + self.PLOT_HEIGHT + 18, text=str(value), fill=MUTED, font=("TkDefaultFont", 8))
-            if self.B_MIN <= value <= self.B_MAX:
-                y_pos = self._y(value)
-                canvas.create_line(self.LEFT, y_pos, self.LEFT + self.PLOT_WIDTH, y_pos, fill="#FFFFFF", stipple="gray50")
-                canvas.create_text(self.LEFT - 10, y_pos, text=str(value), fill=MUTED, anchor="e", font=("TkDefaultFont", 8))
-        canvas.create_rectangle(
-            self.LEFT,
-            self.TOP,
-            self.LEFT + self.PLOT_WIDTH,
-            self.TOP + self.PLOT_HEIGHT,
-            outline="#101828",
-            width=1,
-        )
-        canvas.create_text(self.LEFT + self.PLOT_WIDTH / 2, self.TOP + self.PLOT_HEIGHT + 37, text="a*", fill=INK)
+        left, top, side = self._plot_geometry()
+        right, bottom = left + side, top + side
+        a_min, a_max, b_min, b_max = self.view_state.bounds
+        canvas.create_text(left, 16, text=self.title, fill=INK, anchor="w", font=("TkDefaultFont", 12, "bold"))
+
+        tile_count = max(12, min(26, round(side / 18.0)))
+        for row in range(tile_count):
+            tile_top = top + row / tile_count * side
+            tile_bottom = top + (row + 1) / tile_count * side + 1
+            b_value = b_max - (row + 0.5) / tile_count * (b_max - b_min)
+            for column in range(tile_count):
+                tile_left = left + column / tile_count * side
+                tile_right = left + (column + 1) / tile_count * side + 1
+                a_value = a_min + (column + 0.5) / tile_count * (a_max - a_min)
+                canvas.create_rectangle(
+                    tile_left,
+                    tile_top,
+                    tile_right,
+                    tile_bottom,
+                    fill=_rgb_hex(lab_to_srgb((70.0, a_value, b_value))),
+                    outline="",
+                    tags=("plot-background",),
+                )
+
+        tick_step = _nice_tick_step(a_max - a_min)
+        first_a = math.ceil(a_min / tick_step) * tick_step
+        value = first_a
+        while value <= a_max + tick_step * 1e-6:
+            x_pos = self._x(value)
+            canvas.create_line(x_pos, top, x_pos, bottom, fill="#FFFFFF", stipple="gray50")
+            canvas.create_text(x_pos, bottom + 17, text=_format_tick(value, tick_step), fill=MUTED, font=("TkDefaultFont", 8))
+            value += tick_step
+        first_b = math.ceil(b_min / tick_step) * tick_step
+        value = first_b
+        while value <= b_max + tick_step * 1e-6:
+            y_pos = self._y(value)
+            canvas.create_line(left, y_pos, right, y_pos, fill="#FFFFFF", stipple="gray50")
+            canvas.create_text(left - 9, y_pos, text=_format_tick(value, tick_step), fill=MUTED, anchor="e", font=("TkDefaultFont", 8))
+            value += tick_step
+        canvas.create_rectangle(left, top, right, bottom, outline="#101828", width=1)
+        canvas.create_text(left + side / 2.0, bottom + 37, text="a*", fill=INK)
         # macOS system Python 3.9 can ship Tk 8.5, whose Canvas text item does
         # not support the newer -angle option.
-        canvas.create_text(17, self.TOP + self.PLOT_HEIGHT / 2, text="b*", fill=INK)
-        canvas.create_rectangle(self.LEFT + 9, self.TOP + 10, self.LEFT + 18, self.TOP + 19, fill="#FFFFFF", outline="#172033")
-        canvas.create_text(self.LEFT + 25, self.TOP + 15, text="Ideal", fill=INK, anchor="w", font=("TkDefaultFont", 8))
-        canvas.create_oval(self.LEFT + 75, self.TOP + 10, self.LEFT + 87, self.TOP + 22, fill="#FFFFFF", outline="#172033")
-        canvas.create_text(self.LEFT + 94, self.TOP + 16, text="Camera", fill=INK, anchor="w", font=("TkDefaultFont", 8))
-        for patch in patch_results:
-            actual_lab = patch.before_lab if mode == "before" else patch.after_lab
+        canvas.create_text(max(14.0, left - 42.0), top + side / 2.0, text="b*", fill=INK)
+        legend_y = top + 14
+        canvas.create_rectangle(left + 9, legend_y - 4, left + 18, legend_y + 5, fill="#FFFFFF", outline="#172033")
+        canvas.create_text(left + 25, legend_y, text="Ideal", fill=INK, anchor="w", font=("TkDefaultFont", 8))
+        canvas.create_oval(left + 75, legend_y - 5, left + 87, legend_y + 7, fill="#FFFFFF", outline="#172033")
+        canvas.create_text(left + 94, legend_y + 1, text="Camera", fill=INK, anchor="w", font=("TkDefaultFont", 8))
+
+        for patch in self.patch_results:
+            actual_lab = patch.before_lab if self.mode == "before" else patch.after_lab
             ideal_lab = patch.ideal_lab
             actual_x, actual_y = self._x(actual_lab[1]), self._y(actual_lab[2])
             ideal_x, ideal_y = self._x(ideal_lab[1]), self._y(ideal_lab[2])
             ideal_color = _rgb_hex(patch.ideal_srgb)
-            actual_color = _rgb_hex(patch.before_srgb if mode == "before" else patch.after_srgb)
-            if show_motion:
-                if mode == "after":
+            actual_color = _rgb_hex(patch.before_srgb if self.mode == "before" else patch.after_srgb)
+            if self.show_motion:
+                if self.mode == "after":
                     before_x, before_y = self._x(patch.before_lab[1]), self._y(patch.before_lab[2])
                     canvas.create_line(
                         before_x, before_y, actual_x, actual_y,
@@ -160,13 +296,86 @@ class LabPlot(ttk.Frame):
                 fill=actual_color, outline="#172033", width=2 if patch.zone in (13, 14, 15) else 1,
                 tags=(tag,),
             )
-            label_x = min(self.LEFT + self.PLOT_WIDTH - 14, max(self.LEFT + 4, actual_x + 8))
-            label_y = min(self.TOP + self.PLOT_HEIGHT - 5, max(self.TOP + 9, actual_y + 7))
-            canvas.create_text(label_x, label_y, text=str(patch.zone), fill="#344054", anchor="w", font=("TkDefaultFont", 8), tags=(tag,))
+            if actual_x > right - 28:
+                label_x, label_anchor = actual_x - 8, "e"
+            else:
+                label_x, label_anchor = actual_x + 8, "w"
+            label_y = actual_y - 8 if actual_y > bottom - 16 else actual_y + 7
+            label_x = min(right - 3, max(left + 3, label_x))
+            label_y = min(bottom - 6, max(top + 8, label_y))
+            canvas.create_text(
+                label_x,
+                label_y,
+                text=str(patch.zone),
+                fill="#344054",
+                anchor=label_anchor,
+                font=("TkDefaultFont", 8),
+                tags=(tag,),
+            )
             if self.patch_callback is not None:
                 canvas.tag_bind(tag, "<Button-1>", lambda _event, zone=patch.zone: self.patch_callback(zone))
                 canvas.tag_bind(tag, "<Enter>", lambda _event: canvas.configure(cursor="hand2"))
                 canvas.tag_bind(tag, "<Leave>", lambda _event: canvas.configure(cursor=""))
+
+    def _on_resize(self, _event: tk.Event) -> None:
+        if self._resize_after_id is not None:
+            self.after_cancel(self._resize_after_id)
+        self._resize_after_id = self.after(60, self._finish_resize)
+
+    def _finish_resize(self) -> None:
+        self._resize_after_id = None
+        self.redraw()
+
+    def _on_mousewheel(self, event: tk.Event) -> str:
+        delta = getattr(event, "delta", 0)
+        self._zoom_at(event, 0.84 if delta > 0 else 1.0 / 0.84)
+        return "break"
+
+    def _zoom_at(self, event: tk.Event, factor: float) -> str:
+        left, top, side = self._geometry
+        x_pos = min(left + side, max(left, float(event.x)))
+        y_pos = min(top + side, max(top, float(event.y)))
+        anchor_a, anchor_b = self._data_at(x_pos, y_pos)
+        self.view_state.zoom(factor, anchor_a, anchor_b)
+        self.view_changed()
+        return "break"
+
+    def _start_pan(self, event: tk.Event) -> Optional[str]:
+        current = self.canvas.find_withtag("current")
+        if current:
+            tags = self.canvas.gettags(current[0])
+            if any(tag.startswith("patch-") for tag in tags):
+                return None
+        a_min, a_max, b_min, b_max = self.view_state.bounds
+        self._pan_start = (
+            float(event.x),
+            float(event.y),
+            (a_min + a_max) / 2.0,
+            (b_min + b_max) / 2.0,
+        )
+        self.canvas.configure(cursor="fleur")
+        return "break"
+
+    def _pan(self, event: tk.Event) -> Optional[str]:
+        if self._pan_start is None:
+            return None
+        start_x, start_y, start_a_center, start_b_center = self._pan_start
+        _left, _top, side = self._geometry
+        span = self.view_state.bounds[1] - self.view_state.bounds[0]
+        units_per_pixel = span / max(side, 1.0)
+        self.view_state.pan_to(
+            start_a_center - (float(event.x) - start_x) * units_per_pixel,
+            start_b_center + (float(event.y) - start_y) * units_per_pixel,
+        )
+        self.view_changed()
+        return "break"
+
+    def _end_pan(self, _event: tk.Event) -> Optional[str]:
+        if self._pan_start is None:
+            return None
+        self._pan_start = None
+        self.canvas.configure(cursor="")
+        return "break"
 
 
 def _rgb_hex(rgb: tuple[float, float, float]) -> str:
@@ -174,19 +383,13 @@ def _rgb_hex(rgb: tuple[float, float, float]) -> str:
     return f"#{values[0]:02x}{values[1]:02x}{values[2]:02x}"
 
 
-def _create_lab_background(master: tk.Misc) -> tk.PhotoImage:
-    small_width = LabPlot.PLOT_WIDTH // 2
-    small_height = LabPlot.PLOT_HEIGHT // 2
-    image = tk.PhotoImage(master=master, width=small_width, height=small_height)
-    for y_pos in range(small_height):
-        b_value = LabPlot.B_MAX - y_pos / max(small_height - 1, 1) * (LabPlot.B_MAX - LabPlot.B_MIN)
-        colors: list[str] = []
-        for x_pos in range(small_width):
-            a_value = LabPlot.A_MIN + x_pos / max(small_width - 1, 1) * (LabPlot.A_MAX - LabPlot.A_MIN)
-            rgb = lab_to_srgb((70.0, a_value, b_value))
-            colors.append(_rgb_hex(rgb))
-        image.put("{" + " ".join(colors) + "}", to=(0, y_pos))
-    return image.zoom(2, 2)
+def _format_tick(value: float, step: float) -> str:
+    if abs(value) < step * 1e-6:
+        value = 0.0
+    if step >= 1.0:
+        return f"{value:.0f}"
+    decimals = max(1, int(-math.floor(math.log10(step))))
+    return f"{value:.{decimals}f}"
 
 
 class MatrixCorrectApp:
@@ -205,6 +408,9 @@ class MatrixCorrectApp:
         self.settings = load_settings()
         self.history = load_history()
         self.xml_diff = ""
+        self.lab_view = LabViewState()
+        self._settings_save_after_id: Optional[str] = None
+        self._closing = False
 
         root.title(APP_TITLE)
         root.geometry("1520x980")
@@ -212,8 +418,10 @@ class MatrixCorrectApp:
         root.configure(background=BG)
         self._configure_styles()
         self._build_menu()
-        self.lab_background = _create_lab_background(root)
         self._build_ui()
+        self._install_settings_autosave()
+        root.protocol("WM_DELETE_WINDOW", self.close)
+        root.after_idle(self._persist_settings)
         self._set_status("请先打开 Imatest CSV 和 Qualcomm CC XML。")
 
     def _configure_styles(self) -> None:
@@ -226,6 +434,7 @@ class MatrixCorrectApp:
         style.configure("CardTitle.TLabel", background=PANEL, foreground=INK, font=("TkDefaultFont", 10, "bold"))
         style.configure("Title.TLabel", background=BG, foreground=INK, font=("TkDefaultFont", 20, "bold"))
         style.configure("Subtitle.TLabel", background=BG, foreground=MUTED)
+        style.configure("ActiveRegion.TLabel", background=BG, foreground="#1D4ED8", font=("TkDefaultFont", 9, "bold"))
         style.configure("Status.TLabel", background="#EAF0FF", foreground="#1D4ED8", padding=(10, 7))
         style.configure("Matrix.TLabel", background="#F8FAFC", foreground=INK, padding=(6, 5), font=("TkFixedFont", 10))
         style.configure("Primary.TButton", background=BLUE, foreground="white", padding=(14, 8), borderwidth=0)
@@ -239,14 +448,12 @@ class MatrixCorrectApp:
     def _build_menu(self) -> None:
         menu = tk.Menu(self.root)
         file_menu = tk.Menu(menu, tearoff=False)
-        file_menu.add_command(label="打开 Imatest CSV…", command=self.load_csv)
-        file_menu.add_command(label="打开 Qualcomm CC XML…", command=self.load_xml)
-        file_menu.add_separator()
-        file_menu.add_command(label="保存改后 XML…", command=self.save_xml)
-        file_menu.add_command(label="导出工程报告…", command=self.save_report)
-        file_menu.add_command(label="保存当前参数", command=self.save_parameters)
-        file_menu.add_separator()
-        file_menu.add_command(label="退出", command=self.root.destroy)
+        file_menu.add_command(label="打开 Imatest CSV...", command=self.load_csv)
+        file_menu.add_command(label="打开 Qualcomm CC XML...", command=self.load_xml)
+        file_menu.add_command(label="保存 XML...", command=self.save_xml)
+        file_menu.add_command(label="导出工程报告...", command=self.save_report)
+        file_menu.add_command(label="退出", command=self.close)
+        self.file_menu = file_menu
         menu.add_cascade(label="文件", menu=file_menu)
         help_menu = tk.Menu(menu, tearoff=False)
         help_menu.add_command(label="算法边界", command=self.show_assumptions)
@@ -273,7 +480,7 @@ class MatrixCorrectApp:
         ttk.Button(controls, text="自动匹配", command=self.auto_match_region, style="Quiet.TButton").grid(row=1, column=3, sticky="w", padx=(0, 14))
         ttk.Label(controls, text="CCT region / 完整触发路径", style="Card.TLabel").grid(row=0, column=4, columnspan=2, sticky="w")
         self.region_var = tk.StringVar()
-        self.region_combo = ttk.Combobox(controls, textvariable=self.region_var, state="readonly", width=72)
+        self.region_combo = ttk.Combobox(controls, textvariable=self.region_var, state="readonly", width=58)
         self.region_combo.grid(row=1, column=4, columnspan=2, sticky="ew", padx=(0, 14))
         self.region_combo.bind("<<ComboboxSelected>>", self._on_region_selected)
         ttk.Label(controls, text="组合约定", style="Card.TLabel").grid(row=0, column=6, sticky="w")
@@ -287,13 +494,15 @@ class MatrixCorrectApp:
             textvariable=self.composition_var,
             values=list(self.COMPOSITION_LABELS),
             state="readonly",
-            width=31,
+            width=27,
         ).grid(row=1, column=6, sticky="w", padx=(0, 14))
         ttk.Label(controls, text="最大强度", style="Card.TLabel").grid(row=0, column=7, sticky="w")
         self.strength_var = tk.DoubleVar(value=self.settings.optimization.max_blend * 100.0)
-        ttk.Scale(controls, from_=20, to=100, variable=self.strength_var, orient="horizontal", length=120).grid(row=1, column=7, sticky="w", padx=(0, 14))
+        ttk.Scale(controls, from_=20, to=100, variable=self.strength_var, orient="horizontal", length=100).grid(row=1, column=7, sticky="w", padx=(0, 14))
         self.optimize_button = ttk.Button(controls, text="3  自动优化", command=self.run_optimization, style="Primary.TButton")
         self.optimize_button.grid(row=0, column=8, rowspan=2, sticky="ns")
+        self.save_xml_button = ttk.Button(controls, text="保存 XML", command=self.save_xml, state="disabled")
+        self.save_xml_button.grid(row=0, column=9, rowspan=2, sticky="ns", padx=(8, 0))
 
         parameters = ttk.Frame(outer, padding=(14, 10), style="Card.TFrame")
         parameters.pack(fill="x", pady=(0, 10))
@@ -328,9 +537,10 @@ class MatrixCorrectApp:
         ttk.Label(bounds, text=" / ", style="Card.TLabel").pack(side="left")
         ttk.Entry(bounds, textvariable=self.coefficient_max_var, width=7).pack(side="left")
         self.show_motion_var = tk.BooleanVar(value=self.settings.show_motion)
-        ttk.Checkbutton(parameters, text="Show Motion", variable=self.show_motion_var, command=self._redraw_plots).grid(row=1, column=6, sticky="w", padx=(0, 12))
-        ttk.Button(parameters, text="保存参数", command=self.save_parameters, style="Quiet.TButton").grid(row=1, column=7, sticky="e")
-        parameters.columnconfigure(7, weight=1)
+        ttk.Checkbutton(parameters, text="Show Motion", variable=self.show_motion_var, command=self._on_show_motion_changed).grid(row=1, column=6, sticky="w", padx=(0, 12))
+        ttk.Button(parameters, text="恢复 a*b* 视图", command=self._reset_lab_view, style="Quiet.TButton").grid(row=1, column=7, sticky="w", padx=(0, 12))
+        ttk.Label(parameters, text="参数自动保存 · 图中滚轮缩放 / 拖动平移", style="Card.TLabel").grid(row=1, column=8, sticky="e")
+        parameters.columnconfigure(8, weight=1)
 
         info = ttk.Frame(outer, style="Root.TFrame")
         info.pack(fill="x", pady=(0, 10))
@@ -338,6 +548,8 @@ class MatrixCorrectApp:
         self.csv_label.pack(side="left")
         self.xml_label = ttk.Label(info, text="XML：未加载", style="Subtitle.TLabel")
         self.xml_label.pack(side="left", padx=(22, 0))
+        self.active_region_var = tk.StringVar(value="当前 Region：未选择")
+        ttk.Label(info, textvariable=self.active_region_var, style="ActiveRegion.TLabel").pack(side="right", padx=(18, 0))
         self.status_var = tk.StringVar()
         ttk.Label(outer, textvariable=self.status_var, style="Status.TLabel").pack(fill="x", pady=(0, 10))
 
@@ -357,7 +569,7 @@ class MatrixCorrectApp:
         kpis = ttk.Frame(overview, style="Root.TFrame")
         kpis.pack(fill="x", pady=(0, 8))
         self.kpi_vars: list[tk.StringVar] = []
-        for caption in ("平均 ΔE00（1-18）", "最大 ΔE00（1-18）", "平均改善", "改善 / 回退"):
+        for caption in ("平均色差 ΔE00（CIEDE2000，1-18）", "最大色差 ΔE00（CIEDE2000，1-18）", "平均改善", "改善 / 回退"):
             frame = ttk.Frame(kpis, padding=(16, 9), style="Card.TFrame")
             frame.pack(side="left", fill="x", expand=True, padx=(0, 8))
             value_var = tk.StringVar(value="—")
@@ -376,17 +588,23 @@ class MatrixCorrectApp:
 
         plot_container = ttk.Frame(overview, style="Root.TFrame")
         plot_container.pack(fill="both", expand=True)
-        self.before_plot = LabPlot(plot_container, "改前：Camera → Ideal", self.lab_background, self._show_patch_detail)
-        self.before_plot.pack(side="left", fill="both", expand=True, padx=(0, 5))
-        self.after_plot = LabPlot(plot_container, "改后模拟：Camera → Ideal", self.lab_background, self._show_patch_detail)
-        self.after_plot.pack(side="left", fill="both", expand=True, padx=(5, 0))
+        plot_container.columnconfigure(0, weight=1, uniform="lab-plots")
+        plot_container.columnconfigure(1, weight=1, uniform="lab-plots")
+        plot_container.rowconfigure(0, weight=1)
+        self.before_plot = LabPlot(plot_container, "改前：Camera → Ideal", self.lab_view, self._redraw_plots, self._show_patch_detail)
+        self.before_plot.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        self.after_plot = LabPlot(plot_container, "改后模拟：Camera → Ideal", self.lab_view, self._redraw_plots, self._show_patch_detail)
+        self.after_plot.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
         self.patch_detail_var = tk.StringVar(value="点击任一 Patch 可查看 Before → After → Ideal 的详细轨迹。")
         ttk.Label(overview, textvariable=self.patch_detail_var, style="Subtitle.TLabel").pack(fill="x", pady=(6, 0))
 
         detail_actions = ttk.Frame(details, style="Root.TFrame")
         detail_actions.pack(fill="x", pady=(0, 8))
-        ttk.Label(detail_actions, text="改善百分比 = (改前 ΔE00 − 改后 ΔE00) / 改前 ΔE00", style="Subtitle.TLabel").pack(side="left")
-        ttk.Button(detail_actions, text="导出工程报告", command=self.save_report).pack(side="right")
+        ttk.Label(
+            detail_actions,
+            text="ΔE00 = CIEDE2000 感知色差（越小越好）；改善百分比 = (改前 ΔE00 − 改后 ΔE00) / 改前 ΔE00",
+            style="Subtitle.TLabel",
+        ).pack(side="left")
         columns = ("zone", "name", "category", "weight", "before", "after", "change", "dl", "dc", "dh", "regression", "status", "module")
         self.tree = ttk.Treeview(details, columns=columns, show="headings")
         headings = {
@@ -394,8 +612,8 @@ class MatrixCorrectApp:
             "name": "色块",
             "category": "分类",
             "weight": "权重",
-            "before": "ΔE00 改前",
-            "after": "ΔE00 改后",
+            "before": "色差 ΔE00 改前",
+            "after": "色差 ΔE00 改后",
             "change": "改善",
             "dl": "ΔL* Before→After",
             "dc": "ΔC* Before→After",
@@ -404,7 +622,7 @@ class MatrixCorrectApp:
             "status": "保护状态",
             "module": "建议模块",
         }
-        widths = {"zone": 50, "name": 95, "category": 80, "weight": 60, "before": 85, "after": 85, "change": 75, "dl": 135, "dc": 135, "dh": 135, "regression": 85, "status": 85, "module": 210}
+        widths = {"zone": 50, "name": 95, "category": 80, "weight": 60, "before": 110, "after": 110, "change": 75, "dl": 135, "dc": 135, "dh": 135, "regression": 85, "status": 85, "module": 210}
         for column in columns:
             self.tree.heading(column, text=headings[column])
             self.tree.column(column, width=widths[column], anchor="center" if column != "module" else "w")
@@ -451,7 +669,6 @@ class MatrixCorrectApp:
         advice_header = ttk.Frame(advice, style="Root.TFrame")
         advice_header.pack(fill="x", pady=(0, 8))
         ttk.Label(advice_header, text="CCM 只能做全局线性修正；工具会把不适合交给 CC 的问题路由到对应模块。", style="Subtitle.TLabel").pack(side="left")
-        ttk.Button(advice_header, text="保存改后 XML", command=self.save_xml, style="Primary.TButton").pack(side="right")
         self.advice_text = tk.Text(advice, wrap="word", background=PANEL, foreground=INK, relief="flat", padx=18, pady=16, font=("TkDefaultFont", 11))
         self.advice_text.pack(fill="both", expand=True)
         self._set_advice("尚未运行优化。")
@@ -468,7 +685,7 @@ class MatrixCorrectApp:
         )
         for column, caption, width in (
             ("time", "Time", 165), ("dataset", "Dataset", 210), ("strategy", "Strategy", 100),
-            ("mean", "Average ΔE", 150), ("pass", "Pass<3", 150), ("matrix", "Matrix", 90),
+            ("mean", "Average ΔE00", 150), ("pass", "Pass<3", 150), ("matrix", "Matrix", 90),
         ):
             self.history_tree.heading(column, text=caption)
             self.history_tree.column(column, width=width, anchor="w")
@@ -522,7 +739,34 @@ class MatrixCorrectApp:
         config.validate()
         return config
 
-    def save_parameters(self) -> None:
+    def _install_settings_autosave(self) -> None:
+        variables: tuple[tk.Variable, ...] = (
+            self.composition_var,
+            self.strength_var,
+            self.strategy_var,
+            self.regularization_var,
+            self.saturation_var,
+            self.focus_patches_var,
+            self.focus_weight_var,
+            self.coefficient_min_var,
+            self.coefficient_max_var,
+            self.show_motion_var,
+        )
+        for variable in variables:
+            variable.trace_add("write", self._schedule_settings_save)
+
+    def _schedule_settings_save(self, *_args: str) -> None:
+        if self._closing:
+            return
+        if self._settings_save_after_id is not None:
+            self.root.after_cancel(self._settings_save_after_id)
+        self._settings_save_after_id = self.root.after(650, self._run_scheduled_settings_save)
+
+    def _run_scheduled_settings_save(self) -> None:
+        self._settings_save_after_id = None
+        self._persist_settings()
+
+    def _persist_settings(self, *, show_error: bool = False) -> bool:
         try:
             config = self._config_from_controls()
             composition = self.COMPOSITION_LABELS[self.composition_var.get()]
@@ -532,11 +776,41 @@ class MatrixCorrectApp:
                 show_motion=self.show_motion_var.get(),
                 last_report_format=self.settings.last_report_format,
             )
-            path = save_settings(self.settings)
+            save_settings(self.settings)
         except (OSError, ValueError) as exc:
-            messagebox.showerror("参数保存失败", str(exc))
-            return
-        self._set_status(f"参数已保存：{path}")
+            if show_error:
+                messagebox.showerror("参数自动保存失败", str(exc))
+            return False
+        return True
+
+    def close(self) -> None:
+        self._closing = True
+        if self._settings_save_after_id is not None:
+            self.root.after_cancel(self._settings_save_after_id)
+            self._settings_save_after_id = None
+        # settings.json is internal state: save once more on every normal exit.
+        self._persist_settings(show_error=False)
+        try:
+            save_history(self.history)
+        except OSError:
+            pass
+        self.root.destroy()
+
+    def _on_show_motion_changed(self) -> None:
+        self._redraw_plots()
+        self._schedule_settings_save()
+
+    def _fit_lab_view(self, patches: list[PatchResult]) -> None:
+        points = [
+            (lab[1], lab[2])
+            for patch in patches
+            for lab in (patch.ideal_lab, patch.before_lab, patch.after_lab)
+        ]
+        self.lab_view.fit(points)
+
+    def _reset_lab_view(self) -> None:
+        self.lab_view.reset()
+        self._redraw_plots()
 
     def _redraw_plots(self) -> None:
         patches = self.result.patch_results if self.result is not None else []
@@ -554,7 +828,7 @@ class MatrixCorrectApp:
             f"Lab Before ({patch.before_lab[0]:.2f}, {patch.before_lab[1]:+.2f}, {patch.before_lab[2]:+.2f}) → "
             f"After ({patch.after_lab[0]:.2f}, {patch.after_lab[1]:+.2f}, {patch.after_lab[2]:+.2f}) → "
             f"Ideal ({patch.ideal_lab[0]:.2f}, {patch.ideal_lab[1]:+.2f}, {patch.ideal_lab[2]:+.2f}); "
-            f"ΔE {patch.delta_e_before:.3f}→{patch.delta_e_after:.3f}, "
+            f"ΔE00 (CIEDE2000) {patch.delta_e_before:.3f}→{patch.delta_e_after:.3f}, "
             f"ΔL {patch.delta_l_before:+.2f}→{patch.delta_l_after:+.2f}, "
             f"ΔC {patch.delta_c_before:+.2f}→{patch.delta_c_after:+.2f}, "
             f"Δh {patch.delta_h_before:+.1f}°→{patch.delta_h_after:+.1f}°; {patch.regression_status}."
@@ -649,6 +923,9 @@ class MatrixCorrectApp:
         except (OSError, QualcommXMLError) as exc:
             messagebox.showerror("XML 读取失败", str(exc))
             return
+        self.selected_region = None
+        self.active_region_var.set("当前 Region：未选择")
+        self.original_panel.set_matrix(None)
         self.xml_label.configure(text=f"XML：{Path(path).name} · {len(self.document.regions)} regions")
         values: list[str] = []
         self.region_display_to_index.clear()
@@ -706,6 +983,9 @@ class MatrixCorrectApp:
                     self.region_var.set(display)
                     break
         self.original_panel.set_matrix(self.selected_region.matrix)
+        cct_range = self.selected_region.cct_range
+        cct_text = f" · CCT {cct_range.start:g}-{cct_range.end:g}K" if cct_range else ""
+        self.active_region_var.set(f"当前 Region：#{self.selected_region.index}{cct_text}")
         self.result = None
         self._clear_result()
 
@@ -725,6 +1005,7 @@ class MatrixCorrectApp:
             show_motion=self.show_motion_var.get(),
             last_report_format=self.settings.last_report_format,
         )
+        self._persist_settings()
         self.optimize_button.configure(state="disabled")
         self._set_status("正在搜索 Regularization、工程边界与 Regression Protection 候选…")
         self.root.update_idletasks()
@@ -760,8 +1041,10 @@ class MatrixCorrectApp:
         self._render_history()
 
     def _clear_result(self) -> None:
+        self.lab_view.fit([])
         self.correction_panel.set_matrix(None)
         self.optimized_panel.set_matrix(None)
+        self.save_xml_button.configure(state="disabled")
         for variable in self.kpi_vars:
             variable.set("—")
         for item in self.tree.get_children():
@@ -788,8 +1071,10 @@ class MatrixCorrectApp:
         self.kpi_vars[1].set(f"{result.max_before:.2f} → {result.max_after:.2f}")
         self.kpi_vars[2].set(f"{result.mean_improvement_percent:+.1f}%")
         self.kpi_vars[3].set(f"{result.improved_count} / {result.regressed_count}")
+        self._fit_lab_view(result.patch_results)
         self.before_plot.draw(result.patch_results, mode="before", show_motion=self.show_motion_var.get())
         self.after_plot.draw(result.patch_results, mode="after", show_motion=self.show_motion_var.get())
+        self.save_xml_button.configure(state="normal")
         for item in self.tree.get_children():
             self.tree.delete(item)
         for patch in result.patch_results:
@@ -832,13 +1117,13 @@ class MatrixCorrectApp:
             f"Matrix Health: {result.matrix_health.status}",
             f"det={result.matrix_health.determinant:.6f} · cond={result.matrix_health.condition_number:.4f} · rank={result.matrix_health.rank}",
             f"Row Sum={', '.join(f'{value:.7f}' for value in result.matrix_health.row_sums)}",
-            f"Fixed Point max ΔE={result.matrix_health.fixed_point_max_delta_e:.5f} · coefficient error={result.matrix_health.fixed_point_max_error:.7f}",
+            f"Fixed Point max ΔE00={result.matrix_health.fixed_point_max_delta_e:.5f} · coefficient error={result.matrix_health.fixed_point_max_error:.7f}",
             "",
             "Pass Rate",
         ]
         for index, threshold in enumerate(result.pass_rates.thresholds):
             stats_lines.append(
-                f"· ΔE<{threshold:g}: {result.pass_rates.before_counts[index]}/{result.pass_rates.sample_count} "
+                f"· ΔE00<{threshold:g}: {result.pass_rates.before_counts[index]}/{result.pass_rates.sample_count} "
                 f"({result.pass_rates.before_rate(index):.1%}) → {result.pass_rates.after_counts[index]}/{result.pass_rates.sample_count} "
                 f"({result.pass_rates.after_rate(index):.1%})"
             )
@@ -853,7 +1138,7 @@ class MatrixCorrectApp:
                 "",
                 "Loss Breakdown (Before → After)",
                 f"· Total {result.loss_before.total:.3f} → {result.loss_after.total:.3f}",
-                f"· ΔE {result.loss_before.delta_e:.3f} → {result.loss_after.delta_e:.3f}; ΔC {result.loss_before.delta_c:.3f} → {result.loss_after.delta_c:.3f}; Δh {result.loss_before.delta_h:.3f} → {result.loss_after.delta_h:.3f}",
+                f"· ΔE00 {result.loss_before.delta_e:.3f} → {result.loss_after.delta_e:.3f}; ΔC {result.loss_before.delta_c:.3f} → {result.loss_after.delta_c:.3f}; Δh {result.loss_before.delta_h:.3f} → {result.loss_after.delta_h:.3f}",
                 f"· Regression {result.loss_before.regression:.3f} → {result.loss_after.regression:.3f}; Saturation {result.loss_before.saturation:.3f} → {result.loss_after.saturation:.3f}",
                 f"· Chroma ratio {result.saturation_ratio_before:.3f} → {result.saturation_ratio_after:.3f}; target={result.saturation_factor:.3f}",
                 f"· Rejected candidates: {result.rejected_candidates}",
@@ -918,10 +1203,12 @@ class MatrixCorrectApp:
             return
         default_name = f"{self.document.source_path.stem}_optimized.xml"
         path = filedialog.asksaveasfilename(
-            title="保存改后 Qualcomm XML",
+            title="保存优化后的 Qualcomm CC XML",
             defaultextension=".xml",
+            initialdir=str(self.document.source_path.parent),
             initialfile=default_name,
-            filetypes=[("XML", "*.xml")],
+            filetypes=[("XML 文件", "*.xml")],
+            confirmoverwrite=True,
         )
         if not path:
             return
@@ -967,6 +1254,7 @@ class MatrixCorrectApp:
         suffix = Path(path).suffix.lower().lstrip(".")
         if suffix in {"csv", "html", "pdf", "xlsx"}:
             self.settings = replace(self.settings, last_report_format=suffix)
+            self._persist_settings()
         self._set_status(f"已导出分析报告：{path}")
 
     def show_assumptions(self) -> None:
