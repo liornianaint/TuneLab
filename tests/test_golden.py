@@ -1,0 +1,26 @@
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+
+from matrixcorrect.golden import discover_golden_inputs, run_golden_suite
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class GoldenRegressionTests(unittest.TestCase):
+    def test_all_uploaded_csv_and_xml_cases_pass(self) -> None:
+        csv_files, xml_files = discover_golden_inputs([ROOT / "Source", ROOT / "source"])
+        self.assertGreaterEqual(len(csv_files), 8)
+        self.assertGreaterEqual(len(xml_files), 1)
+        suite = run_golden_suite([ROOT / "Source", ROOT / "source"])
+        self.assertEqual(suite.status, "PASS", [(case.case_id, case.reasons) for case in suite.cases])
+        self.assertEqual(len(suite.cases), len(csv_files) * len(xml_files))
+        for case in suite.cases:
+            self.assertEqual(case.status, "PASS", case.reasons)
+            self.assertLess(case.mean_after, case.mean_before)
+            self.assertTrue(any(after > before for before, after in zip(case.pass_before, case.pass_after)))
+            self.assertNotEqual(case.matrix_status, "FAIL")
+            self.assertGreaterEqual(case.coefficient_min, -3.000001)
+            self.assertLessEqual(case.coefficient_max, 3.000001)

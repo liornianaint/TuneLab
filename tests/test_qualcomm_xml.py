@@ -54,7 +54,19 @@ class QualcommXMLTests(unittest.TestCase):
                 pattern.sub(r"\1MATRIX\3", updated),
             )
 
+    def test_xml_diff_contains_only_selected_matrix_change(self) -> None:
+        document = QualcommCCDocument.load(SOURCE_XML)
+        region = document.regions[4]
+        matrix = tuple(
+            tuple(value + (0.001 if column == row else -0.0005) for column, value in enumerate(values))
+            for row, values in enumerate(region.matrix)
+        )
+        diff = document.diff_with_matrix(region.index, matrix)
+        self.assertIn("--- cc13_ipe_v2.xml", diff)
+        self.assertIn("+++ cc13_ipe_v2_optimized.xml", diff)
+        self.assertEqual(sum(line.startswith("-") and not line.startswith("---") for line in diff.splitlines()), 1)
+        self.assertEqual(sum(line.startswith("+") and not line.startswith("+++") for line in diff.splitlines()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
-

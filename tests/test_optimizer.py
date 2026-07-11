@@ -6,6 +6,7 @@ from pathlib import Path
 
 from matrixcorrect.color import row_sums
 from matrixcorrect.imatest import parse_imatest_csv
+from matrixcorrect.models import OptimizationConfig
 from matrixcorrect.optimizer import optimize_ccm
 from matrixcorrect.qualcomm_xml import QualcommCCDocument
 from matrixcorrect.report import save_analysis_csv
@@ -35,6 +36,15 @@ class OptimizerTests(unittest.TestCase):
         result = optimize_ccm(self.dataset, self.region.matrix, composition="post_transposed", max_blend=0.6)
         self.assertEqual(result.composition, "post_transposed")
         self.assertLess(result.mean_after, result.mean_before)
+
+    def test_custom_saturation_and_focus_patch_parameters(self) -> None:
+        config = OptimizationConfig(saturation_factor=0.97, focus_patches=(1, 2), focus_weight=5.0)
+        result = optimize_ccm(self.dataset, self.region.matrix, config=config)
+        self.assertEqual(result.saturation_factor, 0.97)
+        priorities = {patch.zone: patch.priority_weight for patch in result.patch_results}
+        self.assertGreater(priorities[1], priorities[13])
+        saturation_diagnosis = next(item for item in result.diagnostics if item.module == "CV/Saturation")
+        self.assertIn("0.970", saturation_diagnosis.root_cause)
 
     def test_report_and_xml_round_trip(self) -> None:
         result = optimize_ccm(self.dataset, self.region.matrix)

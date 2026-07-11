@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Optional
 
 from .imatest import parse_imatest_csv
+from .models import OptimizationConfig
 from .optimizer import optimize_ccm
 from .qualcomm_xml import QualcommCCDocument
-from .report import save_analysis_csv
+from .report import save_analysis_report
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -17,7 +19,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cct", type=float, help="Target CCT in Kelvin; inferred from CSV when omitted")
     parser.add_argument("--region-index", type=int, help="Explicit zero-based CC region index")
     parser.add_argument("--out", required=True, type=Path, help="Destination XML")
-    parser.add_argument("--report", type=Path, help="Destination analysis CSV")
+    parser.add_argument("--report", type=Path, help="Report: .csv, .html, .pdf or .xlsx")
     parser.add_argument(
         "--composition",
         choices=("pre", "post_transposed"),
@@ -26,11 +28,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--regularization", type=float, help="Fixed positive ridge weight; default is automatic search")
     parser.add_argument("--strength", type=float, default=1.0, help="Maximum optimization strength in (0,1]")
+    parser.add_argument("--strategy", choices=("conservative", "balanced", "aggressive"), default="balanced")
+    parser.add_argument("--saturation-factor", type=float, default=1.0, help="Chroma target factor; default 1.0")
+    parser.add_argument("--focus-patches", default="13,14,15", help="Comma-separated protected patch numbers")
+    parser.add_argument("--focus-weight", type=float, default=4.0)
+    parser.add_argument("--coefficient-min", type=float, default=-3.0)
+    parser.add_argument("--coefficient-max", type=float, default=3.0)
     parser.add_argument("--json", action="store_true", help="Print machine-readable summary")
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[list[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     dataset = parse_imatest_csv(args.csv)
     document = QualcommCCDocument.load(args.xml)
@@ -45,20 +53,36 @@ def main(argv: list[str] | None = None) -> int:
         if cct is None:
             raise SystemExit("无法推断 CCT；请提供 --cct 或 --region-index。")
         region, match_mode = document.find_region_for_cct(cct)
+    try:
+        focus_patches = tuple(int(value.strip()) for value in args.focus_patches.split(",") if value.strip())
+    except ValueError as exc:
+        raise SystemExit("--focus-patches 必须是逗号分隔的 1-24 编号。") from exc
+    config = OptimizationConfig(
+        strategy=args.strategy,
+        regularization=args.regularization,
+        max_blend=args.strength,
+        coefficient_min=args.coefficient_min,
+        coefficient_max=args.coefficient_max,
+        saturation_factor=args.saturation_factor,
+        focus_patches=focus_patches,
+        focus_weight=args.focus_weight,
+    )
+    config.validate()
     result = optimize_ccm(
         dataset,
         region.matrix,
         composition=args.composition,
-        regularization=args.regularization,
-        max_blend=args.strength,
+        config=config,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     document.save_with_matrix(args.out, region.index, result.optimized_matrix)
     report_path = args.report or args.out.with_name(f"{args.out.stem}_analysis.csv")
-    save_analysis_csv(report_path, dataset, result, region_label=region.path_label())
+    xml_diff = document.diff_with_matrix(region.index, result.optimized_matrix)
+    save_analysis_report(report_path, dataset, result, region_label=region.path_label(), xml_diff=xml_diff)
     summary = {
         "output_xml": str(args.out),
         "report_csv": str(report_path),
+        "report": str(report_path),
         "region_index": region.index,
         "region": region.path_label(),
         "match_mode": match_mode,
@@ -69,6 +93,12 @@ def main(argv: list[str] | None = None) -> int:
         "regressed_patches": result.regressed_count,
         "regularization": result.regularization,
         "blend": result.blend,
+        "strategy": result.strategy,
+        "search_method": result.search_method,
+        "saturation_factor": result.saturation_factor,
+        "matrix_status": result.matrix_health.status,
+        "pass_rate_before": result.pass_rates.before_counts,
+        "pass_rate_after": result.pass_rates.after_counts,
         "warnings": result.warnings,
     }
     if args.json:

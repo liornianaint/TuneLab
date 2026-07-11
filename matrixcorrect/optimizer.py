@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
+from dataclasses import dataclass, replace
 from statistics import mean
+from typing import Optional
 
 from .color import (
     delta_e_2000,
@@ -12,18 +15,51 @@ from .color import (
     mat_mul,
     mat_vec,
     matrix_blend,
-    row_sums,
     srgb_to_lab,
     srgb_to_linear,
 )
-from .models import ImatestDataset, Matrix3, OptimizationResult, PatchResult, Vector3
+from .diagnostics import build_module_diagnostics
+from .engineering import (
+    condition_number,
+    correction_magnitude,
+    determinant,
+    evaluate_matrix_health,
+    inverse,
+    matrix_distance,
+    project_row_sum_and_bounds,
+)
+from .models import (
+    CategoryStatistics,
+    ImatestDataset,
+    LossBreakdown,
+    Matrix3,
+    MatrixHealth,
+    OptimizationConfig,
+    OptimizationResult,
+    PassRateStatistics,
+    PatchResult,
+    Vector3,
+)
 
 
 class OptimizationError(ValueError):
     pass
 
 
-AUTO_REGULARIZATION = (0.0001, 0.0003, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0)
+AUTO_REGULARIZATION = (0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0)
+PASS_THRESHOLDS = (2.0, 3.0, 5.0, 10.0)
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    correction: Matrix3
+    optimized: Matrix3
+    patch_results: list[PatchResult]
+    health: MatrixHealth
+    loss: LossBreakdown
+    regularization: float
+    blend: float
+    search_method: str
 
 
 def transpose(matrix: Matrix3) -> Matrix3:
@@ -36,7 +72,7 @@ def _solve_linear(system: list[list[float]], right: list[float]) -> list[float]:
     for column in range(size):
         pivot = max(range(column, size), key=lambda row: abs(augmented[row][column]))
         if abs(augmented[pivot][column]) < 1e-12:
-            raise OptimizationError("矩阵拟合方程奇异；请检查 CSV 色块数据或提高正则化。")
+            raise OptimizationError("矩阵拟合方程奇异；请检查 CSV 色块数据或提高 Regularization。")
         augmented[column], augmented[pivot] = augmented[pivot], augmented[column]
         divisor = augmented[column][column]
         augmented[column] = [value / divisor for value in augmented[column]]
@@ -51,32 +87,67 @@ def _solve_linear(system: list[list[float]], right: list[float]) -> list[float]:
     return [augmented[row][-1] for row in range(size)]
 
 
-def _patch_weight(zone: int) -> float:
-    if zone in (1, 2):
-        return 1.35
-    if 13 <= zone <= 18:
-        return 1.15
-    return 1.0
+def _strategy_config(config: OptimizationConfig) -> OptimizationConfig:
+    config.validate()
+    if config.strategy == "conservative":
+        return replace(
+            config,
+            max_blend=min(config.max_blend, 0.55),
+            max_patch_regression=min(config.max_patch_regression, 0.50),
+            good_patch_regression=min(config.good_patch_regression, 0.25),
+            focus_patch_regression=min(config.focus_patch_regression, 0.12),
+            loss_regression=config.loss_regression * 1.5,
+            loss_smoothness=config.loss_smoothness * 1.4,
+        )
+    if config.strategy == "aggressive":
+        return replace(
+            config,
+            max_patch_regression=min(config.max_patch_regression, 0.90),
+            loss_delta_e=config.loss_delta_e * 1.15,
+            loss_smoothness=config.loss_smoothness * 0.75,
+        )
+    return config
 
 
-def _fit_constrained_matrix(dataset: ImatestDataset, regularization: float) -> Matrix3:
+def _priority_weight(zone: int, category: str, config: OptimizationConfig) -> float:
+    weights = {
+        "Skin": config.skin_weight,
+        "Primary": config.primary_weight,
+        "Secondary": config.secondary_weight,
+        "Memory": config.memory_weight,
+        "Chromatic": 1.0,
+        "Neutral": 0.35,
+    }
+    weight = weights.get(category, 1.0)
+    if zone in config.focus_patches:
+        weight *= config.focus_weight
+    return weight
+
+
+def _fit_target(source: Vector3, ideal: Vector3, saturation_factor: float) -> Vector3:
+    luma_weights = (0.2126729, 0.7151522, 0.0721750)
+    source_luma = sum(value * weight for value, weight in zip(source, luma_weights))
+    ideal_luma = sum(value * weight for value, weight in zip(ideal, luma_weights))
+    scale = source_luma / ideal_luma if ideal_luma > 1e-12 else 1.0
+    scaled = tuple(value * scale for value in ideal)
+    neutral = (source_luma, source_luma, source_luma)
+    return tuple(neutral[index] + saturation_factor * (scaled[index] - neutral[index]) for index in range(3))  # type: ignore[return-value]
+
+
+def _fit_constrained_matrix(
+    dataset: ImatestDataset,
+    regularization: float,
+    config: OptimizationConfig,
+) -> Matrix3:
     patches = [patch for patch in dataset.patches if patch.zone <= 18]
     if len(patches) < 9:
         raise OptimizationError("可用于 CC 拟合的彩色色块不足。")
     measured = [srgb_to_linear(patch.measured_srgb) for patch in patches]
-    raw_ideal = [srgb_to_linear(patch.ideal_srgb) for patch in patches]
-    # CC should correct chromaticity after exposure/AWB/Gamma are stable.  Imatest
-    # JPEGs often still carry luminance error that a neutral-preserving CCM cannot
-    # fix.  Match every target's linear luminance to the measured patch so that
-    # brightness error is routed to Gamma/TMC instead of distorting the CCM fit.
-    luma_weights = (0.2126729, 0.7151522, 0.0721750)
-    ideal: list[Vector3] = []
-    for source, target in zip(measured, raw_ideal):
-        source_luma = sum(value * weight for value, weight in zip(source, luma_weights))
-        target_luma = sum(value * weight for value, weight in zip(target, luma_weights))
-        scale_factor = source_luma / target_luma if target_luma > 1e-12 else 1.0
-        ideal.append(tuple(value * scale_factor for value in target))  # type: ignore[arg-type]
-    weights = [_patch_weight(patch.zone) for patch in patches]
+    ideal = [
+        _fit_target(source, srgb_to_linear(patch.ideal_srgb), config.saturation_factor)
+        for source, patch in zip(measured, patches)
+    ]
+    weights = [_priority_weight(patch.zone, patch.category, config) for patch in patches]
     gram = [[0.0] * 3 for _ in range(3)]
     for vector, weight in zip(measured, weights):
         for row in range(3):
@@ -108,160 +179,408 @@ def _fit_constrained_matrix(dataset: ImatestDataset, regularization: float) -> M
 def _predict(patch_rgb: Vector3, correction: Matrix3) -> tuple[Vector3, Vector3, float]:
     corrected_linear = mat_vec(correction, srgb_to_linear(patch_rgb))
     overflow = sum(max(0.0, -value) + max(0.0, value - 1.0) for value in corrected_linear)
-    corrected_srgb = linear_to_srgb(corrected_linear)
-    return corrected_srgb, corrected_linear, overflow
+    return linear_to_srgb(corrected_linear), corrected_linear, overflow
 
 
-def _candidate_score(dataset: ImatestDataset, correction: Matrix3) -> float:
-    errors: list[float] = []
-    weighted_total = 0.0
-    total_weight = 0.0
-    regressions = 0.0
-    overflow = 0.0
-    for patch in dataset.patches:
-        after, _, patch_overflow = _predict(patch.measured_srgb, correction)
-        overflow += patch_overflow
-        before_error = delta_e_2000(srgb_to_lab(patch.measured_srgb), srgb_to_lab(patch.ideal_srgb))
-        after_error = delta_e_2000(srgb_to_lab(after), srgb_to_lab(patch.ideal_srgb))
-        if patch.zone <= 18:
-            weight = _patch_weight(patch.zone)
-            errors.append(after_error)
-            weighted_total += weight * after_error
-            total_weight += weight
-            regressions += max(0.0, after_error - before_error - 0.5)
-    if not errors:
-        return float("inf")
-    sorted_errors = sorted(errors)
-    p90 = sorted_errors[min(len(sorted_errors) - 1, math.ceil(len(sorted_errors) * 0.9) - 1)]
-    magnitude = sum((correction[row][col] - (1.0 if row == col else 0.0)) ** 2 for row in range(3) for col in range(3))
-    return (
-        weighted_total / total_weight
-        + 0.12 * p90
-        + 0.20 * regressions / len(errors)
-        + 6.0 * overflow / max(len(dataset.patches), 1)
-        + 0.025 * magnitude
-    )
-
-
-def _choose_correction(
-    dataset: ImatestDataset,
-    regularization: float | None,
-    max_blend: float,
-) -> tuple[Matrix3, float, float]:
-    if not (0.05 <= max_blend <= 1.0):
-        raise OptimizationError("最大优化强度必须在 0.05 到 1.0 之间。")
-    regularizations = (regularization,) if regularization is not None else AUTO_REGULARIZATION
-    blend_steps = sorted({max_blend * step / 10.0 for step in range(1, 11)} | {max_blend})
-    best_matrix = identity_matrix()
-    best_regularization = regularizations[0]
-    best_blend = 0.0
-    best_score = _candidate_score(dataset, best_matrix)
-    for candidate_regularization in regularizations:
-        if candidate_regularization is None or candidate_regularization <= 0:
-            raise OptimizationError("正则化参数必须大于 0。")
-        raw_matrix = _fit_constrained_matrix(dataset, candidate_regularization)
-        for blend in blend_steps:
-            candidate = matrix_blend(raw_matrix, blend)
-            if any(not (-15.99 <= value <= 15.99) for row in candidate for value in row):
-                continue
-            score = _candidate_score(dataset, candidate)
-            if score < best_score:
-                best_score = score
-                best_matrix = candidate
-                best_regularization = candidate_regularization
-                best_blend = blend
-    best_matrix = _refine_delta_e(dataset, best_matrix, best_score, max_blend)
-    return best_matrix, float(best_regularization), best_blend
-
-
-def _refine_delta_e(
-    dataset: ImatestDataset,
-    initial: Matrix3,
-    initial_score: float,
-    max_blend: float,
-) -> Matrix3:
-    """Coordinate-refine the six row-sum-preserving degrees of freedom in ΔE00."""
-
-    best = initial
-    best_score = initial_score
-    identity = identity_matrix()
-    max_element_delta = 0.60 * max_blend + 0.01
-    for base_step in (0.030, 0.015, 0.008, 0.004, 0.002, 0.001):
-        step = base_step * max_blend
-        for _pass in range(40):
-            changed = False
-            for row in range(3):
-                for col in range(2):
-                    for direction in (-1.0, 1.0):
-                        candidate_rows = [list(values) for values in best]
-                        candidate_rows[row][col] += direction * step
-                        candidate_rows[row][2] -= direction * step
-                        candidate: Matrix3 = tuple(tuple(values) for values in candidate_rows)  # type: ignore[assignment]
-                        if any(
-                            abs(candidate[r][c] - identity[r][c]) > max_element_delta
-                            for r in range(3)
-                            for c in range(3)
-                        ):
-                            continue
-                        score = _candidate_score(dataset, candidate)
-                        if score + 1e-10 < best_score:
-                            best = candidate
-                            best_score = score
-                            changed = True
-            if not changed:
-                break
-    return best
-
-
-def _module_hint(zone: int, measured_lab: Vector3, ideal_lab: Vector3) -> str:
-    delta_l = measured_lab[0] - ideal_lab[0]
-    delta_c = lab_chroma(measured_lab) - lab_chroma(ideal_lab)
-    delta_h = hue_difference_degrees(measured_lab, ideal_lab)
+def _module_hint(zone: int, before_lab: Vector3, ideal_lab: Vector3) -> str:
+    delta_l = before_lab[0] - ideal_lab[0]
+    delta_c = lab_chroma(before_lab) - lab_chroma(ideal_lab)
+    delta_h = hue_difference_degrees(before_lab, ideal_lab)
     if zone >= 19:
-        if lab_chroma(measured_lab) > 3.0:
-            return "AWB/CC：中性色偏"
-        return "Gamma/曝光：中性亮度"
+        return "AWB/CC" if lab_chroma(before_lab) > 3.0 else "Gamma/TMC"
     if zone in (1, 2) and abs(delta_h) >= 4.0:
-        return "SCE/2D LUT：肤色局部"
+        return "SCE/2D LUT"
     if abs(delta_l) > max(5.0, abs(delta_c) * 1.5):
-        return "Gamma/TMC/曝光：亮度主导"
+        return "Gamma/TMC"
     if abs(delta_c) >= 4.0 and abs(delta_h) < 5.0:
-        return "CV/饱和度：Chroma 主导"
+        return "CV/Saturation"
     if abs(delta_h) >= 6.0:
-        return "CC；若仅单色异常则 2D LUT/SCE"
-    return "CC：全局通道串扰"
+        return "CC -> 2D LUT if localized"
+    return "CC"
 
 
-def _build_patch_results(dataset: ImatestDataset, correction: Matrix3) -> list[PatchResult]:
+def _build_patch_results(
+    dataset: ImatestDataset,
+    correction: Matrix3,
+    config: OptimizationConfig,
+) -> list[PatchResult]:
     results: list[PatchResult] = []
     for patch in dataset.patches:
         after_srgb, _, _ = _predict(patch.measured_srgb, correction)
         before_lab = srgb_to_lab(patch.measured_srgb)
         after_lab = srgb_to_lab(after_srgb)
         ideal_lab = srgb_to_lab(patch.ideal_srgb)
-        before_error = delta_e_2000(before_lab, ideal_lab)
-        after_error = delta_e_2000(after_lab, ideal_lab)
-        improvement = 0.0 if before_error <= 1e-12 else (before_error - after_error) / before_error * 100.0
+        before_e = delta_e_2000(before_lab, ideal_lab)
+        after_e = delta_e_2000(after_lab, ideal_lab)
+        before_c = lab_chroma(before_lab)
+        after_c = lab_chroma(after_lab)
+        ideal_c = lab_chroma(ideal_lab)
+        before_h = 0.0 if patch.zone >= 19 else hue_difference_degrees(before_lab, ideal_lab)
+        after_h = 0.0 if patch.zone >= 19 else hue_difference_degrees(after_lab, ideal_lab)
+        regression = max(0.0, after_e - before_e)
+        if patch.zone in config.focus_patches:
+            regression_limit = config.focus_patch_regression
+        elif before_e < 3.0:
+            regression_limit = config.good_patch_regression
+        else:
+            regression_limit = config.max_patch_regression
+        regression_status = "PASS" if regression <= config.regression_epsilon else "WARNING" if regression <= regression_limit else "FAIL"
         results.append(
             PatchResult(
                 zone=patch.zone,
                 name=patch.display_name(),
+                category=patch.category,
+                priority_weight=_priority_weight(patch.zone, patch.category, config),
                 before_srgb=patch.measured_srgb,
                 after_srgb=after_srgb,
                 ideal_srgb=patch.ideal_srgb,
                 before_lab=before_lab,
                 after_lab=after_lab,
                 ideal_lab=ideal_lab,
-                delta_e_before=before_error,
-                delta_e_after=after_error,
-                improvement_percent=improvement,
+                delta_e_before=before_e,
+                delta_e_after=after_e,
+                improvement_percent=0.0 if before_e <= 1e-12 else (before_e - after_e) / before_e * 100.0,
                 delta_l_before=before_lab[0] - ideal_lab[0],
-                delta_c_before=lab_chroma(before_lab) - lab_chroma(ideal_lab),
-                delta_h_before=(0.0 if patch.zone >= 19 else hue_difference_degrees(before_lab, ideal_lab)),
+                delta_l_after=after_lab[0] - ideal_lab[0],
+                delta_c_before=before_c - ideal_c,
+                delta_c_after=after_c - ideal_c,
+                delta_h_before=before_h,
+                delta_h_after=after_h,
+                chroma_before=before_c,
+                chroma_after=after_c,
+                chroma_ideal=ideal_c,
+                regression=regression,
+                regression_status=regression_status,
                 module_hint=_module_hint(patch.zone, before_lab, ideal_lab),
             )
         )
     return results
+
+
+def _pass_rates(patches: list[PatchResult]) -> PassRateStatistics:
+    return PassRateStatistics(
+        thresholds=PASS_THRESHOLDS,
+        before_counts=tuple(sum(patch.delta_e_before < threshold for patch in patches) for threshold in PASS_THRESHOLDS),
+        after_counts=tuple(sum(patch.delta_e_after < threshold for patch in patches) for threshold in PASS_THRESHOLDS),
+        sample_count=len(patches),
+    )
+
+
+def _category_statistics(patches: list[PatchResult]) -> tuple[CategoryStatistics, ...]:
+    output: list[CategoryStatistics] = []
+    for category in ("Skin", "Memory", "Chromatic", "Primary", "Secondary", "Neutral"):
+        group = [patch for patch in patches if patch.category == category]
+        if not group:
+            continue
+        output.append(
+            CategoryStatistics(
+                category=category,
+                count=len(group),
+                mean_before=mean(patch.delta_e_before for patch in group),
+                mean_after=mean(patch.delta_e_after for patch in group),
+                improved=sum(patch.delta_e_after < patch.delta_e_before - 1e-9 for patch in group),
+                regressed=sum(patch.regression > 0.05 for patch in group),
+                pass_rate_before_3=sum(patch.delta_e_before < 3.0 for patch in group) / len(group),
+                pass_rate_after_3=sum(patch.delta_e_after < 3.0 for patch in group) / len(group),
+            )
+        )
+    return tuple(output)
+
+
+def _saturation_ratio(patches: list[PatchResult], *, after: bool) -> float:
+    colors = [patch for patch in patches if patch.category != "Neutral" and patch.chroma_ideal > 1e-6]
+    numerator = sum((patch.chroma_after if after else patch.chroma_before) * patch.priority_weight for patch in colors)
+    denominator = sum(patch.chroma_ideal * patch.priority_weight for patch in colors)
+    return numerator / denominator if denominator else 1.0
+
+
+def _loss_breakdown(
+    patches: list[PatchResult],
+    correction: Matrix3,
+    original: Matrix3,
+    optimized: Matrix3,
+    health: MatrixHealth,
+    config: OptimizationConfig,
+) -> LossBreakdown:
+    colors = [patch for patch in patches if patch.category != "Neutral"]
+    total_weight = sum(patch.priority_weight for patch in colors) or 1.0
+    de = sum(patch.priority_weight * patch.delta_e_after for patch in colors) / total_weight
+    dc = sum(patch.priority_weight * abs(patch.delta_c_after) for patch in colors) / total_weight
+    dh = sum(patch.priority_weight * abs(patch.delta_h_after) / 10.0 for patch in colors) / total_weight
+    dl = sum(patch.priority_weight * abs(patch.delta_l_after) / 10.0 for patch in colors) / total_weight
+    ordered = sorted(patch.delta_e_after for patch in colors)
+    p90 = ordered[min(len(ordered) - 1, max(0, math.ceil(len(ordered) * 0.9) - 1))] if ordered else 0.0
+    regression = sum(
+        patch.priority_weight * patch.regression * patch.regression
+        * (2.0 if patch.zone in config.focus_patches else 1.0)
+        for patch in colors
+    ) / total_weight
+    ratio = _saturation_ratio(patches, after=True)
+    global_sat = abs(ratio - config.saturation_factor) * 10.0
+    local_sat = sum(
+        patch.priority_weight * max(0.0, patch.chroma_after - patch.chroma_ideal * config.saturation_factor - config.local_saturation_tolerance)
+        for patch in colors
+    ) / total_weight
+    saturation = global_sat + 0.12 * local_sat
+    matrix_term = correction_magnitude(correction) ** 2
+    smoothness = matrix_distance(original, optimized) ** 2
+    engineering = (
+        max(0.0, health.condition_number - config.condition_warning) / max(config.condition_warning, 1e-6)
+        + max(0.0, config.determinant_warning - abs(health.determinant)) / max(config.determinant_warning, 1e-6)
+        + health.fixed_point_max_delta_e
+        + (5.0 if health.status == "FAIL" else 0.5 if health.status == "WARNING" else 0.0)
+    )
+    total = (
+        config.loss_delta_e * de
+        + config.loss_delta_c * dc
+        + config.loss_delta_h * dh
+        + config.loss_delta_l * dl
+        + config.loss_p90 * p90
+        + config.loss_regression * regression
+        + config.loss_saturation * saturation
+        + config.loss_matrix * matrix_term
+        + config.loss_smoothness * smoothness
+        + config.loss_engineering * engineering
+    )
+    return LossBreakdown(total, de, dc, dh, dl, p90, regression, saturation, matrix_term, smoothness, engineering)
+
+
+def _compose(correction: Matrix3, original: Matrix3, composition: str) -> Matrix3:
+    return mat_mul(correction, original) if composition == "pre" else mat_mul(original, transpose(correction))
+
+
+def _correction_for_final(original: Matrix3, final: Matrix3, composition: str) -> Matrix3:
+    try:
+        original_inverse = inverse(original)
+    except ValueError as exc:
+        raise OptimizationError("原 CC Matrix 奇异，无法组合 Delta CCM。") from exc
+    if composition == "pre":
+        return mat_mul(final, original_inverse)
+    return transpose(mat_mul(original_inverse, final))
+
+
+def _bounded_candidate(
+    correction: Matrix3,
+    original: Matrix3,
+    composition: str,
+    config: OptimizationConfig,
+) -> tuple[Matrix3, Matrix3]:
+    optimized = _compose(correction, original, composition)
+    # Always normalize the final XML matrix, even when the source row sums only
+    # miss 1.0 by a few ppm due to seven-decimal serialization.
+    projected = project_row_sum_and_bounds(optimized, config.coefficient_min, config.coefficient_max)
+    if matrix_distance(projected, optimized) > 1e-12:
+        correction = _correction_for_final(original, projected, composition)
+        optimized = _compose(correction, original, composition)
+    return correction, optimized
+
+
+def _evaluate_candidate(
+    dataset: ImatestDataset,
+    original: Matrix3,
+    correction: Matrix3,
+    composition: str,
+    config: OptimizationConfig,
+    regularization: float,
+    blend: float,
+    *,
+    enforce_bounds: bool = True,
+    search_method: str = "regularized-grid",
+) -> _Candidate:
+    if enforce_bounds:
+        correction, optimized = _bounded_candidate(correction, original, composition, config)
+    else:
+        optimized = _compose(correction, original, composition)
+    patches = _build_patch_results(dataset, correction, config)
+    health = evaluate_matrix_health(original, optimized, correction, dataset, config)
+    loss = _loss_breakdown(patches, correction, original, optimized, health, config)
+    return _Candidate(correction, optimized, patches, health, loss, regularization, blend, search_method)
+
+
+def _protection_failure(
+    candidate: _Candidate,
+    baseline: _Candidate,
+    config: OptimizationConfig,
+) -> Optional[str]:
+    if candidate.health.status == "FAIL":
+        return "matrix-health"
+    colors = [patch for patch in candidate.patch_results if patch.category != "Neutral"]
+    baseline_colors = [patch for patch in baseline.patch_results if patch.category != "Neutral"]
+    if mean(patch.delta_e_after for patch in colors) >= mean(patch.delta_e_after for patch in baseline_colors) - 1e-4:
+        return "no-mean-improvement"
+    for patch in colors:
+        if patch.regression_status == "FAIL":
+            return "patch-regression"
+        if patch.zone in config.focus_patches:
+            if abs(patch.delta_c_after) > abs(patch.delta_c_before) + config.focus_delta_c_regression:
+                return "focus-delta-c"
+            if abs(patch.delta_h_after) > abs(patch.delta_h_before) + config.focus_delta_h_regression:
+                return "focus-delta-h"
+    if sum(patch.regression > config.regression_epsilon for patch in colors) > config.max_regressed_patches:
+        return "regression-count"
+    candidate_pass = _pass_rates(candidate.patch_results)
+    baseline_pass = _pass_rates(baseline.patch_results)
+    if any(after < before for after, before in zip(candidate_pass.after_counts, baseline_pass.after_counts)):
+        return "pass-rate"
+    before_ratio = _saturation_ratio(baseline.patch_results, after=True)
+    after_ratio = _saturation_ratio(candidate.patch_results, after=True)
+    if abs(after_ratio - config.saturation_factor) > abs(before_ratio - config.saturation_factor) + 0.008:
+        return "global-saturation"
+    if after_ratio > max(config.saturation_factor + config.saturation_tolerance, before_ratio + 0.01):
+        return "over-saturation"
+    for patch in colors:
+        target = patch.chroma_ideal * config.saturation_factor
+        before = next(item for item in baseline.patch_results if item.zone == patch.zone)
+        allowed_growth = config.focus_delta_c_regression if patch.zone in config.focus_patches else 1.0
+        if patch.chroma_after - target > max(
+            config.local_saturation_tolerance,
+            before.chroma_after - target + allowed_growth,
+        ):
+            return "local-saturation"
+    focus = [patch for patch in colors if patch.zone in config.focus_patches]
+    baseline_focus = [patch for patch in baseline.patch_results if patch.zone in config.focus_patches]
+    if focus and baseline_focus:
+        focus_score = mean(patch.delta_e_after + 0.18 * abs(patch.delta_c_after) + 0.04 * abs(patch.delta_h_after) for patch in focus)
+        baseline_score = mean(patch.delta_e_after + 0.18 * abs(patch.delta_c_after) + 0.04 * abs(patch.delta_h_after) for patch in baseline_focus)
+        if focus_score >= baseline_score - 1e-4:
+            return "focus-no-improvement"
+    return None
+
+
+def _refine_candidate(
+    best: _Candidate,
+    baseline: _Candidate,
+    dataset: ImatestDataset,
+    original: Matrix3,
+    composition: str,
+    config: OptimizationConfig,
+    rejected: Counter[str],
+) -> _Candidate:
+    current = best
+    for base_step in (0.018, 0.009, 0.004, 0.002, 0.001):
+        step = base_step * config.max_blend
+        for _pass in range(18):
+            changed = False
+            for row in range(3):
+                for col in range(2):
+                    for direction in (-1.0, 1.0):
+                        rows = [list(values) for values in current.correction]
+                        rows[row][col] += direction * step
+                        rows[row][2] -= direction * step
+                        proposal: Matrix3 = tuple(tuple(values) for values in rows)  # type: ignore[assignment]
+                        candidate = _evaluate_candidate(
+                            dataset, original, proposal, composition, config,
+                            current.regularization, current.blend,
+                        )
+                        failure = _protection_failure(candidate, baseline, config)
+                        if failure:
+                            rejected[failure] += 1
+                            continue
+                        if candidate.loss.total + 1e-9 < current.loss.total:
+                            current = replace(candidate, search_method="refined")
+                            changed = True
+            if not changed:
+                break
+    return current
+
+
+def _fallback_score(candidate: _Candidate, config: OptimizationConfig) -> float:
+    """Continuous objective used to cross an initially infeasible boundary.
+
+    Hard Regression Protection is still applied before a fallback candidate can
+    be returned.  This soft score only lets coordinate descent move through an
+    intermediate state that is not itself releasable.
+    """
+
+    colors = [patch for patch in candidate.patch_results if patch.category != "Neutral"]
+    score = mean(patch.delta_e_after for patch in colors)
+    for patch in colors:
+        if patch.zone in config.focus_patches:
+            limit = config.focus_patch_regression
+        elif patch.delta_e_before < 3.0:
+            limit = config.good_patch_regression
+        else:
+            limit = config.max_patch_regression
+        score += 80.0 * max(0.0, patch.regression - limit) ** 2
+        score += max(0.0, patch.regression - config.regression_epsilon) ** 2
+        if patch.zone in config.focus_patches:
+            score += 80.0 * max(
+                0.0,
+                abs(patch.delta_c_after) - abs(patch.delta_c_before) - config.focus_delta_c_regression,
+            ) ** 2
+            score += 10.0 * max(
+                0.0,
+                abs(patch.delta_h_after) - abs(patch.delta_h_before) - config.focus_delta_h_regression,
+            ) ** 2
+    score += 2.0 * abs(_saturation_ratio(candidate.patch_results, after=True) - config.saturation_factor)
+    score += 0.05 * candidate.health.smoothness ** 2
+    if candidate.health.status == "FAIL":
+        score += 10000.0
+    return score
+
+
+def _engineering_boundary_search(
+    dataset: ImatestDataset,
+    original: Matrix3,
+    composition: str,
+    config: OptimizationConfig,
+    baseline: _Candidate,
+    seed: Optional[_Candidate],
+    rejected: Counter[str],
+) -> Optional[_Candidate]:
+    """Search final CCM coefficients directly while preserving each row sum.
+
+    Searching all three coefficient-pair directions is important when a row is
+    already touching a coefficient bound: it permits movement *along* that
+    boundary instead of getting stuck at the clipped projection.
+    """
+
+    projected = project_row_sum_and_bounds(original, config.coefficient_min, config.coefficient_max)
+    correction = _correction_for_final(original, projected, composition)
+    current = _evaluate_candidate(
+        dataset, original, correction, composition, config,
+        config.regularization or AUTO_REGULARIZATION[-1], 0.0,
+    )
+    if seed is not None and _fallback_score(seed, config) < _fallback_score(current, config):
+        current = seed
+
+    for step in (0.30, 0.15, 0.075, 0.035, 0.015, 0.007, 0.003, 0.0015, 0.0007):
+        for _iteration in range(150):
+            best_step = current
+            best_score = _fallback_score(current, config)
+            for row in range(3):
+                for first, second in ((0, 1), (0, 2), (1, 2)):
+                    for direction in (-1.0, 1.0):
+                        rows = [list(values) for values in current.optimized]
+                        rows[row][first] += direction * step
+                        rows[row][second] -= direction * step
+                        if min(rows[row]) < config.coefficient_min or max(rows[row]) > config.coefficient_max:
+                            continue
+                        final: Matrix3 = tuple(tuple(values) for values in rows)  # type: ignore[assignment]
+                        proposal = _evaluate_candidate(
+                            dataset,
+                            original,
+                            _correction_for_final(original, final, composition),
+                            composition,
+                            config,
+                            current.regularization,
+                            current.blend,
+                        )
+                        if proposal.health.status == "FAIL":
+                            continue
+                        proposal_score = _fallback_score(proposal, config)
+                        if proposal_score + 1e-10 < best_score:
+                            best_step = proposal
+                            best_score = proposal_score
+            if best_step is current:
+                break
+            current = best_step
+
+    failure = _protection_failure(current, baseline, config)
+    if failure:
+        rejected[f"boundary-{failure}"] += 1
+        return None
+    return replace(current, search_method="engineering-boundary")
 
 
 def optimize_ccm(
@@ -269,61 +588,146 @@ def optimize_ccm(
     original_matrix: Matrix3,
     *,
     composition: str = "pre",
-    regularization: float | None = None,
-    max_blend: float = 1.0,
+    regularization: Optional[float] = None,
+    max_blend: Optional[float] = None,
+    config: Optional[OptimizationConfig] = None,
 ) -> OptimizationResult:
-    """Fit a neutral-preserving delta CCM and compose it with a Qualcomm matrix.
-
-    ``pre`` assumes column vectors and writes ``M_new = A @ M_old``.
-    ``post_transposed`` is the equivalent row-vector/C7 convention and writes
-    ``M_new = M_old @ A.T``.
-    """
+    """Run protected, engineering-aware multi-objective Delta CCM optimization."""
 
     if composition not in {"pre", "post_transposed"}:
         raise OptimizationError(f"未知矩阵组合方式: {composition}")
-    correction, selected_regularization, blend = _choose_correction(dataset, regularization, max_blend)
-    optimized_matrix = (
-        mat_mul(correction, original_matrix)
-        if composition == "pre"
-        else mat_mul(original_matrix, transpose(correction))
-    )
-    patch_results = _build_patch_results(dataset, correction)
-    color_results = [result for result in patch_results if result.zone <= 18]
-    before_errors = [result.delta_e_before for result in color_results]
-    after_errors = [result.delta_e_after for result in color_results]
-    warnings = list(dataset.warnings)
-    original_sums = row_sums(original_matrix)
-    optimized_sums = row_sums(optimized_matrix)
-    if any(abs(value - 1.0) > 0.02 for value in original_sums):
-        warnings.append(f"原 CC 矩阵行和偏离 1: {', '.join(f'{value:.4f}' for value in original_sums)}")
-    if any(abs(value - 1.0) > 0.02 for value in optimized_sums):
-        warnings.append(f"改后矩阵行和偏离 1: {', '.join(f'{value:.4f}' for value in optimized_sums)}")
-    neutral_results = [result for result in patch_results if result.zone >= 19]
-    if neutral_results:
-        neutral_chroma = mean(lab_chroma(result.before_lab) for result in neutral_results)
-        neutral_lightness_error = mean(abs(result.delta_l_before) for result in neutral_results)
-        if neutral_chroma > 3.0:
-            warnings.append("中性色平均 Chroma 偏高；建议先稳定 AWB，再接受 CC 结果。")
-        if neutral_lightness_error > 5.0:
-            warnings.append("中性色亮度误差较大；CC 无法替代曝光/Gamma 调整。")
-    if blend == 0.0:
-        warnings.append("自动搜索未找到稳健改善，已保留原矩阵；请先检查 AWB、Gamma 与 CSV 拍摄条件。")
-    if any(result.delta_e_after - result.delta_e_before > 2.0 for result in color_results):
-        warnings.append("部分色块回退超过 ΔE00 2；建议降低优化强度或改用 2D LUT/SCE 做局部修正。")
+    base_config = config or OptimizationConfig()
+    if regularization is not None:
+        base_config = replace(base_config, regularization=regularization)
+    if max_blend is not None:
+        base_config = replace(base_config, max_blend=max_blend)
+    config = _strategy_config(base_config)
+    config.validate()
+    # Qualcomm XML commonly serializes nominal row sums as 0.999999.  Normalize
+    # that representation before composition so both Delta CCM and final CCM
+    # preserve the neutral axis exactly; the report still shows the source XML.
+    working_original = project_row_sum_and_bounds(original_matrix, -1.0e9, 1.0e9)
 
+    baseline = _evaluate_candidate(
+        dataset, working_original, identity_matrix(), composition, config,
+        config.regularization or AUTO_REGULARIZATION[-1], 0.0,
+        enforce_bounds=False,
+        search_method="baseline",
+    )
+    rejected: Counter[str] = Counter()
+    best: Optional[_Candidate] = None
+    regularizations = (config.regularization,) if config.regularization is not None else AUTO_REGULARIZATION
+    blend_count = max(1, int(round(config.max_blend / 0.05)))
+    blend_steps = tuple(min(config.max_blend, 0.05 * index) for index in range(1, blend_count + 1))
+
+    for lambda_value in regularizations:
+        if lambda_value is None:
+            continue
+        raw = _fit_constrained_matrix(dataset, lambda_value, config)
+        for blend in blend_steps:
+            correction = matrix_blend(raw, blend)
+            candidate = _evaluate_candidate(
+                dataset, working_original, correction, composition, config,
+                lambda_value, blend,
+            )
+            failure = _protection_failure(candidate, baseline, config)
+            if failure:
+                rejected[failure] += 1
+                continue
+            if best is None or candidate.loss.total < best.loss.total:
+                best = candidate
+
+    # If the source matrix itself violates the requested coefficient range, add
+    # a deterministic row-sum-preserving repair seed to the candidate pool.
+    projected_original = project_row_sum_and_bounds(working_original, config.coefficient_min, config.coefficient_max)
+    if projected_original != working_original:
+        repair_correction = _correction_for_final(working_original, projected_original, composition)
+        repair = _evaluate_candidate(
+            dataset, working_original, repair_correction, composition, config,
+            config.regularization or AUTO_REGULARIZATION[-1], 0.0,
+            search_method="range-repair",
+        )
+        failure = _protection_failure(repair, baseline, config)
+        if failure:
+            rejected[f"repair-{failure}"] += 1
+        elif best is None or repair.loss.total < best.loss.total:
+            best = repair
+
+    # Least-squares rays can miss a valid solution at an ISP coefficient bound,
+    # or retain identity when a low-light case needs coupled row movement.
+    if best is None or best.blend == 0.0:
+        boundary = _engineering_boundary_search(
+            dataset, working_original, composition, config, baseline, best, rejected,
+        )
+        if boundary is not None and (best is None or boundary.loss.total < best.loss.total):
+            best = boundary
+
+    if best is None:
+        if baseline.health.status == "FAIL":
+            reasons = ", ".join(f"{name}={count}" for name, count in rejected.most_common())
+            raise OptimizationError(f"没有候选同时满足 Matrix 工程约束与 Regression Protection：{reasons}")
+        best = baseline
+    elif best.blend > 0.0:
+        best = _refine_candidate(best, baseline, dataset, working_original, composition, config, rejected)
+
+    patch_results = best.patch_results
+    color_results = [patch for patch in patch_results if patch.category != "Neutral"]
+    before_errors = [patch.delta_e_before for patch in color_results]
+    after_errors = [patch.delta_e_after for patch in color_results]
+    pass_rates = _pass_rates(patch_results)
+    before_ratio = _saturation_ratio(patch_results, after=False)
+    after_ratio = _saturation_ratio(patch_results, after=True)
+    diagnostics = build_module_diagnostics(
+        patch_results,
+        before_ratio,
+        after_ratio,
+        best.health,
+        config.saturation_factor,
+    )
+    warnings = list(dataset.warnings)
+    warnings.extend(check.message + f" [{check.value}]" for check in best.health.checks if check.status != "PASS")
+    if any(patch.regression_status == "WARNING" for patch in color_results):
+        warnings.append("存在轻微 Patch trade-off，但均未越过 Regression Protection 硬阈值。")
+    if best.search_method == "baseline":
+        warnings.append("没有安全候选优于原矩阵，已保留原矩阵。")
+    if abs(after_ratio - config.saturation_factor) > config.saturation_tolerance:
+        warnings.append(f"After Chroma ratio={after_ratio:.3f}，仍偏离目标 {config.saturation_factor:.3f}。")
+
+    accepted_count = len(regularizations) * len(blend_steps) - sum(rejected.values())
+    explainability = (
+        f"Strategy={config.strategy}; 搜索 Regularization={list(regularizations)}，blend <= {config.max_blend:.2f}。",
+        f"重点 Patch={','.join(map(str, config.focus_patches))}，额外权重={config.focus_weight:.2f}；同时保护 dE/dC/dh。",
+        f"Saturation target={config.saturation_factor:.3f}; Chroma ratio {before_ratio:.3f}->{after_ratio:.3f}。",
+        f"候选接受约 {max(0, accepted_count)}，拒绝 {sum(rejected.values())}；主要原因：{dict(rejected.most_common(5))}。",
+        f"选择 method={best.search_method}, lambda={best.regularization:g}, blend={best.blend:.2f}, loss={baseline.loss.total:.3f}->{best.loss.total:.3f}。",
+        f"Matrix {best.health.status}: coeff=[{best.health.coefficient_min:.3f},{best.health.coefficient_max:.3f}], cond={best.health.condition_number:.3f}, det={best.health.determinant:.4f}。",
+    )
     return OptimizationResult(
-        correction_matrix=correction,
+        correction_matrix=best.correction,
         original_matrix=original_matrix,
-        optimized_matrix=optimized_matrix,
+        optimized_matrix=best.optimized,
         composition=composition,
-        regularization=selected_regularization,
-        blend=blend,
+        regularization=best.regularization,
+        blend=best.blend,
+        strategy=config.strategy,
+        search_method=best.search_method,
+        saturation_factor=config.saturation_factor,
         patch_results=patch_results,
         mean_before=mean(before_errors),
         mean_after=mean(after_errors),
         max_before=max(before_errors),
         max_after=max(after_errors),
-        improved_count=sum(result.delta_e_after < result.delta_e_before for result in color_results),
-        regressed_count=sum(result.delta_e_after > result.delta_e_before for result in color_results),
+        improved_count=sum(patch.delta_e_after < patch.delta_e_before - 1e-9 for patch in color_results),
+        regressed_count=sum(patch.regression > config.regression_epsilon for patch in color_results),
+        pass_rates=pass_rates,
+        category_statistics=_category_statistics(patch_results),
+        saturation_ratio_before=before_ratio,
+        saturation_ratio_after=after_ratio,
+        matrix_health=best.health,
+        loss_before=baseline.loss,
+        loss_after=best.loss,
+        diagnostics=diagnostics,
+        rejected_candidates=dict(rejected),
+        explainability=explainability,
         warnings=warnings,
     )

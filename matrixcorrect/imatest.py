@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import re
 from pathlib import Path
+from typing import Optional, Union
 
 from .models import ColorPatch, ImatestDataset, PATCH_NAMES_ZH
 
@@ -43,7 +44,7 @@ def _float(value: str, *, field: str, row_number: int) -> float:
         raise ImatestCSVError(f"第 {row_number} 行的 {field} 不是有效数字: {value!r}") from exc
 
 
-def infer_cct(*texts: str) -> int | None:
+def infer_cct(*texts: str) -> Optional[int]:
     joined = " ".join(texts).upper()
     explicit = re.search(r"(?:CCT|K)[_\-\s:=]*([2-9]\d{3})\s*K?", joined)
     if explicit:
@@ -57,7 +58,7 @@ def infer_cct(*texts: str) -> int | None:
     return None
 
 
-def parse_imatest_csv(path: str | Path) -> ImatestDataset:
+def parse_imatest_csv(path: Union[str, Path]) -> ImatestDataset:
     source_path = Path(path)
     rows = list(csv.reader(_read_text(source_path).splitlines()))
     image_name = ""
@@ -141,4 +142,3 @@ def parse_imatest_csv(path: str | Path) -> ImatestDataset:
         inferred_cct=inferred,
         warnings=warnings,
     )
-
