@@ -9,7 +9,7 @@ from matrixcorrect.qualcomm_xml import QualcommCCDocument
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_XML = ROOT / "Source" / "cc13_ipe_v2.xml"
+SOURCE_XML = ROOT / "source" / "cc13_ipe_v2.xml"
 
 
 class QualcommXMLTests(unittest.TestCase):

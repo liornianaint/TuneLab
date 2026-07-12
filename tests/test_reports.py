@@ -19,8 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class ReportTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.dataset = parse_imatest_csv(ROOT / "Source" / "D65_normal_summary.csv")
-        cls.document = QualcommCCDocument.load(ROOT / "Source" / "cc13_ipe_v2.xml")
+        cls.dataset = parse_imatest_csv(ROOT / "source" / "D65_normal_summary.csv")
+        cls.document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
         cls.region, _ = cls.document.find_region_for_cct(6500)
         cls.result = optimize_ccm(cls.dataset, cls.region.matrix)
         cls.diff = cls.document.diff_with_matrix(cls.region.index, cls.result.optimized_matrix)

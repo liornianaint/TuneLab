@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class ImatestParserTests(unittest.TestCase):
     def test_parse_uploaded_summary(self) -> None:
-        dataset = parse_imatest_csv(ROOT / "Source" / "D65_normal_summary.csv")
+        dataset = parse_imatest_csv(ROOT / "source" / "D65_normal_summary.csv")
         self.assertEqual(len(dataset.patches), 24)
         self.assertEqual(dataset.image_name, "D65_normal.jpg")
         self.assertEqual(dataset.inferred_cct, 6500)
@@ -27,4 +27,3 @@ class ImatestParserTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

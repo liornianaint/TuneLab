@@ -77,8 +77,8 @@ class SettingsHistoryTests(unittest.TestCase):
         self.assertEqual(loaded.last_report_format, "xlsx")
 
     def test_history_round_trip(self) -> None:
-        dataset = parse_imatest_csv(ROOT / "Source" / "D65_normal_summary.csv")
-        document = QualcommCCDocument.load(ROOT / "Source" / "cc13_ipe_v2.xml")
+        dataset = parse_imatest_csv(ROOT / "source" / "D65_normal_summary.csv")
+        document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
         region, _ = document.find_region_for_cct(6500)
         result = optimize_ccm(dataset, region.matrix)
         record = record_from_result(result, dataset_name=dataset.source_path.name, region_label=region.path_label())

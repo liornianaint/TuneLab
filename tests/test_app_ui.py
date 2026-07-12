@@ -8,8 +8,11 @@ from unittest import mock
 
 from matrixcorrect.app import (
     APP_TITLE,
+    FONT_BODY,
     FONT_KPI,
     FONT_SMALL_BOLD,
+    FONT_TITLE,
+    LAB_PLACEHOLDER_BOUNDS,
     LabViewState,
     MatrixCorrectApp,
     calculate_lab_bounds,
@@ -36,6 +39,11 @@ class LabViewTests(unittest.TestCase):
             self.assertGreater(a_max, a_value)
             self.assertLess(b_min, b_value)
             self.assertGreater(b_max, b_value)
+
+    def test_empty_plots_use_the_colorchecker_gamut_placeholder(self) -> None:
+        self.assertEqual(calculate_lab_bounds([]), LAB_PLACEHOLDER_BOUNDS)
+        self.assertEqual(LabViewState().bounds, LAB_PLACEHOLDER_BOUNDS)
+        self.assertEqual(LAB_PLACEHOLDER_BOUNDS, (-70.0, 70.0, -70.0, 70.0))
 
     def test_zoom_limits_and_reset_keep_square_shared_view(self) -> None:
         view = LabViewState()
@@ -112,21 +120,24 @@ class DesktopUISmokeTests(unittest.TestCase):
             ["首页", "Gamma 优化"],
         )
 
-    def test_save_as_defaults_to_optimized_xml_without_writing(self) -> None:
-        document = QualcommCCDocument.load(ROOT / "Source" / "cc13_ipe_v2.xml")
+    def test_save_xml_defaults_to_confirmed_source_overwrite(self) -> None:
+        document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
         self.app.document = document
         self.app.selected_region = document.regions[0]
         self.app.result = SimpleNamespace(matrix_health=SimpleNamespace(status="PASS"))
-        with mock.patch("matrixcorrect.app.filedialog.asksaveasfilename", return_value="") as dialog:
+        with mock.patch("matrixcorrect.app.messagebox.askyesno", return_value=False) as confirmation, mock.patch.object(document, "save_with_matrix") as save:
             self.app.save_xml()
-        kwargs = dialog.call_args.kwargs
-        self.assertEqual(kwargs["initialfile"], "cc13_ipe_v2_optimized.xml")
-        self.assertEqual(kwargs["defaultextension"], ".xml")
-        self.assertEqual(kwargs["filetypes"], [("XML 文件", "*.xml")])
-        self.assertTrue(kwargs["confirmoverwrite"])
+        self.assertIn(str(document.source_path), confirmation.call_args.args[1])
+        save.assert_not_called()
+
+    def test_cancelled_home_settings_stays_on_home(self) -> None:
+        with mock.patch("matrixcorrect.app.filedialog.askopenfilename", return_value=""):
+            self.app.home_settings_button.invoke()
+        self.assertTrue(self.app.home_view.winfo_manager())
+        self.assertFalse(self.app.cc_view.winfo_manager())
 
     def test_selected_region_is_always_visible(self) -> None:
-        document = QualcommCCDocument.load(ROOT / "Source" / "cc13_ipe_v2.xml")
+        document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
         self.app.document = document
         self.app._select_region(0)
         self.assertIn("当前 Region：#0", self.app.active_region_var.get())
@@ -138,8 +149,17 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertEqual(int(str(self.app.patch_table_panel.cget("width"))), 460)
         self.assertEqual(self.root.title(), APP_TITLE)
         self.assertIsNotNone(self.app._app_icon)
-        self.assertEqual(self.app.app_icon_path.resolve(), (ROOT / "source" / "app.png").resolve())
+        self.assertEqual(self.app.app_icon_source_path.resolve(), (ROOT / "source" / "app.png").resolve())
+        self.assertTrue(self.app.app_icon_path.exists())
         self.assertGreaterEqual(self.app._app_icon.width(), 512)
+        from PIL import Image
+
+        with Image.open(self.app.app_icon_path) as icon:
+            bounds = icon.getchannel("A").getbbox()
+            self.assertIsNotNone(bounds)
+            fill_ratio = (bounds[2] - bounds[0]) / icon.width
+            self.assertGreaterEqual(fill_ratio, 0.80)
+            self.assertLessEqual(fill_ratio, 0.84)
         self.assertEqual(
             self.app.tree.cget("columns"),
             ("zone", "name", "category", "weight", "before", "after", "change", "dl", "dc", "dh", "regression", "status", "module"),
@@ -189,8 +209,8 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertEqual(before_colours, after_colours)
 
     def test_plot_and_table_patch_selection_are_bidirectionally_linked(self) -> None:
-        dataset = parse_imatest_csv(ROOT / "Source" / "D65_normal_summary.csv")
-        document = QualcommCCDocument.load(ROOT / "Source" / "cc13_ipe_v2.xml")
+        dataset = parse_imatest_csv(ROOT / "source" / "D65_normal_summary.csv")
+        document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
         region, _mode = document.find_region_for_cct(6500)
         self.app.dataset = dataset
         self.app.document = document
@@ -210,8 +230,8 @@ class DesktopUISmokeTests(unittest.TestCase):
                 self.assertLessEqual(patch_box[3], top + side + 2)
 
     def test_show_motion_hides_only_motion_artists_without_resetting_view(self) -> None:
-        dataset = parse_imatest_csv(ROOT / "Source" / "D65_normal_summary.csv")
-        document = QualcommCCDocument.load(ROOT / "Source" / "cc13_ipe_v2.xml")
+        dataset = parse_imatest_csv(ROOT / "source" / "D65_normal_summary.csv")
+        document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
         region, _mode = document.find_region_for_cct(6500)
         self.app.dataset = dataset
         self.app.document = document
@@ -272,8 +292,8 @@ class DesktopUISmokeTests(unittest.TestCase):
                 self.assertLessEqual(patch_box[3], top + side + 2)
 
     def test_patch_table_sorting_tooltip_and_embedded_gamma_switch(self) -> None:
-        dataset = parse_imatest_csv(ROOT / "Source" / "D65_normal_summary.csv")
-        document = QualcommCCDocument.load(ROOT / "Source" / "cc13_ipe_v2.xml")
+        dataset = parse_imatest_csv(ROOT / "source" / "D65_normal_summary.csv")
+        document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
         region, _mode = document.find_region_for_cct(6500)
         self.app.dataset = dataset
         self.app.document = document
@@ -309,14 +329,57 @@ class DesktopUISmokeTests(unittest.TestCase):
     def test_home_is_default_and_module_switches_do_not_create_toplevels(self) -> None:
         self.assertTrue(self.app.home_view.winfo_manager())
         self.assertFalse(self.app.cc_view.winfo_manager())
+        visible_text: list[str] = []
+
+        def visit(widget: tk.Misc) -> None:
+            for child in widget.winfo_children():
+                if "text" in child.keys():
+                    visible_text.append(str(child.cget("text")))
+                visit(child)
+
+        visit(self.app.home_view)
+        self.assertNotIn("最近优化", visible_text)
+        self.assertNotIn("快捷操作", visible_text)
+        self.assertNotIn("Qualcomm CC13", visible_text)
         self.app.show_cc_workspace()
         self.assertFalse(self.app.home_view.winfo_manager())
         self.assertTrue(self.app.cc_view.winfo_manager())
         gamma = self.app.open_gamma_optimizer()
         self.assertTrue(gamma.outer.winfo_manager())
+        style = ttk.Style(self.root)
+        self.assertEqual(style.lookup("GammaTitle.TLabel", "font"), FONT_TITLE)
+        self.assertEqual(style.lookup("GammaCard.TLabel", "font"), FONT_BODY)
         self.assertFalse(any(isinstance(child, tk.Toplevel) for child in self.root.winfo_children()))
         self.app.show_home_workspace()
         self.assertTrue(self.app.home_view.winfo_manager())
+
+    def test_about_menu_uses_one_tunelab_owned_dialog_on_all_pages(self) -> None:
+        self.app.help_menu.invoke("end")
+        self.root.update_idletasks()
+        dialog = getattr(self.root, "_tunelab_about_dialog", None)
+        self.assertIsInstance(dialog, tk.Toplevel)
+        self.assertEqual(dialog.title(), "关于 TuneLab")
+        self.assertTrue(hasattr(dialog, "_tunelab_icon"))
+
+        text: list[str] = []
+
+        def visit(widget: tk.Misc) -> None:
+            for child in widget.winfo_children():
+                if "text" in child.keys():
+                    text.append(str(child.cget("text")))
+                visit(child)
+
+        visit(dialog)
+        self.assertIn("TuneLab", text)
+        self.assertIn("版本 0.2.0", text)
+        self.assertFalse(any("Python Software Foundation" in value for value in text))
+
+        self.app.show_cc_workspace()
+        self.app.help_menu.invoke("end")
+        self.assertIs(getattr(self.root, "_tunelab_about_dialog", None), dialog)
+        gamma = self.app.open_gamma_optimizer()
+        gamma.help_menu.invoke("end")
+        self.assertIs(getattr(self.root, "_tunelab_about_dialog", None), dialog)
 
 
 if __name__ == "__main__":

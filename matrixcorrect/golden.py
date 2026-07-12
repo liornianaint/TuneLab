@@ -121,7 +121,7 @@ def _unique_files(directories: Iterable[Union[str, Path]], suffix: str) -> list[
 
 
 def discover_golden_inputs(source_directories: Sequence[Union[str, Path]]) -> tuple[list[Path], list[Path]]:
-    # Source folders can also contain Stepchart/Gamma CSVs or XMLs for other
+    # The source folder can also contain Stepchart/Gamma CSVs or XMLs for other
     # ISP modules.  Golden CCM regression still traverses the whole tree, but
     # only compatible ColorChecker and Qualcomm CC inputs become test cases.
     csv_files: list[Path] = []
@@ -382,7 +382,7 @@ def save_golden_html(destination: Union[str, Path], suite: GoldenSuiteResult) ->
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run MatrixCorrect Golden Dataset regression")
-    parser.add_argument("--source", type=Path, action="append", help="Source directory; may be repeated")
+    parser.add_argument("--source", type=Path, action="append", help="source directory; may be repeated")
     parser.add_argument("--json", type=Path, help="Write JSON result")
     parser.add_argument("--html", type=Path, help="Write HTML result")
     return parser
@@ -390,7 +390,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = _parser().parse_args(argv)
-    directories = args.source or [Path("Source"), Path("source")]
+    directories = args.source or [Path("source")]
     suite = run_golden_suite(directories)
     if args.json:
         save_golden_json(args.json, suite)

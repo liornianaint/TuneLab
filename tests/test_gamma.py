@@ -293,7 +293,7 @@ class GammaDesktopSmokeTests(unittest.TestCase):
             if hasattr(self, patcher_name):
                 getattr(self, patcher_name).stop()
 
-    def test_complete_gamma_workflow_and_save_as_default(self) -> None:
+    def test_complete_gamma_workflow_and_source_overwrite(self) -> None:
         self.app.load_csv(str(SOURCE / "gray_summary.csv"))
         self.app.load_xml(str(SOURCE / "gamma15_ipe_v2.xml"))
         self.assertEqual(self.app.target_gamma_var.get(), "1")
@@ -308,12 +308,10 @@ class GammaDesktopSmokeTests(unittest.TestCase):
         self.assertGreaterEqual(self.app.result.metrics.distinguishable_after, 14)
         self.assertEqual(len(self.app.zone_tree.get_children()), 19)
         self.assertEqual(len(self.app.pair_tree.get_children()), 18)
-        with mock.patch("matrixcorrect.gamma_app.filedialog.asksaveasfilename", return_value="") as dialog:
+        with mock.patch("matrixcorrect.gamma_app.messagebox.askyesno", return_value=False) as confirmation, mock.patch.object(self.app.document, "save_with_luts") as save:
             self.app.save_xml()
-        kwargs = dialog.call_args.kwargs
-        self.assertEqual(kwargs["initialfile"], "gamma15_ipe_v2_optimized.xml")
-        self.assertEqual(kwargs["defaultextension"], ".xml")
-        self.assertEqual(kwargs["filetypes"], [("XML 文件", "*.xml")])
+        self.assertIn(str(self.app.document.source_path), confirmation.call_args.args[1])
+        save.assert_not_called()
 
     def test_gamma_window_has_cc_style_menus_and_engineering_tabs(self) -> None:
         file_labels = [
@@ -339,6 +337,7 @@ class GammaDesktopSmokeTests(unittest.TestCase):
             [self.app.notebook.tab(tab, "text").strip() for tab in self.app.notebook.tabs()],
             ["曲线对比", "工程统计", "诊断与解释", "History / XML Diff"],
         )
+        self.assertTrue(bool(self.app.zone_tree.column("local_after", "stretch")))
 
 
 if __name__ == "__main__":

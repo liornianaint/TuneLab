@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import math
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Iterable, Optional, Sequence
 
+from .branding import application_icon_path, show_about_dialog
 from .gamma_models import (
     GammaOptimizationConfig,
     GammaOptimizationResult,
@@ -31,6 +33,14 @@ GREEN = "#0F9D75"
 RED = "#D92D20"
 AMBER = "#B54708"
 PURPLE = "#7F56D9"
+FONT_BODY = "MatrixCorrectBodyFont"
+FONT_SMALL = "MatrixCorrectSmallFont"
+FONT_SMALL_BOLD = "MatrixCorrectSmallBoldFont"
+FONT_TITLE = "MatrixCorrectTitleFont"
+FONT_CARD_TITLE = "MatrixCorrectCardTitleFont"
+FONT_KPI = "MatrixCorrectKpiFont"
+FONT_PLOT_TITLE = "MatrixCorrectPlotTitleFont"
+FONT_MONO = "MatrixCorrectMonoFont"
 
 
 class CurvePlot(ttk.Frame):
@@ -57,7 +67,7 @@ class CurvePlot(ttk.Frame):
         width = max(320, canvas.winfo_width())
         height = max(220, canvas.winfo_height())
         left, right, top, bottom = 72.0, width - 18.0, 42.0, height - 44.0
-        canvas.create_text(14, 15, text=self.title, anchor="w", fill=INK, font=("TkDefaultFont", 11, "bold"))
+        canvas.create_text(14, 15, text=self.title, anchor="w", fill=INK, font=FONT_PLOT_TITLE)
         points = [point for _name, values, _color, _dashed in self.series for point in values]
         if not points:
             canvas.create_text(width / 2, height / 2, text="等待数据", fill=MUTED)
@@ -87,8 +97,8 @@ class CurvePlot(ttk.Frame):
             y_coordinate = y_pos(y_value)
             canvas.create_line(x_coordinate, top, x_coordinate, bottom, fill="#EAECF0")
             canvas.create_line(left, y_coordinate, right, y_coordinate, fill="#EAECF0")
-            canvas.create_text(x_coordinate, bottom + 16, text=f"{x_value:.2f}", fill=MUTED, font=("TkDefaultFont", 8))
-            canvas.create_text(left - 7, y_coordinate, text=f"{y_value:.3f}", anchor="e", fill=MUTED, font=("TkDefaultFont", 8))
+            canvas.create_text(x_coordinate, bottom + 16, text=f"{x_value:.2f}", fill=MUTED, font=FONT_SMALL)
+            canvas.create_text(left - 7, y_coordinate, text=f"{y_value:.3f}", anchor="e", fill=MUTED, font=FONT_SMALL)
         canvas.create_rectangle(left, top, right, bottom, outline="#98A2B3")
         canvas.create_text((left + right) / 2, height - 10, text=self.x_label, fill=MUTED)
         canvas.create_text(5, (top + bottom) / 2, text=self.y_label, fill=MUTED, anchor="w")
@@ -103,7 +113,7 @@ class CurvePlot(ttk.Frame):
                 x_coordinate, y_coordinate = x_pos(x_value), y_pos(y_value)
                 canvas.create_oval(x_coordinate - 2.5, y_coordinate - 2.5, x_coordinate + 2.5, y_coordinate + 2.5, fill=color, outline="")
             canvas.create_line(legend_x, 29, legend_x + 20, 29, fill=color, width=2, dash=(5, 3) if dashed else ())
-            canvas.create_text(legend_x + 24, 29, text=name, anchor="w", fill=INK, font=("TkDefaultFont", 8))
+            canvas.create_text(legend_x + 24, 29, text=name, anchor="w", fill=INK, font=FONT_SMALL)
             legend_x += 28 + max(52, len(name) * 8)
 
 
@@ -117,10 +127,12 @@ class GammaOptimizationApp:
         *,
         on_close: Optional[Callable[[], None]] = None,
         on_home: Optional[Callable[[], None]] = None,
+        on_about: Optional[Callable[[], None]] = None,
     ) -> None:
         self.root = root
         self.on_close = on_close
         self.on_home = on_home
+        self.on_about = on_about
         self.dataset: Optional[GrayDataset] = None
         self.analysis: Optional[GrayRangeAnalysis] = None
         self.document: Optional[QualcommGammaDocument] = None
@@ -167,16 +179,15 @@ class GammaOptimizationApp:
 
         self.help_menu = tk.Menu(menu, tearoff=False)
         self.help_menu.add_command(label="参数说明", command=self.show_help)
-        self.help_menu.add_command(
-            label="关于",
-            command=lambda: messagebox.showinfo(
-                "关于 Gamma 优化",
-                "MatrixCorrect · Qualcomm Gamma LUT\n动态 LUT 点数/位宽 · Stepchart Regression Protection",
-                parent=self.root,
-            ),
-        )
+        self.help_menu.add_command(label="关于 TuneLab", command=self._show_about)
         menu.add_cascade(label="帮助", menu=self.help_menu)
         self.root.configure(menu=menu)
+
+    def _show_about(self) -> None:
+        if self.on_about is not None:
+            self.on_about()
+            return
+        show_about_dialog(self.root, application_icon_path())
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -185,25 +196,47 @@ class GammaOptimizationApp:
             # Treeview text, which clashes with the explicit light engineering
             # cards/tags used by this cross-platform tool.
             style.theme_use("clam")
+        default_font = tkfont.Font(root=self.root, name="TkDefaultFont", exists=True)
+        text_font = tkfont.Font(root=self.root, name="TkTextFont", exists=True)
+        heading_font = tkfont.Font(root=self.root, name="TkHeadingFont", exists=True)
+        fixed_font = tkfont.Font(root=self.root, name="TkFixedFont", exists=True)
+        base_size = max(11, min(12, abs(int(default_font.cget("size")))))
+
+        def install_font(name: str, *, size: int, weight: str = "normal", source: tkfont.Font = default_font) -> None:
+            try:
+                font = tkfont.Font(root=self.root, name=name, exists=True)
+            except tk.TclError:
+                font = tkfont.Font(root=self.root, name=name, exists=False)
+            font.configure(family=source.actual("family"), size=size, weight=weight)
+
+        install_font(FONT_BODY, size=base_size, source=text_font)
+        install_font(FONT_SMALL, size=max(10, base_size - 1), source=text_font)
+        install_font(FONT_SMALL_BOLD, size=max(10, base_size - 1), weight="bold", source=heading_font)
+        install_font(FONT_CARD_TITLE, size=13, weight="bold", source=heading_font)
+        install_font(FONT_KPI, size=base_size + 2, weight="bold", source=heading_font)
+        install_font(FONT_TITLE, size=19, weight="bold", source=heading_font)
+        install_font(FONT_PLOT_TITLE, size=13, weight="bold", source=heading_font)
+        install_font(FONT_MONO, size=max(10, base_size - 1), source=fixed_font)
         style.configure("GammaRoot.TFrame", background=BG)
         style.configure("GammaCard.TFrame", background=PANEL)
-        style.configure("GammaCard.TLabel", background=PANEL, foreground=INK)
-        style.configure("GammaTitle.TLabel", background=BG, foreground=INK, font=("TkDefaultFont", 18, "bold"))
-        style.configure("GammaMuted.TLabel", background=BG, foreground=MUTED)
-        style.configure("GammaKpi.TLabel", background=PANEL, foreground=INK, font=("TkDefaultFont", 12, "bold"))
-        style.configure("GammaPrimary.TButton", background=BLUE, foreground="white", padding=(14, 8))
+        style.configure("GammaCard.TLabel", background=PANEL, foreground=INK, font=FONT_BODY)
+        style.configure("GammaTitle.TLabel", background=BG, foreground=INK, font=FONT_TITLE)
+        style.configure("GammaMuted.TLabel", background=BG, foreground=MUTED, font=FONT_BODY)
+        style.configure("GammaKpi.TLabel", background=PANEL, foreground=INK, font=FONT_KPI)
+        style.configure("GammaPrimary.TButton", background=BLUE, foreground="white", padding=(14, 8), font=FONT_BODY)
         style.configure(
             "Gamma.Treeview",
             rowheight=25,
             background=PANEL,
             fieldbackground=PANEL,
             foreground=INK,
+            font=FONT_SMALL,
         )
         style.configure(
             "Gamma.Treeview.Heading",
             background="#EAECF0",
             foreground=INK,
-            font=("TkDefaultFont", 9, "bold"),
+            font=FONT_SMALL_BOLD,
         )
 
     def _build_ui(self) -> None:
@@ -368,7 +401,13 @@ class GammaOptimizationApp:
         widths = (54, 70, 76, 76, 76, 88, 88, 84, 96, 96)
         for column, title, width in zip(columns, headings, widths):
             self.zone_tree.heading(column, text=title)
-            self.zone_tree.column(column, width=width, minwidth=width, stretch=False, anchor="center")
+            self.zone_tree.column(
+                column,
+                width=width,
+                minwidth=width,
+                stretch=column == "local_after",
+                anchor="center",
+            )
         zone_v = ttk.Scrollbar(zone_frame, orient="vertical", command=self.zone_tree.yview)
         zone_h = ttk.Scrollbar(zone_frame, orient="horizontal", command=self.zone_tree.xview)
         self.zone_tree.configure(yscrollcommand=zone_v.set, xscrollcommand=zone_h.set)
@@ -406,6 +445,7 @@ class GammaOptimizationApp:
             relief="flat",
             padx=14,
             pady=12,
+            font=FONT_MONO,
         )
         self.engineering_text.pack(fill="both", expand=True, pady=(8, 0))
         self.engineering_text.insert("1.0", "尚未运行 Gamma 优化。")
@@ -419,6 +459,7 @@ class GammaOptimizationApp:
             relief="flat",
             padx=16,
             pady=14,
+            font=FONT_BODY,
         )
         self.diagnosis_text.pack(fill="both", expand=True)
         self.diagnosis_text.insert("1.0", "尚未运行 Gamma 优化。")
@@ -452,6 +493,7 @@ class GammaOptimizationApp:
             relief="flat",
             padx=12,
             pady=10,
+            font=FONT_MONO,
         )
         self.diff_text.pack(fill="both", expand=True, pady=(8, 0))
         self._range_changed()
@@ -989,16 +1031,12 @@ class GammaOptimizationApp:
         if self.result.health.status == "FAIL":
             messagebox.showerror("Curve Health 未通过", "Curve Health=FAIL，禁止写回 Gamma XML。", parent=self.root)
             return
-        path = filedialog.asksaveasfilename(
-            title="保存优化后的 Qualcomm Gamma XML",
-            defaultextension=".xml",
-            initialdir=str(self.document.source_path.parent),
-            initialfile=f"{self.document.source_path.stem}_optimized.xml",
-            filetypes=[("XML 文件", "*.xml")],
-            confirmoverwrite=True,
+        path = self.document.source_path
+        if not messagebox.askyesno(
+            "覆盖原 Gamma XML",
+            f"将只更新当前 Gamma Region 的 LUT，并覆盖原文件：\n{path}\n\n是否继续？",
             parent=self.root,
-        )
-        if not path:
+        ):
             return
         try:
             self.document.save_with_luts(
@@ -1011,7 +1049,7 @@ class GammaOptimizationApp:
         except (OSError, QualcommGammaXMLError) as exc:
             messagebox.showerror("Gamma XML 保存失败", str(exc), parent=self.root)
             return
-        self.status_var.set(f"已另存并回读校验：{path}；只修改 Gamma region #{self.selected_region.index}。")
+        self.status_var.set(f"已覆盖并回读校验：{path}；只修改 Gamma region #{self.selected_region.index}。")
 
 
 def open_gamma_window(master: tk.Misc) -> GammaOptimizationApp:

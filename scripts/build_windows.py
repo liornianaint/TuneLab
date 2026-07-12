@@ -1,21 +1,20 @@
 from __future__ import annotations
 
+import os
 import platform
-import plistlib
 import subprocess
 import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_VERSION = "0.2.0"
 
 
 def prepare_icon() -> Path:
     from PIL import Image
 
     source = ROOT / "source" / "app.png"
-    destination = ROOT / "build" / "tunelab-app-icon.png"
+    destination = ROOT / "build" / "tunelab-app-icon.ico"
     destination.parent.mkdir(parents=True, exist_ok=True)
     with Image.open(source) as image:
         image = image.convert("RGBA")
@@ -26,17 +25,21 @@ def prepare_icon() -> Path:
         centre_y = (bounds[1] + bounds[3]) / 2
         left = max(0, min(image.width - crop_side, round(centre_x - crop_side / 2)))
         top = max(0, min(image.height - crop_side, round(centre_y - crop_side / 2)))
-        image.crop((left, top, left + crop_side, top + crop_side)).resize(
-            (1024, 1024), Image.Resampling.LANCZOS
-        ).save(destination)
+        icon = image.crop((left, top, left + crop_side, top + crop_side)).resize(
+            (256, 256), Image.Resampling.LANCZOS
+        )
+        icon.save(destination, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
     return destination
 
 
 def main() -> int:
+    if platform.system() != "Windows":
+        print("Windows EXE 必须在 Windows 上构建；PyInstaller 不支持跨系统生成 EXE。", file=sys.stderr)
+        return 2
     try:
         import PyInstaller  # noqa: F401
     except ImportError:
-        print("PyInstaller 未安装。请先运行: python -m pip install pyinstaller", file=sys.stderr)
+        print("请先运行: py -m pip install pyinstaller reportlab pillow", file=sys.stderr)
         return 2
     icon = prepare_icon()
     command = [
@@ -45,38 +48,20 @@ def main() -> int:
         "PyInstaller",
         "--noconfirm",
         "--clean",
+        "--onefile",
         "--windowed",
         "--name",
         "TuneLab",
         "--icon",
         str(icon),
         "--add-data",
-        f"{ROOT / 'source' / 'app.png'}:source",
+        f"{ROOT / 'source' / 'app.png'}{os.pathsep}source",
         "--paths",
         str(ROOT),
+        str(ROOT / "run_matrixcorrect.py"),
     ]
-    if platform.system() == "Darwin":
-        command.extend(["--osx-bundle-identifier", "com.tunelab.app"])
-    command.append(str(ROOT / "run_matrixcorrect.py"))
     print("Building:", " ".join(command))
-    result = subprocess.call(command, cwd=ROOT)
-    if result == 0 and platform.system() == "Darwin":
-        bundle = ROOT / "dist" / "TuneLab.app"
-        plist_path = bundle / "Contents" / "Info.plist"
-        with plist_path.open("rb") as handle:
-            plist = plistlib.load(handle)
-        plist.update(
-            {
-                "CFBundleDisplayName": "TuneLab",
-                "CFBundleName": "TuneLab",
-                "CFBundleShortVersionString": APP_VERSION,
-                "CFBundleVersion": APP_VERSION,
-            }
-        )
-        with plist_path.open("wb") as handle:
-            plistlib.dump(plist, handle)
-        result = subprocess.call(["codesign", "--force", "--deep", "--sign", "-", str(bundle)])
-    return result
+    return subprocess.call(command, cwd=ROOT)
 
 
 if __name__ == "__main__":

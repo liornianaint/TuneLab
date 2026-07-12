@@ -18,8 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class OptimizerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.dataset = parse_imatest_csv(ROOT / "Source" / "D65_normal_summary.csv")
-        cls.document = QualcommCCDocument.load(ROOT / "Source" / "cc13_ipe_v2.xml")
+        cls.dataset = parse_imatest_csv(ROOT / "source" / "D65_normal_summary.csv")
+        cls.document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
         cls.region, _ = cls.document.find_region_for_cct(6500)
 
     def test_sample_improves_and_preserves_neutral_axis(self) -> None:
