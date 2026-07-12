@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from matrixcorrect.app import (
+    APP_TITLE,
     FONT_KPI,
     FONT_SMALL_BOLD,
     LabViewState,
@@ -106,7 +107,10 @@ class DesktopUISmokeTests(unittest.TestCase):
             for index in range(self.app.config_menu.index("end") + 1)
         ]
         self.assertEqual(config_labels, ["导入配置...", "导出配置..."])
-        self.assertEqual(self.app.tools_menu.entrycget(0, "label"), "Gamma 优化...")
+        self.assertEqual(
+            [self.app.tools_menu.entrycget(index, "label") for index in range(self.app.tools_menu.index("end") + 1)],
+            ["首页", "Gamma 优化"],
+        )
 
     def test_save_as_defaults_to_optimized_xml_without_writing(self) -> None:
         document = QualcommCCDocument.load(ROOT / "Source" / "cc13_ipe_v2.xml")
@@ -131,7 +135,11 @@ class DesktopUISmokeTests(unittest.TestCase):
         tabs = [self.app.notebook.tab(tab_id, "text").strip() for tab_id in self.app.notebook.tabs()]
         self.assertEqual(tabs[0], "色差对比")
         self.assertNotIn("色块明细", tabs)
-        self.assertEqual(int(str(self.app.patch_table_panel.cget("width"))), 520)
+        self.assertEqual(int(str(self.app.patch_table_panel.cget("width"))), 460)
+        self.assertEqual(self.root.title(), APP_TITLE)
+        self.assertIsNotNone(self.app._app_icon)
+        self.assertEqual(self.app.app_icon_path.resolve(), (ROOT / "source" / "app.png").resolve())
+        self.assertGreaterEqual(self.app._app_icon.width(), 512)
         self.assertEqual(
             self.app.tree.cget("columns"),
             ("zone", "name", "category", "weight", "before", "after", "change", "dl", "dc", "dh", "regression", "status", "module"),
@@ -201,6 +209,38 @@ class DesktopUISmokeTests(unittest.TestCase):
                 self.assertLessEqual(patch_box[2], left + side + 2)
                 self.assertLessEqual(patch_box[3], top + side + 2)
 
+    def test_show_motion_hides_only_motion_artists_without_resetting_view(self) -> None:
+        dataset = parse_imatest_csv(ROOT / "Source" / "D65_normal_summary.csv")
+        document = QualcommCCDocument.load(ROOT / "Source" / "cc13_ipe_v2.xml")
+        region, _mode = document.find_region_for_cct(6500)
+        self.app.dataset = dataset
+        self.app.document = document
+        self.app.selected_region = region
+        self.app.result = optimize_ccm(dataset, region.matrix)
+        self.app._render_result()
+        self.app._show_patch_detail(13)
+        bounds = self.app.lab_view.bounds
+        selected = self.app.before_plot.selected_zone
+
+        baseline = [len(plot.canvas.find_withtag("motion")) for plot in (self.app.before_plot, self.app.after_plot)]
+        self.assertTrue(all(count > 0 for count in baseline))
+        for _ in range(20):
+            self.app.show_motion_var.set(False)
+            self.app._on_show_motion_changed()
+            for plot in (self.app.before_plot, self.app.after_plot):
+                self.assertFalse(plot.canvas.find_withtag("motion"))
+                self.assertTrue(plot.canvas.find_withtag("trajectory"))
+                self.assertTrue(plot.canvas.find_withtag("patch-13"))
+            self.app.show_motion_var.set(True)
+            self.app._on_show_motion_changed()
+            self.assertEqual(
+                [len(plot.canvas.find_withtag("motion")) for plot in (self.app.before_plot, self.app.after_plot)],
+                baseline,
+            )
+        self.assertEqual(self.app.lab_view.bounds, bounds)
+        self.assertEqual(self.app.before_plot.selected_zone, selected)
+        self.assertEqual(self.app.after_plot.selected_zone, selected)
+
         self.app.tree.selection_set("patch-13")
         self.app._on_patch_table_selected()
         self.assertEqual(self.app.before_plot.selected_zone, 13)
@@ -230,6 +270,53 @@ class DesktopUISmokeTests(unittest.TestCase):
                 self.assertGreaterEqual(patch_box[1], top - 2)
                 self.assertLessEqual(patch_box[2], left + side + 2)
                 self.assertLessEqual(patch_box[3], top + side + 2)
+
+    def test_patch_table_sorting_tooltip_and_embedded_gamma_switch(self) -> None:
+        dataset = parse_imatest_csv(ROOT / "Source" / "D65_normal_summary.csv")
+        document = QualcommCCDocument.load(ROOT / "Source" / "cc13_ipe_v2.xml")
+        region, _mode = document.find_region_for_cct(6500)
+        self.app.dataset = dataset
+        self.app.document = document
+        self.app.selected_region = region
+        self.app.result = optimize_ccm(dataset, region.matrix)
+        self.app._render_result()
+
+        self.app._sort_patch_table("before")
+        ascending = [float(self.app.tree.item(item, "values")[4]) for item in self.app.tree.get_children()]
+        self.assertEqual(ascending, sorted(ascending))
+        self.app._sort_patch_table("before")
+        descending = [float(self.app.tree.item(item, "values")[4]) for item in self.app.tree.get_children()]
+        self.assertEqual(descending, sorted(descending, reverse=True))
+        self.assertIn("▼", self.app.tree.heading("before", "text"))
+
+        self.app.before_plot._show_tooltip(SimpleNamespace(x=40, y=40), self.app.result.patch_results[0])
+        self.assertTrue(self.app.before_plot.canvas.find_withtag("tooltip"))
+        self.app.before_plot._hide_tooltip()
+        self.assertFalse(self.app.before_plot.canvas.find_withtag("tooltip"))
+
+        close_callback = self.root.protocol("WM_DELETE_WINDOW")
+        gamma = self.app.open_gamma_optimizer()
+        self.assertIs(self.root.nametowidget(gamma.outer.winfo_parent()), self.root)
+        self.assertFalse(self.app.cc_view.winfo_manager())
+        self.assertEqual(self.root.protocol("WM_DELETE_WINDOW"), close_callback)
+        self.app.show_cc_workspace()
+        self.assertTrue(self.app.cc_view.winfo_manager())
+        self.assertEqual(self.root.protocol("WM_DELETE_WINDOW"), close_callback)
+        gamma.outer.destroy()
+        reopened = self.app.open_gamma_optimizer()
+        self.assertTrue(reopened.outer.winfo_exists())
+
+    def test_home_is_default_and_module_switches_do_not_create_toplevels(self) -> None:
+        self.assertTrue(self.app.home_view.winfo_manager())
+        self.assertFalse(self.app.cc_view.winfo_manager())
+        self.app.show_cc_workspace()
+        self.assertFalse(self.app.home_view.winfo_manager())
+        self.assertTrue(self.app.cc_view.winfo_manager())
+        gamma = self.app.open_gamma_optimizer()
+        self.assertTrue(gamma.outer.winfo_manager())
+        self.assertFalse(any(isinstance(child, tk.Toplevel) for child in self.root.winfo_children()))
+        self.app.show_home_workspace()
+        self.assertTrue(self.app.home_view.winfo_manager())
 
 
 if __name__ == "__main__":

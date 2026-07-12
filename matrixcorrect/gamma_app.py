@@ -5,7 +5,7 @@ import math
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Iterable, Optional, Sequence
+from typing import Callable, Iterable, Optional, Sequence
 
 from .gamma_models import (
     GammaOptimizationConfig,
@@ -111,8 +111,16 @@ class GammaOptimizationApp:
     RANGE_LABELS = {"自动识别": "auto", "全部灰阶（仍执行工程排除）": "all", "手动指定": "manual"}
     RGB_LABELS = {"RGB 联动（推荐）": "linked", "R/G/B 独立（高级）": "independent"}
 
-    def __init__(self, root: tk.Misc) -> None:
+    def __init__(
+        self,
+        root: tk.Misc,
+        *,
+        on_close: Optional[Callable[[], None]] = None,
+        on_home: Optional[Callable[[], None]] = None,
+    ) -> None:
         self.root = root
+        self.on_close = on_close
+        self.on_home = on_home
         self.dataset: Optional[GrayDataset] = None
         self.analysis: Optional[GrayRangeAnalysis] = None
         self.document: Optional[QualcommGammaDocument] = None
@@ -125,10 +133,14 @@ class GammaOptimizationApp:
         self._configure_styles()
         self._build_menu()
         self._build_ui()
-        try:
-            self.root.protocol("WM_DELETE_WINDOW", self.close)
-        except tk.TclError:
-            pass
+        # Embedded Gamma shares the application's one native window.  Its red
+        # close button must continue to close TuneLab, not destroy this module
+        # and leave the root with a stale callback.
+        if self.on_close is None:
+            try:
+                self.root.protocol("WM_DELETE_WINDOW", self.close)
+            except tk.TclError:
+                pass
 
     def _build_menu(self) -> None:
         menu = tk.Menu(self.root)
@@ -147,11 +159,11 @@ class GammaOptimizationApp:
         menu.add_cascade(label="配置", menu=self.config_menu)
 
         self.functions_menu = tk.Menu(menu, tearoff=False)
-        self.functions_menu.add_command(label="自动匹配 Region", command=self.auto_match_region)
-        self.functions_menu.add_command(label="Gamma 优化", command=self.run_optimization)
-        self.functions_menu.add_command(label="查看历史", command=self.show_history)
-        self.functions_menu.add_command(label="清空历史", command=self.clear_history)
-        menu.add_cascade(label="功能", menu=self.functions_menu)
+        if self.on_home is not None:
+            self.functions_menu.add_command(label="首页", command=self.on_home)
+        if self.on_close is not None:
+            self.functions_menu.add_command(label="CC 校正", command=self.on_close)
+        menu.add_cascade(label="工具", menu=self.functions_menu)
 
         self.help_menu = tk.Menu(menu, tearoff=False)
         self.help_menu.add_command(label="参数说明", command=self.show_help)
@@ -168,7 +180,7 @@ class GammaOptimizationApp:
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self.root)
-        if "clam" in style.theme_names():
+        if self.on_close is None and "clam" in style.theme_names():
             # Aqua follows macOS dark appearance and otherwise supplies white
             # Treeview text, which clashes with the explicit light engineering
             # cards/tags used by this cross-platform tool.
@@ -195,13 +207,14 @@ class GammaOptimizationApp:
         )
 
     def _build_ui(self) -> None:
-        self.root.title("MatrixCorrect · Qualcomm Gamma 1.5 LUT 优化")
+        self.root.title("TuneLab · Qualcomm Gamma 1.5 LUT 优化")
         try:
             self.root.geometry("1540x980")
             self.root.minsize(1180, 760)
         except tk.TclError:
             pass
         outer = ttk.Frame(self.root, padding=(18, 14), style="GammaRoot.TFrame")
+        self.outer = outer
         outer.pack(fill="both", expand=True)
         title = ttk.Frame(outer, style="GammaRoot.TFrame")
         title.pack(fill="x", pady=(0, 10))
@@ -936,7 +949,38 @@ class GammaOptimizationApp:
             save_gamma_history(self.history)
         except (OSError, ValueError, tk.TclError):
             pass
-        self.root.destroy()
+        if self.on_close is not None:
+            self.outer.destroy()
+            self.on_close()
+        else:
+            self.root.destroy()
+
+    def is_alive(self) -> bool:
+        """Use Tcl's existence query: Python widget wrappers can outlive Tk."""
+        try:
+            return bool(int(self.root.tk.call("winfo", "exists", str(self.outer))))
+        except tk.TclError:
+            return False
+
+    def hide(self) -> bool:
+        if not self.is_alive():
+            return False
+        try:
+            self.outer.pack_forget()
+        except tk.TclError:
+            return False
+        return True
+
+    def show(self) -> bool:
+        if not self.is_alive():
+            return False
+        try:
+            self.outer.pack(fill="both", expand=True)
+            self.root.title("TuneLab · Qualcomm Gamma 1.5 LUT 优化")
+            self._build_menu()
+        except tk.TclError:
+            return False
+        return True
 
     def save_xml(self) -> None:
         if self.document is None or self.result is None or self.selected_region is None:

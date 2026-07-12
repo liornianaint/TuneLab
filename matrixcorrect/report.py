@@ -30,7 +30,7 @@ def save_analysis_csv(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["MatrixCorrect 工程分析报告"])
+        writer.writerow(["TuneLab 工程分析报告"])
         writer.writerow(["源 CSV", str(dataset.source_path)])
         writer.writerow(["图像", dataset.image_name])
         writer.writerow(["测试日期", dataset.run_date])
@@ -245,11 +245,11 @@ def save_analysis_html(
     )
     document = f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MatrixCorrect · {html.escape(dataset.source_path.stem)}</title>
+<title>TuneLab · {html.escape(dataset.source_path.stem)}</title>
 <style>
 :root{{--ink:#172033;--muted:#667085;--blue:#2563eb;--panel:#fff;--bg:#f3f5f8;--line:#dfe5ee;--green:#087a55;--red:#b42318;--amber:#a15c00}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}}main{{max-width:1320px;margin:auto;padding:28px}}header{{background:linear-gradient(120deg,#14274d,#2563eb);color:white;padding:28px;border-radius:16px}}h1{{margin:0 0 4px}}h2{{margin-top:28px}}h3{{margin:4px 0 10px}}.meta{{opacity:.9}}.kpis,.matrices,.plots{{display:grid;gap:12px}}.kpis{{grid-template-columns:repeat(5,1fr);margin-top:16px}}.kpi,.matrix,section.card,figure{{background:white;border:1px solid var(--line);border-radius:12px;padding:14px}}.kpi strong{{font-size:22px;display:block}}.matrices{{grid-template-columns:repeat(3,1fr)}}.plots{{grid-template-columns:repeat(2,1fr)}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{border-bottom:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}}th{{background:#eaf0ff}}.scroll{{overflow:auto;border:1px solid var(--line);border-radius:12px}}.pill{{font-weight:700}}.pass{{color:var(--green)}}.warning{{color:var(--amber)}}.fail{{color:var(--red)}}tr.fail td{{background:#fff2f0}}pre{{white-space:pre-wrap;background:#101828;color:#f2f4f7;padding:14px;border-radius:10px;overflow:auto}}figure{{margin:0}}figcaption{{font-weight:700}}svg{{width:100%;max-width:480px;display:block;margin:auto;background:#fbfcff}}svg .grid{{stroke:#d9e2f0;stroke-width:.6}}svg .frame{{fill:none;stroke:#344054}}svg .motion{{stroke:#98a2b3;stroke-width:.8}}svg .ideal{{fill:white;stroke:#172033}}svg .camera{{fill:#2563eb;stroke:white}}svg text{{font-size:7px;fill:#344054}}svg .axis{{font-size:11px;font-weight:700}}ul{{padding-left:20px}}@media(max-width:900px){{.kpis,.matrices,.plots{{grid-template-columns:1fr}}}}@media print{{body{{background:white}}main{{max-width:none;padding:0}}header{{border-radius:0}}}}
 </style></head><body><main>
-<header><h1>MatrixCorrect 工程分析报告</h1><div class="meta">{html.escape(dataset.source_path.name)} · {html.escape(region_label)} · Strategy {html.escape(result.strategy)} · {html.escape(result.search_method)}</div></header>
+<header><h1>TuneLab 工程分析报告</h1><div class="meta">{html.escape(dataset.source_path.name)} · {html.escape(region_label)} · Strategy {html.escape(result.strategy)} · {html.escape(result.search_method)}</div></header>
 <div class="kpis"><div class="kpi"><span>Average ΔE00</span><strong>{result.mean_before:.2f} → {result.mean_after:.2f}</strong></div><div class="kpi"><span>Improve</span><strong>{result.mean_improvement_percent:+.1f}%</strong></div><div class="kpi"><span>Pass ΔE&le;3</span><strong>{result.pass_rates.before_rate(1):.0%} → {result.pass_rates.after_rate(1):.0%}</strong></div><div class="kpi"><span>Chroma Ratio</span><strong>{result.saturation_ratio_before:.3f} → {result.saturation_ratio_after:.3f}</strong></div><div class="kpi"><span>Matrix</span><strong class="{result.matrix_health.status.lower()}">{result.matrix_health.status}</strong></div></div>
 <h2>Before / After a*b*</h2><div class="plots">{_lab_plot_html(result, 'before', 'Before：Camera → Ideal')}{_lab_plot_html(result, 'after', 'After：Camera → Ideal')}</div>
 <h2>CC Matrix</h2><div class="matrices">{_matrix_html('Before CC Matrix', result.original_matrix)}{_matrix_html('Delta Correction A · ' + ('M_new=A×M_old' if result.composition == 'pre' else 'M_new=M_old×Aᵀ'), result.correction_matrix)}{_matrix_html('After CC Matrix', result.optimized_matrix)}</div>
@@ -311,7 +311,7 @@ def save_analysis_pdf(
                 Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
             ]
         )
-    font_name = "MatrixCorrectUnicode"
+    font_name = "TuneLabUnicode"
     for candidate in font_candidates:
         if not candidate.exists():
             continue
@@ -360,7 +360,7 @@ def save_analysis_pdf(
         canvas.saveState()
         canvas.setFont(font_name, 7)
         canvas.setFillColor(colors.HexColor("#667085"))
-        canvas.drawString(14 * mm, 8 * mm, "MatrixCorrect · 工程模拟结果必须上机复测")
+        canvas.drawString(14 * mm, 8 * mm, "TuneLab · 工程模拟结果必须上机复测")
         canvas.drawRightString(landscape(A4)[0] - 14 * mm, 8 * mm, f"Page {document.page}")
         canvas.restoreState()
 
@@ -371,11 +371,11 @@ def save_analysis_pdf(
         leftMargin=13 * mm,
         topMargin=12 * mm,
         bottomMargin=14 * mm,
-        title="MatrixCorrect Engineering Report",
-        author="MatrixCorrect",
+        title="TuneLab Engineering Report",
+        author="TuneLab",
     )
     story: list[Any] = [
-        Paragraph("MatrixCorrect 工程分析报告", title_style),
+        Paragraph("TuneLab 工程分析报告", title_style),
         paragraph(f"CSV: {dataset.source_path.name}　Region: {region_label}　Strategy: {result.strategy}　Method: {result.search_method}"),
         Spacer(1, 5),
     ]
@@ -525,7 +525,7 @@ def save_analysis_xlsx(
     path = Path(destination)
     path.parent.mkdir(parents=True, exist_ok=True)
     summary_rows: list[list[Any]] = [
-        ["MatrixCorrect Engineering Report", "Value", "Before", "After"],
+        ["TuneLab Engineering Report", "Value", "Before", "After"],
         ["Source CSV", dataset.source_path.name, "", ""],
         ["Region", region_label, "", ""],
         ["Strategy", result.strategy, "", ""],
@@ -657,8 +657,8 @@ def save_analysis_xlsx(
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("[Content_Types].xml", "".join(content_types))
         archive.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>')
-        archive.writestr("docProps/core.xml", f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>MatrixCorrect Engineering Report</dc:title><dc:creator>MatrixCorrect</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">{now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">{now}</dcterms:modified></cp:coreProperties>')
-        archive.writestr("docProps/app.xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>MatrixCorrect</Application></Properties>')
+        archive.writestr("docProps/core.xml", f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>TuneLab Engineering Report</dc:title><dc:creator>TuneLab</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">{now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">{now}</dcterms:modified></cp:coreProperties>')
+        archive.writestr("docProps/app.xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>TuneLab</Application></Properties>')
         archive.writestr("xl/workbook.xml", f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView/></bookViews><sheets>{workbook_sheets}</sheets><calcPr calcId="191029" fullCalcOnLoad="1" forceFullCalc="1" calcMode="auto"/></workbook>')
         archive.writestr("xl/_rels/workbook.xml.rels", f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{workbook_rels}<Relationship Id="rId{len(sheet_specs) + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>')
         archive.writestr("xl/styles.xml", styles_xml)

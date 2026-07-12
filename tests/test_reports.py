@@ -42,7 +42,7 @@ class ReportTests(unittest.TestCase):
                 self.assertIn("IF(E2&lt;0.1,&quot;N/A&quot;,(E2-F2)/E2)", patch_sheet)
                 summary_sheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
                 self.assertIn("COUNTIF(&#x27;Patches&#x27;!E$2:E$25,&quot;&lt;=&quot;&amp;B15)/24", summary_sheet)
-                self.assertIn("MatrixCorrect Engineering Report", summary_sheet)
+                self.assertIn("TuneLab Engineering Report", summary_sheet)
 
     @unittest.skipUnless(importlib.util.find_spec("reportlab"), "reportlab not installed")
     def test_pdf_report_is_generated(self) -> None:

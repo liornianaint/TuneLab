@@ -46,6 +46,7 @@ class SettingsHistoryTests(unittest.TestCase):
             set(payload["descriptions"]["application"]),
             {"composition", "show_motion", "last_report_format"},
         )
+        self.assertIn("不会重新运行优化", payload["descriptions"]["application"]["show_motion"]["impact"])
         for description in (
             list(optimization_descriptions.values())
             + list(payload["descriptions"]["application"].values())

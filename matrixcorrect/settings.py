@@ -58,7 +58,7 @@ _OPTIMIZATION_DESCRIPTION_SPEC: dict[str, tuple[str, str, str]] = {
 
 _APPLICATION_DESCRIPTION_SPEC: dict[str, tuple[str, str, str]] = {
     "composition": ("设置 Delta CCM 与原 Qualcomm 矩阵的组合约定。", "pre | post_transposed；CC13 推荐 pre", "选择错误会导致 XML 系数排列与平台约定不一致。"),
-    "show_motion": ("控制 a*b* 图是否显示 Patch 移动轨迹。", "true | false", "开启便于判断改善方向，只影响显示。"),
+    "show_motion": ("控制 TuneLab a*b* 图是否显示运动方向箭头。", "true | false", "关闭后仍保留 Ideal 与 Camera 的基础连线；只影响显示，不会重新运行优化或改变数据。"),
     "last_report_format": ("记录最近一次工程报告格式。", "html | pdf | xlsx | csv", "用于下次导出时选择默认扩展名，只影响文件对话框。"),
 }
 

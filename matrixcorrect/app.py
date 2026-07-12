@@ -4,6 +4,8 @@ import json
 import tkinter as tk
 import tkinter.font as tkfont
 import math
+import platform
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -19,7 +21,9 @@ from .report import save_analysis_report
 from .settings import AppSettings, load_settings, save_settings
 
 
-APP_TITLE = "MatrixCorrect · Qualcomm CC13"
+APP_NAME = "TuneLab"
+APP_TITLE = "TuneLab"
+CC_WINDOW_TITLE = "TuneLab · Qualcomm CC13"
 BG = "#F3F5F8"
 PANEL = "#FFFFFF"
 INK = "#172033"
@@ -39,6 +43,117 @@ FONT_TITLE = "MatrixCorrectTitleFont"
 FONT_PLOT_TITLE = "MatrixCorrectPlotTitleFont"
 FONT_MONO = "MatrixCorrectMonoFont"
 
+# One typography/token source for Tk, Canvas and tables.  Font families are
+# derived from Tk's named system fonts, so each OS keeps its native fallback
+# chain for mixed Chinese, English and numeric text.
+UI = {
+    "body_size": 12,
+    "table_size": 10,
+    "title_size": 19,
+    "section_size": 13,
+    "control_padding": (10, 6),
+    "compact_padding": (8, 4),
+    "row_height": 29,
+    "selection": "#DCEBFF",
+    "focus_patch": "#EEF4FF",
+    "table_heading": "#F2F4F7",
+    "disabled": "#98A2B3",
+    "hover": "#EAECF0",
+}
+
+
+def configure_macos_application_identity(name: str = APP_NAME) -> None:
+    """Set the unbundled Python process identity before Tk creates NSApp."""
+
+    if platform.system() != "Darwin":
+        return
+    try:
+        import ctypes
+        import ctypes.util
+
+        objc = ctypes.CDLL(ctypes.util.find_library("objc"))
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        def objc_class(value: str) -> int:
+            return objc.objc_getClass(value.encode())
+
+        def selector(value: str) -> int:
+            return objc.sel_registerName(value.encode())
+
+        def message(receiver: int, method: str, *, result: object = ctypes.c_void_p, argument_types: tuple[object, ...] = (), arguments: tuple[object, ...] = ()) -> object:
+            function = ctypes.CFUNCTYPE(result, ctypes.c_void_p, ctypes.c_void_p, *argument_types)(("objc_msgSend", objc))
+            return function(receiver, selector(method), *arguments)
+
+        def ns_string(value: str) -> int:
+            return message(
+                objc_class("NSString"),
+                "stringWithUTF8String:",
+                argument_types=(ctypes.c_char_p,),
+                arguments=(value.encode(),),
+            )
+
+        process_info = message(objc_class("NSProcessInfo"), "processInfo")
+        message(process_info, "setProcessName:", result=None, argument_types=(ctypes.c_void_p,), arguments=(ns_string(name),))
+        bundle = message(objc_class("NSBundle"), "mainBundle")
+        info = message(bundle, "infoDictionary")
+        for key in ("CFBundleName", "CFBundleDisplayName"):
+            message(
+                info,
+                "setValue:forKey:",
+                result=None,
+                argument_types=(ctypes.c_void_p, ctypes.c_void_p),
+                arguments=(ns_string(name), ns_string(key)),
+            )
+    except (AttributeError, OSError, TypeError, ValueError):
+        # Window title and Tk icon remain reliable fallbacks on non-Cocoa Tk.
+        return
+
+
+def application_icon_path() -> Path:
+    bundled_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+    return bundled_root / "source" / "app.png"
+
+
+def configure_macos_dock_icon(icon_path: Path) -> None:
+    """Apply the supplied image to NSApplication's Dock tile."""
+
+    if platform.system() != "Darwin" or not icon_path.exists():
+        return
+    try:
+        import ctypes
+        import ctypes.util
+
+        objc = ctypes.CDLL(ctypes.util.find_library("objc"))
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        def objc_class(value: str) -> int:
+            return objc.objc_getClass(value.encode())
+
+        def selector(value: str) -> int:
+            return objc.sel_registerName(value.encode())
+
+        def message(receiver: int, method: str, *, result: object = ctypes.c_void_p, argument_types: tuple[object, ...] = (), arguments: tuple[object, ...] = ()) -> object:
+            function = ctypes.CFUNCTYPE(result, ctypes.c_void_p, ctypes.c_void_p, *argument_types)(("objc_msgSend", objc))
+            return function(receiver, selector(method), *arguments)
+
+        path_string = message(
+            objc_class("NSString"),
+            "stringWithUTF8String:",
+            argument_types=(ctypes.c_char_p,),
+            arguments=(str(icon_path).encode(),),
+        )
+        image = message(message(objc_class("NSImage"), "alloc"), "initWithContentsOfFile:", argument_types=(ctypes.c_void_p,), arguments=(path_string,))
+        application = message(objc_class("NSApplication"), "sharedApplication")
+        message(application, "setApplicationIconImage:", result=None, argument_types=(ctypes.c_void_p,), arguments=(image,))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return
+
 
 class MatrixPanel(ttk.Frame):
     def __init__(self, master: tk.Misc, title: str) -> None:
@@ -49,7 +164,8 @@ class MatrixPanel(ttk.Frame):
         header.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 5))
         header.columnconfigure(0, weight=1)
         self.title_var = tk.StringVar(value=title)
-        ttk.Label(header, textvariable=self.title_var, style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.title_label = ttk.Label(header, textvariable=self.title_var, style="CardTitle.TLabel")
+        self.title_label.grid(row=0, column=0, sticky="w")
         ttk.Button(header, text="复制", command=self.copy, style="Quiet.TButton").grid(row=0, column=1)
         for row in range(3):
             for col in range(3):
@@ -65,7 +181,7 @@ class MatrixPanel(ttk.Frame):
     def set_matrix(self, matrix: Optional[Matrix3]) -> None:
         for row in range(3):
             for col in range(3):
-                self.variables[row][col].set("—" if matrix is None else f"{matrix[row][col]: .7f}")
+                self.variables[row][col].set("—" if matrix is None else f"{matrix[row][col]:+0.6f}")
 
     def set_title(self, title: str) -> None:
         self.title = title
@@ -97,7 +213,7 @@ def calculate_lab_bounds(
     # even when all samples are tightly grouped.  The percentage margin keeps
     # wide-gamut datasets comfortable without imposing an arbitrary [-100,100]
     # crop.
-    span = max(minimum_span, raw_span * 1.30, raw_span + 16.0)
+    span = max(minimum_span, raw_span * 1.10, raw_span + 8.0)
     a_center = (a_low + a_high) / 2.0
     b_center = (b_low + b_high) / 2.0
     half_span = span / 2.0
@@ -172,12 +288,14 @@ class LabPlot(ttk.Frame):
         view_state: LabViewState,
         view_changed: Callable[[], None],
         patch_callback: Optional[Callable[[int], None]] = None,
+        clear_callback: Optional[Callable[[], None]] = None,
     ) -> None:
         super().__init__(master, style="Card.TFrame")
         self.title = title
         self.view_state = view_state
         self.view_changed = view_changed
         self.patch_callback = patch_callback
+        self.clear_callback = clear_callback
         self.patch_results: list[PatchResult] = []
         self.mode = "before"
         self.show_motion = True
@@ -202,6 +320,7 @@ class LabPlot(ttk.Frame):
         self.canvas.bind("<Button-4>", lambda event: self._zoom_at(event, 0.84))
         self.canvas.bind("<Button-5>", lambda event: self._zoom_at(event, 1.0 / 0.84))
         self.canvas.bind("<Double-Button-1>", self._reset_view)
+        self.canvas.bind("<Button-1>", self._on_canvas_click, add="+")
         self.draw([], mode="before", show_motion=True)
 
     def _plot_geometry(self) -> tuple[float, float, float]:
@@ -253,6 +372,8 @@ class LabPlot(ttk.Frame):
 
     def redraw(self) -> None:
         canvas = self.canvas
+        # Delete the previous retained Canvas items before drawing.  This is
+        # what prevents Show Motion from accumulating old arrows or labels.
         canvas.delete("all")
         left, top, side = self._plot_geometry()
         right, bottom = left + side, top + side
@@ -343,14 +464,22 @@ class LabPlot(ttk.Frame):
             is_focus = patch.zone in self.focus_zones
             is_selected = patch.zone == self.selected_zone
             tag = f"patch-{patch.zone}"
+            # The reference line is a stable comparison aid.  Show Motion
+            # controls direction arrows only, so turning it off never hides
+            # Ideal/Camera correspondence.
+            if ideal_visible and actual_visible:
+                canvas.create_line(ideal_x, ideal_y, actual_x, actual_y, fill="#98A2B3", width=1, tags=(tag, "trajectory"))
             if self.show_motion:
+                if ideal_visible and actual_visible:
+                    canvas.create_line(
+                        ideal_x, ideal_y, actual_x, actual_y,
+                        fill="#667085", width=1.2, arrow=tk.LAST, arrowshape=(6, 7, 3), tags=(tag, "motion", "motion-arrow"),
+                    )
                 if self.mode == "after" and before_visible and actual_visible:
                     canvas.create_line(
                         before_x, before_y, actual_x, actual_y,
-                        fill=BLUE, width=1.4, arrow=tk.LAST, arrowshape=(7, 8, 3), tags=(tag, "motion"),
+                        fill=BLUE, width=1.4, arrow=tk.LAST, arrowshape=(7, 8, 3), tags=(tag, "motion", "motion-arrow"),
                     )
-                if ideal_visible and actual_visible:
-                    canvas.create_line(ideal_x, ideal_y, actual_x, actual_y, fill="#667085", width=1, tags=(tag, "motion"))
             if actual_visible and (is_focus or is_selected):
                 halo_color = AMBER if is_selected else "#84ADFF"
                 halo_width = 3 if is_selected else 2
@@ -411,8 +540,35 @@ class LabPlot(ttk.Frame):
                 )
             if self.patch_callback is not None:
                 canvas.tag_bind(tag, "<Button-1>", lambda _event, zone=patch.zone: self.patch_callback(zone))
-                canvas.tag_bind(tag, "<Enter>", lambda _event: canvas.configure(cursor="hand2"))
-                canvas.tag_bind(tag, "<Leave>", lambda _event: canvas.configure(cursor=""))
+                canvas.tag_bind(tag, "<Enter>", lambda event, item=patch: self._show_tooltip(event, item))
+                canvas.tag_bind(tag, "<Leave>", lambda _event: self._hide_tooltip())
+
+    def _show_tooltip(self, event: tk.Event, patch: PatchResult) -> None:
+        self._hide_tooltip()
+        text = (
+            f"Zone {patch.zone} · {patch.name} · {patch.category}\n"
+            f"权重 {patch.priority_weight:.2f}  ΔE00 {patch.delta_e_before:.3f} → {patch.delta_e_after:.3f}\n"
+            f"改善 {patch.improvement_text(1)}  ΔL {patch.delta_l_before:+.2f}→{patch.delta_l_after:+.2f}\n"
+            f"ΔC {patch.delta_c_before:+.2f}→{patch.delta_c_after:+.2f}  Δh {patch.delta_h_before:+.1f}→{patch.delta_h_after:+.1f}\n"
+            f"Regression {patch.regression:.3f} · {patch.module_hint}"
+        )
+        x = min(self.canvas.winfo_width() - 12, max(12, event.x + 14))
+        y = min(self.canvas.winfo_height() - 12, max(12, event.y + 14))
+        item = self.canvas.create_text(x, y, text=text, anchor="nw", fill=INK, font=FONT_SMALL, tags=("tooltip",))
+        box = self.canvas.bbox(item)
+        if box is not None:
+            background = self.canvas.create_rectangle(box[0] - 6, box[1] - 5, box[2] + 6, box[3] + 5, fill="#FFFEF8", outline=BORDER, tags=("tooltip",))
+            self.canvas.tag_lower(background, item)
+
+    def _hide_tooltip(self) -> None:
+        self.canvas.delete("tooltip")
+
+    def _on_canvas_click(self, _event: tk.Event) -> None:
+        current = self.canvas.find_withtag("current")
+        if any(any(tag.startswith("patch-") for tag in self.canvas.gettags(item)) for item in current):
+            return
+        if self.clear_callback is not None:
+            self.clear_callback()
 
     def _on_resize(self, _event: tk.Event) -> None:
         if self._resize_after_id is not None:
@@ -502,16 +658,28 @@ class MatrixCorrectApp:
         self._syncing_patch_selection = False
         self._settings_save_after_id: Optional[str] = None
         self._closing = False
+        self._patch_sort_column = "zone"
+        self._patch_sort_reverse = False
+        self._history_sort_reverse = True
+        self.gamma_app = None
 
         root.title(APP_TITLE)
         root.geometry("1520x980")
         root.minsize(1180, 760)
         root.configure(background=BG)
+        try:
+            root.tk.call("tk", "appname", "tunelab")
+        except tk.TclError:
+            pass
         self._configure_styles()
+        self._install_app_icon()
         self._build_menu()
         self._build_ui()
+        self._build_home()
+        self.show_home_workspace()
         self._install_settings_autosave()
         root.protocol("WM_DELETE_WINDOW", self.close)
+        root.after_idle(self._install_app_icon)
         root.after_idle(self._persist_settings)
         self._set_status("请先打开 Imatest CSV 和 Qualcomm CC XML。")
 
@@ -523,11 +691,12 @@ class MatrixCorrectApp:
         # Constructing an existing named Font directly works on both the
         # system Python 3.9.6/Tk 8.5 and Homebrew Python 3.14/Tk 9 paths.
         default_font = tkfont.Font(root=self.root, name="TkDefaultFont", exists=True)
+        text_font = tkfont.Font(root=self.root, name="TkTextFont", exists=True)
+        heading_font = tkfont.Font(root=self.root, name="TkHeadingFont", exists=True)
         fixed_font = tkfont.Font(root=self.root, name="TkFixedFont", exists=True)
-        base_size = max(9, abs(int(default_font.cget("size"))))
+        base_size = max(11, min(UI["body_size"], abs(int(default_font.cget("size")))))
 
-        def install_font(name: str, *, size: int, weight: str = "normal", fixed: bool = False) -> None:
-            source = fixed_font if fixed else default_font
+        def install_font(name: str, *, size: int, weight: str = "normal", source: tkfont.Font = default_font) -> None:
             try:
                 font = tkfont.Font(root=self.root, name=name, exists=True)
             except tk.TclError:
@@ -538,31 +707,59 @@ class MatrixCorrectApp:
                 weight=weight,
             )
 
-        install_font(FONT_BODY, size=base_size)
-        install_font(FONT_SMALL, size=max(8, base_size - 2))
-        install_font(FONT_SMALL_BOLD, size=max(8, base_size - 2), weight="bold")
-        install_font(FONT_CARD_TITLE, size=base_size, weight="bold")
-        install_font(FONT_KPI, size=base_size + 1, weight="bold")
-        install_font(FONT_TITLE, size=base_size + 8, weight="bold")
-        install_font(FONT_PLOT_TITLE, size=base_size + 1, weight="bold")
-        install_font(FONT_MONO, size=max(8, base_size - 1), fixed=True)
+        install_font(FONT_BODY, size=base_size, source=text_font)
+        install_font(FONT_SMALL, size=max(UI["table_size"], base_size - 1), source=text_font)
+        install_font(FONT_SMALL_BOLD, size=max(UI["table_size"], base_size - 1), weight="bold", source=heading_font)
+        install_font(FONT_CARD_TITLE, size=UI["section_size"], weight="bold", source=heading_font)
+        install_font(FONT_KPI, size=base_size + 2, weight="bold", source=heading_font)
+        install_font(FONT_TITLE, size=UI["title_size"], weight="bold", source=heading_font)
+        install_font(FONT_PLOT_TITLE, size=UI["section_size"], weight="bold", source=heading_font)
+        install_font(FONT_MONO, size=max(UI["table_size"], base_size - 1), source=fixed_font)
         style.configure("Root.TFrame", background=BG)
+        style.configure("Home.TFrame", background="#F8FAFC")
+        style.configure("Sidebar.TFrame", background="#FFFFFF", relief="flat")
         style.configure("Card.TFrame", background=PANEL, relief="flat")
+        style.configure("HomeCard.TFrame", background=PANEL, relief="solid", borderwidth=1)
         style.configure("Card.TLabel", background=PANEL, foreground=INK, font=FONT_BODY)
         style.configure("CardTitle.TLabel", background=PANEL, foreground=INK, font=FONT_CARD_TITLE)
         style.configure("Title.TLabel", background=BG, foreground=INK, font=FONT_TITLE)
         style.configure("Subtitle.TLabel", background=BG, foreground=MUTED, font=FONT_BODY)
         style.configure("ActiveRegion.TLabel", background=BG, foreground="#1D4ED8", font=FONT_SMALL_BOLD)
-        style.configure("Status.TLabel", background="#EAF0FF", foreground="#1D4ED8", padding=(10, 7))
+        style.configure("Status.TLabel", background="#F8FAFC", foreground=MUTED, padding=(10, 7), font=FONT_SMALL)
+        style.configure("StatusSuccess.TLabel", background="#ECFDF3", foreground=GREEN, padding=(10, 7), font=FONT_SMALL)
+        style.configure("StatusWarning.TLabel", background="#FFFAEB", foreground=AMBER, padding=(10, 7), font=FONT_SMALL)
+        style.configure("StatusFail.TLabel", background="#FEF3F2", foreground=RED, padding=(10, 7), font=FONT_SMALL)
         style.configure("Matrix.TLabel", background="#F8FAFC", foreground=INK, padding=(4, 4), font=FONT_MONO)
-        style.configure("Primary.TButton", background=BLUE, foreground="white", padding=(14, 8), borderwidth=0)
-        style.map("Primary.TButton", background=[("active", "#1D4ED8"), ("disabled", "#98A2B3")])
-        style.configure("Quiet.TButton", padding=(8, 4))
+        style.configure("TButton", font=FONT_BODY, padding=UI["control_padding"], borderwidth=0)
+        style.map("TButton", background=[("active", UI["hover"]), ("pressed", BORDER)])
+        style.configure("Primary.TButton", background=BLUE, foreground="white", padding=(14, 7), borderwidth=0)
+        style.map("Primary.TButton", background=[("active", "#1D4ED8"), ("disabled", UI["disabled"])])
+        style.configure("Quiet.TButton", foreground="#344054", padding=UI["compact_padding"])
+        style.configure("Nav.TButton", background="#FFFFFF", foreground="#344054", anchor="w", padding=(16, 11), font=FONT_BODY, borderwidth=0)
+        style.map("Nav.TButton", background=[("active", "#EEF4FF")], foreground=[("active", "#155EEF")])
+        style.configure("ActiveNav.TButton", background="#EAF2FF", foreground="#155EEF", anchor="w", padding=(16, 11), font=FONT_SMALL_BOLD, borderwidth=0)
+        style.configure("CardLink.TButton", background=PANEL, foreground="#155EEF", padding=(0, 4), borderwidth=0, font=FONT_SMALL_BOLD)
+        style.map("CardLink.TButton", background=[("active", PANEL)], foreground=[("active", "#004EEB")])
+        style.configure("TEntry", font=FONT_BODY, padding=(7, 5))
+        style.configure("TCombobox", font=FONT_BODY, padding=(7, 5))
+        style.configure("TCheckbutton", background=PANEL, foreground=INK, font=FONT_BODY, padding=(4, 3))
         style.configure("Kpi.TLabel", background=PANEL, foreground=INK, font=FONT_KPI)
         style.configure("KpiCompact.TLabel", background=PANEL, foreground=INK, font=FONT_KPI)
         style.configure("KpiCaption.TLabel", background=PANEL, foreground=MUTED, font=FONT_BODY)
-        style.configure("Treeview", rowheight=27, fieldbackground=PANEL, background=PANEL, foreground=INK, font=FONT_BODY)
-        style.configure("Treeview.Heading", background="#EAECF0", foreground=INK, font=FONT_SMALL_BOLD)
+        style.configure("Treeview", rowheight=UI["row_height"], fieldbackground=PANEL, background=PANEL, foreground=INK, font=FONT_SMALL)
+        style.map("Treeview", background=[("selected", UI["selection"])], foreground=[("selected", INK)])
+        style.configure("Treeview.Heading", background=UI["table_heading"], foreground=INK, font=FONT_SMALL_BOLD, relief="flat", padding=(7, 6))
+
+    def _install_app_icon(self) -> None:
+        icon_path = application_icon_path()
+        self.app_icon_path = icon_path
+        try:
+            self._app_icon = tk.PhotoImage(file=str(icon_path))
+            self.root.iconphoto(True, self._app_icon)
+            configure_macos_dock_icon(icon_path)
+        except tk.TclError:
+            # Keep startup reliable for rare Tk builds without PNG support.
+            self._app_icon = None
 
     def _build_menu(self) -> None:
         menu = tk.Menu(self.root)
@@ -580,7 +777,8 @@ class MatrixCorrectApp:
         self.config_menu = config_menu
         menu.add_cascade(label="配置", menu=config_menu)
         tools_menu = tk.Menu(menu, tearoff=False)
-        tools_menu.add_command(label="Gamma 优化...", command=self.open_gamma_optimizer)
+        tools_menu.add_command(label="首页", command=self.show_home_workspace)
+        tools_menu.add_command(label="Gamma 优化", command=self.open_gamma_optimizer)
         self.tools_menu = tools_menu
         menu.add_cascade(label="工具", menu=tools_menu)
         help_menu = tk.Menu(menu, tearoff=False)
@@ -589,13 +787,133 @@ class MatrixCorrectApp:
         menu.add_cascade(label="帮助", menu=help_menu)
         self.root.configure(menu=menu)
 
+    def _build_home_menu(self) -> None:
+        menu = tk.Menu(self.root)
+        file_menu = tk.Menu(menu, tearoff=False)
+        file_menu.add_command(label="打开 Imatest CSV...", command=lambda: self._run_cc_action(self.load_csv))
+        file_menu.add_command(label="打开 Qualcomm XML...", command=lambda: self._run_cc_action(self.load_xml))
+        file_menu.add_separator()
+        file_menu.add_command(label="退出", command=self.close)
+        menu.add_cascade(label="文件", menu=file_menu)
+        tools_menu = tk.Menu(menu, tearoff=False)
+        tools_menu.add_command(label="CC 校正", command=self.show_cc_workspace)
+        tools_menu.add_command(label="Gamma 优化", command=self.open_gamma_optimizer)
+        menu.add_cascade(label="工具", menu=tools_menu)
+        help_menu = tk.Menu(menu, tearoff=False)
+        help_menu.add_command(label="关于 TuneLab", command=lambda: messagebox.showinfo("关于", f"{APP_NAME}\nQualcomm Camera Tuning Workbench\n版本 0.2.0"))
+        menu.add_cascade(label="帮助", menu=help_menu)
+        self.root.configure(menu=menu)
+
+    def _build_home(self) -> None:
+        home = ttk.Frame(self.root, style="Home.TFrame")
+        self.home_view = home
+        home.columnconfigure(1, weight=1)
+        home.rowconfigure(0, weight=1)
+
+        sidebar = ttk.Frame(home, width=210, padding=(16, 22), style="Sidebar.TFrame")
+        sidebar.grid(row=0, column=0, sticky="nsew")
+        sidebar.grid_propagate(False)
+        ttk.Button(sidebar, text="⌂   首页", command=self.show_home_workspace, style="ActiveNav.TButton").pack(fill="x", pady=(0, 8))
+        ttk.Button(sidebar, text="◈   CC 校正", command=self.show_cc_workspace, style="Nav.TButton").pack(fill="x", pady=4)
+        ttk.Button(sidebar, text="⌁   Gamma 优化", command=self.open_gamma_optimizer, style="Nav.TButton").pack(fill="x", pady=4)
+        ttk.Separator(sidebar).pack(fill="x", pady=(18, 14))
+        ttk.Label(sidebar, text="当前工具", style="Subtitle.TLabel", background=PANEL).pack(anchor="w")
+        ttk.Label(sidebar, text="Qualcomm CC13", style="CardTitle.TLabel").pack(anchor="w", pady=(5, 0))
+        self.home_region_var = tk.StringVar(value="Region：未选择")
+        ttk.Label(sidebar, textvariable=self.home_region_var, style="Card.TLabel", wraplength=174).pack(anchor="w", pady=(4, 0))
+        ttk.Label(sidebar, text="●  本地工作区", foreground=GREEN, background=PANEL, font=FONT_SMALL).pack(anchor="w", side="bottom", pady=(0, 4))
+
+        content = ttk.Frame(home, padding=(36, 26), style="Home.TFrame")
+        content.grid(row=0, column=1, sticky="nsew")
+        content.columnconfigure(0, weight=1)
+
+        hero = ttk.Frame(content, style="Home.TFrame")
+        hero.grid(row=0, column=0, sticky="ew", pady=(0, 24))
+        if self._app_icon is not None:
+            divisor = max(1, self._app_icon.width() // 72)
+            self._home_icon = self._app_icon.subsample(divisor, divisor)
+            ttk.Label(hero, image=self._home_icon, background="#F8FAFC").pack(side="left", padx=(0, 18))
+        brand = ttk.Frame(hero, style="Home.TFrame")
+        brand.pack(side="left")
+        ttk.Label(brand, text="TuneLab", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(brand, text="Qualcomm Camera Tuning Workbench", style="Subtitle.TLabel").pack(anchor="w", pady=(3, 0))
+        ttk.Button(hero, text="帮助", command=self.show_assumptions, style="Quiet.TButton").pack(side="right", padx=(8, 0))
+        ttk.Button(hero, text="设置", command=lambda: self._run_cc_action(self.import_settings), style="Quiet.TButton").pack(side="right", padx=(8, 0))
+
+        ttk.Label(content, text="常用工具", style="Title.TLabel", font=FONT_CARD_TITLE).grid(row=1, column=0, sticky="w", pady=(0, 10))
+        tools = ttk.Frame(content, style="Home.TFrame")
+        tools.grid(row=2, column=0, sticky="ew")
+        tools.columnconfigure(0, weight=1, uniform="home-tools")
+        tools.columnconfigure(1, weight=1, uniform="home-tools")
+        self._build_home_tool_card(
+            tools, 0, "▣", "CC 校正", "CCM / CC13",
+            "色彩矩阵与色彩校正优化\n快速调整色彩表现与准确性", self.show_cc_workspace, "#2E90FA",
+        )
+        self._build_home_tool_card(
+            tools, 1, "⌁", "Gamma 优化", "灰阶 / LUT",
+            "灰阶曲线与 LUT 优化\n提升层次与对比度表现", self.open_gamma_optimizer, "#12B76A",
+        )
+
+        lower = ttk.Frame(content, style="Home.TFrame")
+        lower.grid(row=3, column=0, sticky="nsew", pady=(22, 0))
+        lower.columnconfigure(0, weight=3, uniform="home-lower")
+        lower.columnconfigure(1, weight=2, uniform="home-lower")
+        recent = ttk.Frame(lower, padding=18, style="HomeCard.TFrame")
+        recent.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        ttk.Label(recent, text="最近优化", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Separator(recent).pack(fill="x", pady=(10, 6))
+        self.home_recent_frame = ttk.Frame(recent, style="Card.TFrame")
+        self.home_recent_frame.pack(fill="both", expand=True)
+
+        quick = ttk.Frame(lower, padding=18, style="HomeCard.TFrame")
+        quick.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        ttk.Label(quick, text="快捷操作", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 10))
+        ttk.Button(quick, text="打开测试数据", command=lambda: self._run_cc_action(self.load_csv), style="Quiet.TButton").pack(fill="x", pady=5)
+        ttk.Button(quick, text="打开 CC XML", command=lambda: self._run_cc_action(self.load_xml), style="Quiet.TButton").pack(fill="x", pady=5)
+        ttk.Button(quick, text="查看 History", command=self._show_cc_history, style="Quiet.TButton").pack(fill="x", pady=5)
+        self._render_home_recent()
+
+    def _build_home_tool_card(self, parent: tk.Misc, column: int, glyph: str, title: str, subtitle: str, description: str, command: Callable[[], object], colour: str) -> None:
+        card = ttk.Frame(parent, padding=22, style="HomeCard.TFrame")
+        card.grid(row=0, column=column, sticky="nsew", padx=(0, 10) if column == 0 else (10, 0))
+        ttk.Label(card, text=glyph, foreground=colour, background=PANEL, font=FONT_TITLE).pack(anchor="w")
+        ttk.Label(card, text=title, style="CardTitle.TLabel").pack(anchor="w", pady=(8, 0))
+        ttk.Label(card, text=subtitle, style="Card.TLabel", foreground=MUTED).pack(anchor="w", pady=(2, 14))
+        ttk.Label(card, text=description, style="Card.TLabel", justify="left").pack(anchor="w")
+        ttk.Button(card, text="打开  →", command=command, style="CardLink.TButton").pack(anchor="w", pady=(22, 0))
+
+    def _render_home_recent(self) -> None:
+        if not hasattr(self, "home_recent_frame"):
+            return
+        for child in self.home_recent_frame.winfo_children():
+            child.destroy()
+        records = list(reversed(self.history[-3:]))
+        if not records:
+            ttk.Label(self.home_recent_frame, text="尚无优化记录", style="Card.TLabel", foreground=MUTED).pack(anchor="w", pady=12)
+            return
+        for record in records:
+            row = ttk.Frame(self.home_recent_frame, padding=(4, 8), style="Card.TFrame")
+            row.pack(fill="x")
+            ttk.Label(row, text=record.dataset_name, style="Card.TLabel").pack(side="left")
+            ttk.Label(row, text=f"{record.mean_before:.3f} → {record.mean_after:.3f}  ·  {record.matrix_status}", style="Card.TLabel", foreground=GREEN if record.matrix_status == "PASS" else AMBER).pack(side="right")
+            ttk.Separator(self.home_recent_frame).pack(fill="x")
+
+    def _run_cc_action(self, action: Callable[[], None]) -> None:
+        self.show_cc_workspace()
+        self.root.after_idle(action)
+
+    def _show_cc_history(self) -> None:
+        self.show_cc_workspace()
+        self.notebook.select(3)
+
     def _build_ui(self) -> None:
-        outer = ttk.Frame(self.root, padding=(20, 16), style="Root.TFrame")
+        outer = ttk.Frame(self.root, padding=(16, 12), style="Root.TFrame")
+        self.cc_view = outer
         outer.pack(fill="both", expand=True)
         header = ttk.Frame(outer, style="Root.TFrame")
         header.pack(fill="x", pady=(0, 12))
-        ttk.Label(header, text="MatrixCorrect", style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text="Qualcomm CC13 色彩还原、模拟与 XML 回写", style="Subtitle.TLabel").pack(side="left", padx=(14, 0), pady=(8, 0))
+        ttk.Label(header, text="CC 校正", style="Title.TLabel").pack(side="left")
+        ttk.Label(header, text="Imatest ColorChecker · Qualcomm CC13 Matrix", style="Subtitle.TLabel").pack(side="left", padx=(14, 0), pady=(8, 0))
 
         controls = ttk.Frame(outer, padding=14, style="Card.TFrame")
         controls.pack(fill="x", pady=(0, 10))
@@ -635,7 +953,7 @@ class MatrixCorrectApp:
         parameters = ttk.Frame(outer, padding=(14, 10), style="Card.TFrame")
         parameters.pack(fill="x", pady=(0, 10))
         config = self.settings.optimization
-        ttk.Label(parameters, text="Optimization Strategy", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(parameters, text="优化策略", style="Card.TLabel").grid(row=0, column=0, sticky="w")
         self.strategy_var = tk.StringVar(value=config.strategy)
         ttk.Combobox(
             parameters,
@@ -644,19 +962,19 @@ class MatrixCorrectApp:
             state="readonly",
             width=14,
         ).grid(row=1, column=0, sticky="w", padx=(0, 12))
-        ttk.Label(parameters, text="Regularization", style="Card.TLabel").grid(row=0, column=1, sticky="w")
+        ttk.Label(parameters, text="正则化", style="Card.TLabel").grid(row=0, column=1, sticky="w")
         self.regularization_var = tk.StringVar(value="Auto" if config.regularization is None else f"{config.regularization:g}")
         ttk.Entry(parameters, textvariable=self.regularization_var, width=10).grid(row=1, column=1, sticky="w", padx=(0, 12))
         ttk.Label(parameters, text="饱和度系数", style="Card.TLabel").grid(row=0, column=2, sticky="w")
         self.saturation_var = tk.StringVar(value=f"{config.saturation_factor:g}")
         ttk.Entry(parameters, textvariable=self.saturation_var, width=9).grid(row=1, column=2, sticky="w", padx=(0, 12))
-        ttk.Label(parameters, text="重点 Patch", style="Card.TLabel").grid(row=0, column=3, sticky="w")
+        ttk.Label(parameters, text="重点色块", style="Card.TLabel").grid(row=0, column=3, sticky="w")
         self.focus_patches_var = tk.StringVar(value=",".join(str(zone) for zone in config.focus_patches))
         ttk.Entry(parameters, textvariable=self.focus_patches_var, width=15).grid(row=1, column=3, sticky="w", padx=(0, 12))
         ttk.Label(parameters, text="重点权重", style="Card.TLabel").grid(row=0, column=4, sticky="w")
         self.focus_weight_var = tk.StringVar(value=f"{config.focus_weight:g}")
         ttk.Entry(parameters, textvariable=self.focus_weight_var, width=9).grid(row=1, column=4, sticky="w", padx=(0, 12))
-        ttk.Label(parameters, text="系数 Min / Max", style="Card.TLabel").grid(row=0, column=5, sticky="w")
+        ttk.Label(parameters, text="系数范围", style="Card.TLabel").grid(row=0, column=5, sticky="w")
         bounds = ttk.Frame(parameters, style="Card.TFrame")
         bounds.grid(row=1, column=5, sticky="w", padx=(0, 12))
         self.coefficient_min_var = tk.StringVar(value=f"{config.coefficient_min:g}")
@@ -665,7 +983,7 @@ class MatrixCorrectApp:
         ttk.Label(bounds, text=" / ", style="Card.TLabel").pack(side="left")
         ttk.Entry(bounds, textvariable=self.coefficient_max_var, width=7).pack(side="left")
         self.show_motion_var = tk.BooleanVar(value=self.settings.show_motion)
-        ttk.Checkbutton(parameters, text="Show Motion", variable=self.show_motion_var, command=self._on_show_motion_changed).grid(row=1, column=6, sticky="w", padx=(0, 12))
+        ttk.Checkbutton(parameters, text="显示轨迹", variable=self.show_motion_var, command=self._on_show_motion_changed).grid(row=1, column=6, sticky="w", padx=(0, 12))
         ttk.Button(parameters, text="恢复 a*b* 视图", command=self._reset_lab_view, style="Quiet.TButton").grid(row=1, column=7, sticky="w", padx=(0, 12))
         ttk.Label(parameters, text="参数自动保存 · 图中滚轮缩放 / 双击复位", style="Card.TLabel").grid(row=1, column=8, sticky="e")
         parameters.columnconfigure(8, weight=1)
@@ -679,7 +997,8 @@ class MatrixCorrectApp:
         self.active_region_var = tk.StringVar(value="当前 Region：未选择")
         ttk.Label(info, textvariable=self.active_region_var, style="ActiveRegion.TLabel").pack(side="right", padx=(18, 0))
         self.status_var = tk.StringVar()
-        ttk.Label(outer, textvariable=self.status_var, style="Status.TLabel").pack(fill="x", pady=(0, 10))
+        self.status_label = ttk.Label(outer, textvariable=self.status_var, style="Status.TLabel")
+        self.status_label.pack(fill="x", pady=(0, 10))
 
         self.notebook = ttk.Notebook(outer)
         self.notebook.pack(fill="both", expand=True)
@@ -700,7 +1019,7 @@ class MatrixCorrectApp:
             summary_row.columnconfigure(column, weight=2, uniform="summary-matrix")
         summary_row.rowconfigure(0, weight=1)
         self.kpi_vars: list[tk.StringVar] = []
-        for column, caption in enumerate(("平均 ΔE00", "最大 ΔE00", "改善率", "改善 / 退化")):
+        for column, caption in enumerate(("平均 ΔE00", "最大 ΔE00", "平均改善", "改善 / 退化")):
             frame = ttk.Frame(summary_row, padding=(8, 7), style="Card.TFrame")
             frame.grid(row=0, column=column, sticky="nsew", padx=(0, 6))
             value_var = tk.StringVar(value="—")
@@ -715,7 +1034,7 @@ class MatrixCorrectApp:
 
         self.original_panel = MatrixPanel(summary_row, "改前 CC")
         self.original_panel.grid(row=0, column=4, sticky="nsew", padx=(0, 6))
-        self.correction_panel = MatrixPanel(summary_row, "Delta correction A · M新=A×M旧")
+        self.correction_panel = MatrixPanel(summary_row, "Delta correction")
         self.correction_panel.grid(row=0, column=5, sticky="nsew", padx=(0, 6))
         self.optimized_panel = MatrixPanel(summary_row, "改后 CC")
         self.optimized_panel.grid(row=0, column=6, sticky="nsew")
@@ -724,14 +1043,14 @@ class MatrixCorrectApp:
         plot_container.pack(fill="both", expand=True)
         plot_container.columnconfigure(0, weight=1, uniform="lab-plots")
         plot_container.columnconfigure(1, weight=1, uniform="lab-plots")
-        plot_container.columnconfigure(2, weight=0, minsize=520)
+        plot_container.columnconfigure(2, weight=0, minsize=460)
         plot_container.rowconfigure(0, weight=1)
-        self.before_plot = LabPlot(plot_container, "改前：Camera → Ideal", self.lab_view, self._redraw_plots, self._show_patch_detail)
+        self.before_plot = LabPlot(plot_container, "改前：Camera → Ideal", self.lab_view, self._redraw_plots, self._show_patch_detail, self._clear_patch_selection)
         self.before_plot.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
-        self.after_plot = LabPlot(plot_container, "改后模拟：Camera → Ideal", self.lab_view, self._redraw_plots, self._show_patch_detail)
+        self.after_plot = LabPlot(plot_container, "改后模拟：Camera → Ideal", self.lab_view, self._redraw_plots, self._show_patch_detail, self._clear_patch_selection)
         self.after_plot.grid(row=0, column=1, sticky="nsew", padx=5)
 
-        self.patch_table_panel = ttk.Frame(plot_container, width=520, padding=8, style="Card.TFrame")
+        self.patch_table_panel = ttk.Frame(plot_container, width=460, padding=8, style="Card.TFrame")
         self.patch_table_panel.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
         self.patch_table_panel.grid_propagate(False)
         self.patch_table_panel.columnconfigure(0, weight=1)
@@ -759,13 +1078,18 @@ class MatrixCorrectApp:
             "module": "建议模块",
         }
         widths = {"zone": 48, "name": 72, "category": 72, "weight": 54, "before": 82, "after": 82, "change": 68, "dl": 108, "dc": 108, "dh": 108, "regression": 88, "status": 84, "module": 170}
+        self._patch_headings = headings
+        sortable_columns = {"zone", "weight", "before", "after", "change", "regression", "status"}
         for column in columns:
-            self.tree.heading(column, text=headings[column])
-            self.tree.column(column, width=widths[column], minwidth=widths[column], stretch=False, anchor="center" if column != "module" else "w")
+            self.tree.heading(column, text=headings[column], command=(lambda key=column: self._sort_patch_table(key)) if column in sortable_columns else "")
+            numeric = {"zone", "weight", "before", "after", "change", "dl", "dc", "dh", "regression"}
+            self.tree.column(column, width=widths[column], minwidth=widths[column], stretch=False, anchor="e" if column in numeric else ("w" if column == "module" else "center"))
         self.tree.tag_configure("improved", foreground="#067647")
         self.tree.tag_configure("regressed", foreground="#B42318")
+        self.tree.tag_configure("WARNING", foreground=AMBER)
+        self.tree.tag_configure("FAIL", foreground=RED)
         self.tree.tag_configure("neutral", background="#F8FAFC")
-        self.tree.tag_configure("focus", background="#EAF2FF", font=FONT_SMALL_BOLD)
+        self.tree.tag_configure("focus", background=UI["focus_patch"], font=FONT_SMALL_BOLD)
         vertical_scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         horizontal_scrollbar = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vertical_scrollbar.set, xscrollcommand=horizontal_scrollbar.set)
@@ -801,7 +1125,7 @@ class MatrixCorrectApp:
             relief="flat",
             padx=16,
             pady=12,
-            font=FONT_BODY,
+            font=FONT_MONO,
         )
         self.statistics_text.pack(fill="both", expand=True, pady=(8, 0))
 
@@ -810,6 +1134,9 @@ class MatrixCorrectApp:
         ttk.Label(advice_header, text="CCM 只能做全局线性修正；工具会把不适合交给 CC 的问题路由到对应模块。", style="Subtitle.TLabel").pack(side="left")
         self.advice_text = tk.Text(advice, wrap="word", background=PANEL, foreground=INK, relief="flat", padx=18, pady=16, font=FONT_BODY)
         self.advice_text.pack(fill="both", expand=True)
+        self.advice_text.tag_configure("section", font=FONT_CARD_TITLE, foreground=INK, spacing1=10, spacing3=4)
+        self.advice_text.tag_configure("module", font=FONT_SMALL_BOLD, foreground="#1D4ED8", spacing1=8)
+        self.advice_text.tag_configure("detail", spacing3=3)
         self._set_advice("尚未运行优化。")
 
         history_actions = ttk.Frame(history_tab, style="Root.TFrame")
@@ -826,10 +1153,11 @@ class MatrixCorrectApp:
             ("time", "Time", 165), ("dataset", "Dataset", 210), ("strategy", "Strategy", 100),
             ("mean", "Average ΔE00", 150), ("pass", "Pass≤3", 150), ("matrix", "Matrix", 90),
         ):
-            self.history_tree.heading(column, text=caption)
+            self.history_tree.heading(column, text=caption, command=self._sort_history_by_time if column == "time" else "")
             self.history_tree.column(column, width=width, anchor="w")
         self.history_tree.pack(fill="x")
         self.history_tree.bind("<<TreeviewSelect>>", self._on_history_selected)
+        self.history_tree.bind("<Double-Button-1>", self._on_history_selected)
         ttk.Label(history_tab, text="XML Unified Diff（只应出现选中 region 的 9 个 c_tab 数值）", style="Subtitle.TLabel").pack(anchor="w", pady=(10, 4))
         self.diff_text = tk.Text(
             history_tab,
@@ -845,13 +1173,27 @@ class MatrixCorrectApp:
         self.diff_text.pack(fill="both", expand=True)
         self._render_history()
 
-    def _set_status(self, text: str) -> None:
+    def _set_status(self, text: str, level: str = "info") -> None:
         self.status_var.set(text)
+        inferred = level.lower()
+        if inferred == "info":
+            upper = text.upper()
+            if "FAIL" in upper or "失败" in text:
+                inferred = "fail"
+            elif "WARNING" in upper or "警告" in text:
+                inferred = "warning"
+            elif text.startswith(("已", "优化完成")):
+                inferred = "success"
+        style = {"success": "StatusSuccess.TLabel", "warning": "StatusWarning.TLabel", "fail": "StatusFail.TLabel"}.get(inferred, "Status.TLabel")
+        self.status_label.configure(style=style)
 
     def _set_advice(self, text: str) -> None:
         self.advice_text.configure(state="normal")
         self.advice_text.delete("1.0", "end")
-        self.advice_text.insert("1.0", text)
+        section_titles = {"优化摘要", "Explainable Optimization", "模块诊断（Confidence / Root Cause）", "警告与前提", "模拟边界"}
+        for line in text.splitlines():
+            tag = "section" if line in section_titles else "module" if line.startswith("· ") and " · " in line else "detail"
+            self.advice_text.insert("end", line + "\n", tag)
         self.advice_text.configure(state="disabled")
 
     def _config_from_controls(self) -> OptimizationConfig:
@@ -964,7 +1306,7 @@ class MatrixCorrectApp:
 
     def import_settings(self) -> None:
         path = filedialog.askopenfilename(
-            title="导入 MatrixCorrect 配置",
+            title="导入 TuneLab 配置",
             filetypes=[("JSON 配置", "*.json"), ("所有文件", "*.*")],
         )
         if not path:
@@ -995,9 +1337,9 @@ class MatrixCorrectApp:
             messagebox.showerror("配置无效", str(exc))
             return
         path = filedialog.asksaveasfilename(
-            title="导出 MatrixCorrect 配置",
+            title="导出 TuneLab 配置",
             defaultextension=".json",
-            initialfile="MatrixCorrect_settings.json",
+            initialfile="TuneLab_settings.json",
             filetypes=[("JSON 配置", "*.json")],
             confirmoverwrite=True,
         )
@@ -1010,10 +1352,50 @@ class MatrixCorrectApp:
             return
         self._set_status(f"已导出标准 JSON 配置：{path}")
 
-    def open_gamma_optimizer(self) -> None:
-        from .gamma_app import open_gamma_window
+    def open_gamma_optimizer(self):
+        self.home_view.pack_forget()
+        if self.gamma_app is None or not self.gamma_app.is_alive():
+            from .gamma_app import GammaOptimizationApp
 
-        open_gamma_window(self.root)
+            self.cc_view.pack_forget()
+            self.gamma_app = GammaOptimizationApp(self.root, on_close=self.show_cc_workspace, on_home=self.show_home_workspace)
+        else:
+            self.cc_view.pack_forget()
+            # show() performs a Tcl-level existence check.  Recreate the tool
+            # if a native window close invalidated the previous frame.
+            if not self.gamma_app.show():
+                from .gamma_app import GammaOptimizationApp
+
+                self.gamma_app = GammaOptimizationApp(self.root, on_close=self.show_cc_workspace, on_home=self.show_home_workspace)
+        return self.gamma_app
+
+    def show_cc_workspace(self) -> None:
+        self.home_view.pack_forget()
+        if self.gamma_app is not None:
+            if self.gamma_app.is_alive():
+                self.gamma_app.hide()
+            else:
+                self.gamma_app = None
+        self.root.title(CC_WINDOW_TITLE)
+        self._configure_styles()
+        self._build_menu()
+        self.cc_view.pack(fill="both", expand=True)
+
+    def show_home_workspace(self) -> None:
+        self.cc_view.pack_forget()
+        if self.gamma_app is not None and self.gamma_app.is_alive():
+            self.gamma_app.hide()
+        self.root.title(APP_TITLE)
+        self._configure_styles()
+        self._build_home_menu()
+        self._render_home_recent()
+        if self.selected_region is None:
+            self.home_region_var.set("Region：未选择")
+        else:
+            cct = self.selected_region.cct_range
+            suffix = f" · CCT {cct.start:g}–{cct.end:g}K" if cct else ""
+            self.home_region_var.set(f"Region #{self.selected_region.index}{suffix}")
+        self.home_view.pack(fill="both", expand=True)
 
     def close(self) -> None:
         self._closing = True
@@ -1097,6 +1479,42 @@ class MatrixCorrectApp:
             return
         self._show_patch_detail(zone)
 
+    def _clear_patch_selection(self) -> None:
+        self.before_plot.selected_zone = None
+        self.after_plot.selected_zone = None
+        self._syncing_patch_selection = True
+        try:
+            self.tree.selection_remove(self.tree.selection())
+        finally:
+            self._syncing_patch_selection = False
+        self._redraw_plots()
+
+    def _sort_patch_table(self, column: str) -> None:
+        if self.result is None:
+            return
+        self._patch_sort_reverse = not self._patch_sort_reverse if column == self._patch_sort_column else False
+        self._patch_sort_column = column
+        status_order = {"PASS": 0, "WARNING": 1, "FAIL": 2}
+        getters = {
+            "zone": lambda patch: patch.zone,
+            "weight": lambda patch: patch.priority_weight,
+            "before": lambda patch: patch.delta_e_before,
+            "after": lambda patch: patch.delta_e_after,
+            "change": lambda patch: patch.delta_e_before - patch.delta_e_after,
+            "regression": lambda patch: patch.regression,
+            "status": lambda patch: status_order.get(patch.regression_status, 99),
+        }
+        ordered = sorted(self.result.patch_results, key=getters[column], reverse=self._patch_sort_reverse)
+        for index, patch in enumerate(ordered):
+            self.tree.move(f"patch-{patch.zone}", "", index)
+        for key, title in self._patch_headings.items():
+            indicator = " ▲" if key == column and not self._patch_sort_reverse else " ▼" if key == column else ""
+            self.tree.heading(key, text=title + indicator)
+
+    def _sort_history_by_time(self) -> None:
+        self._history_sort_reverse = not self._history_sort_reverse
+        self._render_history()
+
     def _set_statistics(self, text: str) -> None:
         self.statistics_text.configure(state="normal")
         self.statistics_text.delete("1.0", "end")
@@ -1108,7 +1526,8 @@ class MatrixCorrectApp:
             return
         for item in self.history_tree.get_children():
             self.history_tree.delete(item)
-        for index, record in enumerate(reversed(self.history)):
+        records = list(reversed(self.history)) if self._history_sort_reverse else list(self.history)
+        for index, record in enumerate(records):
             self.history_tree.insert(
                 "",
                 "end",
@@ -1128,8 +1547,8 @@ class MatrixCorrectApp:
         if not selection:
             return
         try:
-            reverse_index = int(selection[0].split("-", 1)[1])
-            record = self.history[-1 - reverse_index]
+            display_index = int(selection[0].split("-", 1)[1])
+            record = (list(reversed(self.history)) if self._history_sort_reverse else self.history)[display_index]
         except (ValueError, IndexError):
             return
         matrix_text = "\n".join(" ".join(f"{value:.7f}" for value in row) for row in record.optimized_matrix)
@@ -1153,7 +1572,7 @@ class MatrixCorrectApp:
             messagebox.showerror("清空失败", str(exc))
             return
         self._render_history()
-        self._set_status("Matrix History 已清空。")
+        self._set_status("Matrix History 已清空。", "success")
 
     def load_csv(self) -> None:
         path = filedialog.askopenfilename(title="打开 Imatest summary CSV", filetypes=[("CSV", "*.csv"), ("所有文件", "*.*")])
@@ -1172,11 +1591,8 @@ class MatrixCorrectApp:
             except (OSError, ValueError):
                 messagebox.showerror("CSV 读取失败", str(cc_exc))
                 return
-            from .gamma_app import open_gamma_window
-
-            gamma_app = open_gamma_window(self.root)
+            gamma_app = self.open_gamma_optimizer()
             gamma_app.load_csv(path)
-            self._set_status(f"{Path(path).name} 是 Gray/Stepchart CSV，已转到独立 Gamma 优化窗口。")
             return
         self.csv_label.configure(text=f"CSV：{Path(path).name} · {len(self.dataset.patches)} patches")
         if self.dataset.inferred_cct is not None:
@@ -1279,8 +1695,8 @@ class MatrixCorrectApp:
             last_report_format=self.settings.last_report_format,
         )
         self._persist_settings()
-        self.optimize_button.configure(state="disabled")
-        self._set_status("正在搜索 Regularization、工程边界与 Regression Protection 候选…")
+        self.optimize_button.configure(state="disabled", text="优化中…")
+        self._set_status("正在搜索参数并验证工程约束…")
         self.root.update_idletasks()
         try:
             self.result = optimize_ccm(
@@ -1298,7 +1714,7 @@ class MatrixCorrectApp:
             self.optimize_button.configure(state="normal")
             return
         finally:
-            self.optimize_button.configure(state="normal")
+            self.optimize_button.configure(state="normal", text="3  自动优化")
         record = record_from_result(
             self.result,
             dataset_name=self.dataset.source_path.name,
@@ -1319,7 +1735,7 @@ class MatrixCorrectApp:
         self.after_plot.selected_zone = None
         composition = self.COMPOSITION_LABELS.get(self.composition_var.get(), "pre")
         relation = "M新=A×M旧" if composition == "pre" else "M新=M旧×Aᵀ"
-        self.correction_panel.set_title(f"Delta correction A · {relation}")
+        self.correction_panel.set_title("Delta correction")
         self.correction_panel.set_matrix(None)
         self.optimized_panel.set_matrix(None)
         self.save_xml_button.configure(state="disabled")
@@ -1346,7 +1762,7 @@ class MatrixCorrectApp:
         self.after_plot.selected_zone = None
         self.original_panel.set_matrix(result.original_matrix)
         relation = "M新=A×M旧" if result.composition == "pre" else "M新=M旧×Aᵀ"
-        self.correction_panel.set_title(f"Delta correction A · {relation}")
+        self.correction_panel.set_title("Delta correction")
         self.correction_panel.set_matrix(result.correction_matrix)
         self.optimized_panel.set_matrix(result.optimized_matrix)
         self.kpi_vars[0].set(f"{result.mean_before:.2f} → {result.mean_after:.2f}")
@@ -1375,6 +1791,8 @@ class MatrixCorrectApp:
             if patch.zone in focus_zones:
                 tags.append("focus")
             tags.append("improved" if patch.delta_e_after <= patch.delta_e_before else "regressed")
+            if patch.regression_status in {"WARNING", "FAIL"}:
+                tags.append(patch.regression_status)
             self.tree.insert(
                 "",
                 "end",
@@ -1482,9 +1900,12 @@ class MatrixCorrectApp:
         self.diff_text.delete("1.0", "end")
         self.diff_text.insert("1.0", self.xml_diff or "No XML changes.")
         self.diff_text.configure(state="disabled")
+        region = f"#{self.selected_region.index}" if self.selected_region is not None else "—"
+        level = "success" if result.matrix_health.status == "PASS" else "warning" if result.matrix_health.status == "WARNING" else "fail"
         self._set_status(
-            f"优化完成：平均 ΔE00 {result.mean_before:.3f} → {result.mean_after:.3f} "
-            f"({result.mean_improvement_percent:+.1f}%)；Matrix={result.matrix_health.status}；已记录第 {len(self.history)} 轮。"
+            f"✓ 优化完成 | 平均 ΔE00 {result.mean_before:.3f} → {result.mean_after:.3f} "
+            f"（{result.mean_improvement_percent:+.1f}%） | Matrix {result.matrix_health.status} | 第 {len(self.history)} 轮 | Region {region}",
+            level,
         )
 
     def save_xml(self) -> None:
@@ -1510,8 +1931,7 @@ class MatrixCorrectApp:
         except (OSError, QualcommXMLError) as exc:
             messagebox.showerror("保存失败", str(exc))
             return
-        self._set_status(f"已保存并回读校验：{path}")
-        messagebox.showinfo("保存成功", f"仅 region #{self.selected_region.index} 的 c_tab/c 已更新。\n{path}")
+        self._set_status(f"已保存并回读校验：仅 region #{self.selected_region.index} 的 c_tab/c 已更新。{path}", "success")
 
     def save_report(self) -> None:
         if self.dataset is None or self.result is None or self.selected_region is None:
@@ -1520,7 +1940,7 @@ class MatrixCorrectApp:
         report_format = self.settings.last_report_format
         default_name = f"{self.dataset.source_path.stem}_ccm_analysis.{report_format}"
         path = filedialog.asksaveasfilename(
-            title="导出 MatrixCorrect 工程报告",
+            title="导出 TuneLab 工程报告",
             defaultextension=f".{report_format}",
             initialfile=default_name,
             filetypes=[
@@ -1548,7 +1968,7 @@ class MatrixCorrectApp:
         if suffix in {"csv", "html", "pdf", "xlsx"}:
             self.settings = replace(self.settings, last_report_format=suffix)
             self._persist_settings()
-        self._set_status(f"已导出分析报告：{path}")
+        self._set_status(f"已导出分析报告：{path}", "success")
 
     def show_assumptions(self) -> None:
         messagebox.showinfo(
@@ -1562,6 +1982,7 @@ class MatrixCorrectApp:
 
 
 def main() -> None:
+    configure_macos_application_identity()
     root = tk.Tk()
     MatrixCorrectApp(root)
     root.mainloop()

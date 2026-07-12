@@ -23,12 +23,16 @@ def main() -> int:
         "--clean",
         "--windowed",
         "--name",
-        "MatrixCorrect",
+        "TuneLab",
+        "--icon",
+        str(ROOT / "source" / "app.png"),
+        "--add-data",
+        f"{ROOT / 'source' / 'app.png'}:source",
         "--paths",
         str(ROOT),
     ]
     if platform.system() == "Darwin":
-        command.extend(["--osx-bundle-identifier", "com.matrixcorrect.app"])
+        command.extend(["--osx-bundle-identifier", "com.tunelab.app"])
     command.append(str(ROOT / "run_matrixcorrect.py"))
     print("Building:", " ".join(command))
     return subprocess.call(command, cwd=ROOT)
