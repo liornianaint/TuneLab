@@ -9,6 +9,9 @@ from statistics import mean
 from typing import Iterable, Optional, Sequence, Union
 
 from .imatest import ImatestCSVError, parse_imatest_csv
+from .gamma_models import GammaOptimizationConfig
+from .gamma_optimizer import optimize_gamma_lut
+from .gray_imatest import GrayCSVError, analyze_gray_range, parse_gray_csv
 from .models import OptimizationConfig
 from .optimizer import (
     NEUTRAL_PATCHES,
@@ -18,6 +21,7 @@ from .optimizer import (
     optimize_ccm,
 )
 from .qualcomm_xml import QualcommCCDocument, QualcommXMLError
+from .qualcomm_gamma_xml import QualcommGammaDocument, QualcommGammaXMLError
 
 
 @dataclass(frozen=True)
@@ -46,15 +50,37 @@ class GoldenCaseResult:
 
 
 @dataclass(frozen=True)
+class GammaGoldenCaseResult:
+    case_id: str
+    csv_path: str
+    xml_path: str
+    status: str
+    reasons: tuple[str, ...]
+    before_steps: int
+    target_steps: int
+    after_steps: int
+    rmse_before: float
+    rmse_after: float
+    curve_status: str
+    lut_length: int
+    maximum_value: int
+
+
+@dataclass(frozen=True)
 class GoldenSuiteResult:
     status: str
     cases: tuple[GoldenCaseResult, ...]
     csv_count: int
     xml_count: int
+    gamma_cases: tuple[GammaGoldenCaseResult, ...] = ()
 
     @property
     def passed_count(self) -> int:
         return sum(case.status == "PASS" for case in self.cases)
+
+    @property
+    def gamma_passed_count(self) -> int:
+        return sum(case.status == "PASS" for case in self.gamma_cases)
 
     def to_dict(self) -> dict:
         return {
@@ -63,12 +89,15 @@ class GoldenSuiteResult:
             "xml_count": self.xml_count,
             "passed_count": self.passed_count,
             "case_count": len(self.cases),
+            "gamma_passed_count": self.gamma_passed_count,
+            "gamma_case_count": len(self.gamma_cases),
             "pass_rate_rule": {
                 "metric": "CIEDE2000",
                 "operator": PASS_RATE_COMPARATOR,
                 "thresholds": list(PASS_THRESHOLDS),
             },
             "cases": [asdict(case) for case in self.cases],
+            "gamma_cases": [asdict(case) for case in self.gamma_cases],
         }
 
 
@@ -108,6 +137,26 @@ def discover_golden_inputs(source_directories: Sequence[Union[str, Path]]) -> tu
         try:
             QualcommCCDocument.load(path)
         except (OSError, QualcommXMLError):
+            continue
+        xml_files.append(path)
+    return csv_files, xml_files
+
+
+def discover_gamma_golden_inputs(
+    source_directories: Sequence[Union[str, Path]],
+) -> tuple[list[Path], list[Path]]:
+    csv_files: list[Path] = []
+    for path in _unique_files(source_directories, ".csv"):
+        try:
+            parse_gray_csv(path)
+        except (OSError, GrayCSVError):
+            continue
+        csv_files.append(path)
+    xml_files: list[Path] = []
+    for path in _unique_files(source_directories, ".xml"):
+        try:
+            QualcommGammaDocument.load(path)
+        except (OSError, QualcommGammaXMLError):
             continue
         xml_files.append(path)
     return csv_files, xml_files
@@ -217,8 +266,91 @@ def run_golden_suite(
                         0.0, 0.0, 0.0, (), (), 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                     )
                 )
-    suite_status = "PASS" if cases and all(case.status == "PASS" for case in cases) else "FAIL"
-    return GoldenSuiteResult(suite_status, tuple(cases), len(csv_files), len(xml_files))
+    gamma_csv_files, gamma_xml_files = discover_gamma_golden_inputs(source_directories)
+    gamma_cases: list[GammaGoldenCaseResult] = []
+    for gamma_xml_path in gamma_xml_files:
+        document = QualcommGammaDocument.load(gamma_xml_path)
+        for gray_csv_path in gamma_csv_files:
+            dataset = parse_gray_csv(gray_csv_path)
+            analysis = analyze_gray_range(dataset, 8.0)
+            region = document.regions[0]
+            target_steps = min(len(dataset.zones) - 1, analysis.effective_count + 2)
+            reasons: list[str] = []
+            try:
+                result = optimize_gamma_lut(
+                    dataset,
+                    region,
+                    analysis,
+                    config=GammaOptimizationConfig(
+                        target_gamma=1.0,
+                        target_step_count=target_steps,
+                        threshold=8.0,
+                    ),
+                )
+                metrics = result.metrics
+                if result.health.status == "FAIL" or not result.health.monotonic:
+                    reasons.append("Curve Health/Monotonicity 未通过")
+                if metrics.distinguishable_after < metrics.distinguishable_before:
+                    reasons.append("可识别阶数退化")
+                if metrics.distinguishable_after < target_steps:
+                    reasons.append("目标可识别阶数未达到")
+                if metrics.rmse_after >= metrics.rmse_before - 1e-9:
+                    reasons.append("Gamma RMSE 未改善")
+                if metrics.rgb_gray_deviation_after > metrics.rgb_gray_deviation_before + 0.002:
+                    reasons.append("RGB 灰阶偏差扩大")
+                if any(
+                    following < current
+                    for curve in (result.after_r, result.after_g, result.after_b)
+                    for current, following in zip(curve, curve[1:])
+                ):
+                    reasons.append("LUT 存在局部反转")
+                gamma_cases.append(
+                    GammaGoldenCaseResult(
+                        case_id=f"{gamma_xml_path.stem}::{gray_csv_path.stem}",
+                        csv_path=str(gray_csv_path),
+                        xml_path=str(gamma_xml_path),
+                        status="PASS" if not reasons else "FAIL",
+                        reasons=tuple(reasons),
+                        before_steps=metrics.distinguishable_before,
+                        target_steps=target_steps,
+                        after_steps=metrics.distinguishable_after,
+                        rmse_before=metrics.rmse_before,
+                        rmse_after=metrics.rmse_after,
+                        curve_status=result.health.status,
+                        lut_length=result.lut_length,
+                        maximum_value=result.maximum_value,
+                    )
+                )
+            except Exception as exc:
+                gamma_cases.append(
+                    GammaGoldenCaseResult(
+                        f"{gamma_xml_path.stem}::{gray_csv_path.stem}",
+                        str(gray_csv_path),
+                        str(gamma_xml_path),
+                        "FAIL",
+                        (f"{type(exc).__name__}: {exc}",),
+                        analysis.effective_count,
+                        target_steps,
+                        analysis.effective_count,
+                        0.0,
+                        0.0,
+                        "FAIL",
+                        region.length,
+                        region.maximum,
+                    )
+                )
+    suite_status = "PASS" if (
+        cases
+        and all(case.status == "PASS" for case in cases)
+        and all(case.status == "PASS" for case in gamma_cases)
+    ) else "FAIL"
+    return GoldenSuiteResult(
+        suite_status,
+        tuple(cases),
+        len(csv_files),
+        len(xml_files),
+        tuple(gamma_cases),
+    )
 
 
 def save_golden_json(destination: Union[str, Path], suite: GoldenSuiteResult) -> Path:
@@ -235,7 +367,15 @@ def save_golden_html(destination: Union[str, Path], suite: GoldenSuiteResult) ->
         f"<tr class='{case.status.lower()}'><td>{html.escape(case.case_id)}</td><td>{case.cct}</td><td>{case.mean_before:.3f} → {case.mean_after:.3f}</td><td>{case.improvement_percent:+.1f}%</td><td>{case.pass_before} → {case.pass_after}</td><td>{case.saturation_before:.3f} → {case.saturation_after:.3f}</td><td>{case.matrix_status}</td><td>[{case.coefficient_min:.3f}, {case.coefficient_max:.3f}]</td><td>{html.escape('; '.join(case.reasons) or 'All acceptance checks passed')}</td></tr>"
         for case in suite.cases
     )
-    document = f"""<!doctype html><meta charset='utf-8'><title>MatrixCorrect Golden Regression</title><style>body{{font:14px system-ui;margin:28px;color:#172033}}h1{{margin-bottom:4px}}.pass{{color:#087a55}}.fail{{color:#b42318}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #d8e0eb;padding:8px;text-align:left}}th{{background:#173b74;color:white}}tr.fail td{{background:#fff0ee}}</style><h1>MatrixCorrect Golden Regression</h1><h2 class='{suite.status.lower()}'>{suite.status} · {suite.passed_count}/{len(suite.cases)} cases</h2><p>{suite.csv_count} CSV × {suite.xml_count} XML · Pass Rate: CIEDE2000 {PASS_RATE_COMPARATOR} {PASS_THRESHOLDS}</p><table><thead><tr><th>Case</th><th>CCT</th><th>Average ΔE</th><th>Improve</th><th>Pass counts</th><th>Saturation</th><th>Matrix</th><th>Range</th><th>Acceptance</th></tr></thead><tbody>{rows}</tbody></table>"""
+    gamma_rows = "".join(
+        f"<tr class='{case.status.lower()}'><td>{html.escape(case.case_id)}</td>"
+        f"<td>{case.before_steps} → {case.after_steps} / {case.target_steps}</td>"
+        f"<td>{case.rmse_before:.6f} → {case.rmse_after:.6f}</td>"
+        f"<td>{case.lut_length} / 0–{case.maximum_value}</td><td>{case.curve_status}</td>"
+        f"<td>{html.escape('; '.join(case.reasons) or 'All acceptance checks passed')}</td></tr>"
+        for case in suite.gamma_cases
+    )
+    document = f"""<!doctype html><meta charset='utf-8'><title>MatrixCorrect Golden Regression</title><style>body{{font:14px system-ui;margin:28px;color:#172033}}h1{{margin-bottom:4px}}.pass{{color:#087a55}}.fail{{color:#b42318}}table{{border-collapse:collapse;width:100%;margin-bottom:28px}}th,td{{border:1px solid #d8e0eb;padding:8px;text-align:left}}th{{background:#173b74;color:white}}tr.fail td{{background:#fff0ee}}</style><h1>MatrixCorrect Golden Regression</h1><h2 class='{suite.status.lower()}'>{suite.status} · CCM {suite.passed_count}/{len(suite.cases)} · Gamma {suite.gamma_passed_count}/{len(suite.gamma_cases)}</h2><p>{suite.csv_count} CSV × {suite.xml_count} XML · Pass Rate: CIEDE2000 {PASS_RATE_COMPARATOR} {PASS_THRESHOLDS}</p><h3>CCM</h3><table><thead><tr><th>Case</th><th>CCT</th><th>Average ΔE</th><th>Improve</th><th>Pass counts</th><th>Saturation</th><th>Matrix</th><th>Range</th><th>Acceptance</th></tr></thead><tbody>{rows}</tbody></table><h3>Gamma</h3><table><thead><tr><th>Case</th><th>Recognizable Steps</th><th>RMSE</th><th>LUT</th><th>Curve</th><th>Acceptance</th></tr></thead><tbody>{gamma_rows}</tbody></table>"""
     path.write_text(document, encoding="utf-8")
     return path
 
@@ -256,12 +396,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         save_golden_json(args.json, suite)
     if args.html:
         save_golden_html(args.html, suite)
-    print(f"Golden Regression: {suite.status} ({suite.passed_count}/{len(suite.cases)}); Pass Rate uses ΔE00 {PASS_RATE_COMPARATOR} {PASS_THRESHOLDS}")
+    print(
+        f"Golden Regression: {suite.status} · CCM {suite.passed_count}/{len(suite.cases)} · "
+        f"Gamma {suite.gamma_passed_count}/{len(suite.gamma_cases)}; "
+        f"Pass Rate uses ΔE00 {PASS_RATE_COMPARATOR} {PASS_THRESHOLDS}"
+    )
     for case in suite.cases:
         print(
             f"[{case.status}] {case.case_id}: ΔE {case.mean_before:.3f}->{case.mean_after:.3f} "
             f"({case.improvement_percent:+.1f}%), Matrix={case.matrix_status}, "
             f"Pass {case.pass_before}->{case.pass_after}"
+        )
+        for reason in case.reasons:
+            print(f"  - {reason}")
+    for case in suite.gamma_cases:
+        print(
+            f"[{case.status}] {case.case_id}: Steps {case.before_steps}->{case.after_steps}/target {case.target_steps}, "
+            f"RMSE {case.rmse_before:.6f}->{case.rmse_after:.6f}, LUT={case.lut_length}/0-{case.maximum_value}"
         )
         for reason in case.reasons:
             print(f"  - {reason}")

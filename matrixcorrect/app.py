@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tkinter as tk
+import tkinter.font as tkfont
 import math
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -28,6 +29,15 @@ GREEN = "#0F9D75"
 RED = "#D92D20"
 AMBER = "#B54708"
 BORDER = "#DDE3EC"
+LAB_PLOT_LIGHTNESS = 87.0
+FONT_BODY = "MatrixCorrectBodyFont"
+FONT_SMALL = "MatrixCorrectSmallFont"
+FONT_SMALL_BOLD = "MatrixCorrectSmallBoldFont"
+FONT_CARD_TITLE = "MatrixCorrectCardTitleFont"
+FONT_KPI = "MatrixCorrectKpiFont"
+FONT_TITLE = "MatrixCorrectTitleFont"
+FONT_PLOT_TITLE = "MatrixCorrectPlotTitleFont"
+FONT_MONO = "MatrixCorrectMonoFont"
 
 
 class MatrixPanel(ttk.Frame):
@@ -185,6 +195,10 @@ class LabPlot(ttk.Frame):
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", self._on_resize)
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        if tk.TkVersion >= 9.0:
+            # Tk 9 emits high-resolution macOS/Windows trackpad gestures as a
+            # distinct event; <MouseWheel> alone only covers legacy wheels.
+            self.canvas.bind("<TouchpadScroll>", self._on_touchpad_scroll)
         self.canvas.bind("<Button-4>", lambda event: self._zoom_at(event, 0.84))
         self.canvas.bind("<Button-5>", lambda event: self._zoom_at(event, 1.0 / 0.84))
         self.canvas.bind("<Double-Button-1>", self._reset_view)
@@ -243,7 +257,7 @@ class LabPlot(ttk.Frame):
         left, top, side = self._plot_geometry()
         right, bottom = left + side, top + side
         a_min, a_max, b_min, b_max = self.view_state.bounds
-        canvas.create_text(left, 16, text=self.title, fill=INK, anchor="w", font=("TkDefaultFont", 12, "bold"))
+        canvas.create_text(left, 16, text=self.title, fill=INK, anchor="w", font=FONT_PLOT_TITLE)
 
         tile_count = max(12, min(26, round(side / 18.0)))
         for row in range(tile_count):
@@ -259,7 +273,7 @@ class LabPlot(ttk.Frame):
                     tile_top,
                     tile_right,
                     tile_bottom,
-                    fill=_rgb_hex(lab_to_srgb((70.0, a_value, b_value))),
+                    fill=lab_plane_hex(a_value, b_value),
                     outline="",
                     tags=("plot-background",),
                 )
@@ -270,14 +284,14 @@ class LabPlot(ttk.Frame):
         while value <= a_max + tick_step * 1e-6:
             x_pos = self._x(value)
             canvas.create_line(x_pos, top, x_pos, bottom, fill="#FFFFFF", stipple="gray50")
-            canvas.create_text(x_pos, bottom + 17, text=_format_tick(value, tick_step), fill=MUTED, font=("TkDefaultFont", 8))
+            canvas.create_text(x_pos, bottom + 17, text=_format_tick(value, tick_step), fill=MUTED, font=FONT_SMALL)
             value += tick_step
         first_b = math.ceil(b_min / tick_step) * tick_step
         value = first_b
         while value <= b_max + tick_step * 1e-6:
             y_pos = self._y(value)
             canvas.create_line(left, y_pos, right, y_pos, fill="#FFFFFF", stipple="gray50")
-            canvas.create_text(left - 9, y_pos, text=_format_tick(value, tick_step), fill=MUTED, anchor="e", font=("TkDefaultFont", 8))
+            canvas.create_text(left - 9, y_pos, text=_format_tick(value, tick_step), fill=MUTED, anchor="e", font=FONT_SMALL)
             value += tick_step
         canvas.create_rectangle(left, top, right, bottom, outline="#101828", width=1)
         canvas.create_text(left + side / 2.0, bottom + 37, text="a*", fill=INK)
@@ -286,9 +300,9 @@ class LabPlot(ttk.Frame):
         canvas.create_text(max(14.0, left - 42.0), top + side / 2.0, text="b*", fill=INK)
         legend_y = top + 14
         canvas.create_rectangle(left + 9, legend_y - 4, left + 18, legend_y + 5, fill="#FFFFFF", outline="#172033")
-        canvas.create_text(left + 25, legend_y, text="Ideal", fill=INK, anchor="w", font=("TkDefaultFont", 8))
+        canvas.create_text(left + 25, legend_y, text="Ideal", fill=INK, anchor="w", font=FONT_SMALL)
         canvas.create_oval(left + 75, legend_y - 5, left + 87, legend_y + 7, fill="#FFFFFF", outline="#172033")
-        canvas.create_text(left + 94, legend_y + 1, text="Camera", fill=INK, anchor="w", font=("TkDefaultFont", 8))
+        canvas.create_text(left + 94, legend_y + 1, text="Camera", fill=INK, anchor="w", font=FONT_SMALL)
 
         occupied_labels: list[tuple[float, float, float, float]] = [
             (left + 4, top + 3, left + 145, top + 27)
@@ -392,7 +406,7 @@ class LabPlot(ttk.Frame):
                     text=label_text,
                     fill=AMBER if is_selected else ("#1D4ED8" if is_focus else "#344054"),
                     anchor="center",
-                    font=("TkDefaultFont", 8, "bold" if is_focus or is_selected else "normal"),
+                    font=FONT_SMALL_BOLD if is_focus or is_selected else FONT_SMALL,
                     tags=(tag,),
                 )
             if self.patch_callback is not None:
@@ -411,7 +425,26 @@ class LabPlot(ttk.Frame):
 
     def _on_mousewheel(self, event: tk.Event) -> str:
         delta = getattr(event, "delta", 0)
+        if not delta:
+            return "break"
         self._zoom_at(event, 0.84 if delta > 0 else 1.0 / 0.84)
+        return "break"
+
+    def _on_touchpad_scroll(self, event: tk.Event) -> str:
+        raw_delta = getattr(event, "delta", 0)
+        try:
+            decoded = self.canvas.tk.call("tk::PreciseScrollDeltas", raw_delta)
+            values = tuple(float(value) for value in self.canvas.tk.splitlist(decoded))
+            delta_y = values[1] if len(values) >= 2 else values[0]
+        except (tk.TclError, TypeError, ValueError, IndexError):
+            delta_y = float(raw_delta or 0.0)
+        if abs(delta_y) < 1e-12:
+            return "break"
+        # Trackpads can deliver ~60 small deltas per second.  Scale smoothly
+        # instead of applying a full wheel notch for every high-resolution event.
+        steps = min(4.0, max(0.15, abs(delta_y) / 40.0))
+        factor = 0.84 ** steps if delta_y > 0 else (1.0 / 0.84) ** steps
+        self._zoom_at(event, factor)
         return "break"
 
     def _zoom_at(self, event: tk.Event, factor: float) -> str:
@@ -432,6 +465,12 @@ class LabPlot(ttk.Frame):
 def _rgb_hex(rgb: tuple[float, float, float]) -> str:
     values = [max(0, min(255, round(value * 255))) for value in rgb]
     return f"#{values[0]:02x}{values[1]:02x}{values[2]:02x}"
+
+
+def lab_plane_hex(a_value: float, b_value: float) -> str:
+    """Shared Imatest-like a*b* plane colour for empty and populated plots."""
+
+    return _rgb_hex(lab_to_srgb((LAB_PLOT_LIGHTNESS, a_value, b_value)))
 
 
 def _format_tick(value: float, step: float) -> str:
@@ -480,23 +519,50 @@ class MatrixCorrectApp:
         style = ttk.Style(self.root)
         if "clam" in style.theme_names():
             style.theme_use("clam")
+        # tkfont.nametofont gained the ``root`` keyword after Python 3.9.
+        # Constructing an existing named Font directly works on both the
+        # system Python 3.9.6/Tk 8.5 and Homebrew Python 3.14/Tk 9 paths.
+        default_font = tkfont.Font(root=self.root, name="TkDefaultFont", exists=True)
+        fixed_font = tkfont.Font(root=self.root, name="TkFixedFont", exists=True)
+        base_size = max(9, abs(int(default_font.cget("size"))))
+
+        def install_font(name: str, *, size: int, weight: str = "normal", fixed: bool = False) -> None:
+            source = fixed_font if fixed else default_font
+            try:
+                font = tkfont.Font(root=self.root, name=name, exists=True)
+            except tk.TclError:
+                font = tkfont.Font(root=self.root, name=name, exists=False)
+            font.configure(
+                family=source.actual("family"),
+                size=size,
+                weight=weight,
+            )
+
+        install_font(FONT_BODY, size=base_size)
+        install_font(FONT_SMALL, size=max(8, base_size - 2))
+        install_font(FONT_SMALL_BOLD, size=max(8, base_size - 2), weight="bold")
+        install_font(FONT_CARD_TITLE, size=base_size, weight="bold")
+        install_font(FONT_KPI, size=base_size + 1, weight="bold")
+        install_font(FONT_TITLE, size=base_size + 8, weight="bold")
+        install_font(FONT_PLOT_TITLE, size=base_size + 1, weight="bold")
+        install_font(FONT_MONO, size=max(8, base_size - 1), fixed=True)
         style.configure("Root.TFrame", background=BG)
         style.configure("Card.TFrame", background=PANEL, relief="flat")
-        style.configure("Card.TLabel", background=PANEL, foreground=INK)
-        style.configure("CardTitle.TLabel", background=PANEL, foreground=INK, font=("TkDefaultFont", 10, "bold"))
-        style.configure("Title.TLabel", background=BG, foreground=INK, font=("TkDefaultFont", 20, "bold"))
-        style.configure("Subtitle.TLabel", background=BG, foreground=MUTED)
-        style.configure("ActiveRegion.TLabel", background=BG, foreground="#1D4ED8", font=("TkDefaultFont", 9, "bold"))
+        style.configure("Card.TLabel", background=PANEL, foreground=INK, font=FONT_BODY)
+        style.configure("CardTitle.TLabel", background=PANEL, foreground=INK, font=FONT_CARD_TITLE)
+        style.configure("Title.TLabel", background=BG, foreground=INK, font=FONT_TITLE)
+        style.configure("Subtitle.TLabel", background=BG, foreground=MUTED, font=FONT_BODY)
+        style.configure("ActiveRegion.TLabel", background=BG, foreground="#1D4ED8", font=FONT_SMALL_BOLD)
         style.configure("Status.TLabel", background="#EAF0FF", foreground="#1D4ED8", padding=(10, 7))
-        style.configure("Matrix.TLabel", background="#F8FAFC", foreground=INK, padding=(4, 4), font=("TkFixedFont", 9))
+        style.configure("Matrix.TLabel", background="#F8FAFC", foreground=INK, padding=(4, 4), font=FONT_MONO)
         style.configure("Primary.TButton", background=BLUE, foreground="white", padding=(14, 8), borderwidth=0)
         style.map("Primary.TButton", background=[("active", "#1D4ED8"), ("disabled", "#98A2B3")])
         style.configure("Quiet.TButton", padding=(8, 4))
-        style.configure("Kpi.TLabel", background=PANEL, foreground=INK, font=("TkDefaultFont", 12, "bold"))
-        style.configure("KpiCompact.TLabel", background=PANEL, foreground=INK, font=("TkDefaultFont", 10, "bold"))
-        style.configure("KpiCaption.TLabel", background=PANEL, foreground=MUTED)
-        style.configure("Treeview", rowheight=27, fieldbackground=PANEL, background=PANEL, foreground=INK)
-        style.configure("Treeview.Heading", background="#EAECF0", foreground=INK, font=("TkDefaultFont", 9, "bold"))
+        style.configure("Kpi.TLabel", background=PANEL, foreground=INK, font=FONT_KPI)
+        style.configure("KpiCompact.TLabel", background=PANEL, foreground=INK, font=FONT_KPI)
+        style.configure("KpiCaption.TLabel", background=PANEL, foreground=MUTED, font=FONT_BODY)
+        style.configure("Treeview", rowheight=27, fieldbackground=PANEL, background=PANEL, foreground=INK, font=FONT_BODY)
+        style.configure("Treeview.Heading", background="#EAECF0", foreground=INK, font=FONT_SMALL_BOLD)
 
     def _build_menu(self) -> None:
         menu = tk.Menu(self.root)
@@ -642,7 +708,7 @@ class MatrixCorrectApp:
             ttk.Label(
                 frame,
                 textvariable=value_var,
-                style="KpiCompact.TLabel" if column == 1 else "Kpi.TLabel",
+                style="Kpi.TLabel",
                 justify="left",
             ).pack(anchor="w")
             ttk.Label(frame, text=caption, style="KpiCaption.TLabel").pack(anchor="w")
@@ -699,7 +765,7 @@ class MatrixCorrectApp:
         self.tree.tag_configure("improved", foreground="#067647")
         self.tree.tag_configure("regressed", foreground="#B42318")
         self.tree.tag_configure("neutral", background="#F8FAFC")
-        self.tree.tag_configure("focus", background="#EAF2FF", font=("TkDefaultFont", 9, "bold"))
+        self.tree.tag_configure("focus", background="#EAF2FF", font=FONT_SMALL_BOLD)
         vertical_scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         horizontal_scrollbar = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vertical_scrollbar.set, xscrollcommand=horizontal_scrollbar.set)
@@ -735,14 +801,14 @@ class MatrixCorrectApp:
             relief="flat",
             padx=16,
             pady=12,
-            font=("TkDefaultFont", 10),
+            font=FONT_BODY,
         )
         self.statistics_text.pack(fill="both", expand=True, pady=(8, 0))
 
         advice_header = ttk.Frame(advice, style="Root.TFrame")
         advice_header.pack(fill="x", pady=(0, 8))
         ttk.Label(advice_header, text="CCM 只能做全局线性修正；工具会把不适合交给 CC 的问题路由到对应模块。", style="Subtitle.TLabel").pack(side="left")
-        self.advice_text = tk.Text(advice, wrap="word", background=PANEL, foreground=INK, relief="flat", padx=18, pady=16, font=("TkDefaultFont", 11))
+        self.advice_text = tk.Text(advice, wrap="word", background=PANEL, foreground=INK, relief="flat", padx=18, pady=16, font=FONT_BODY)
         self.advice_text.pack(fill="both", expand=True)
         self._set_advice("尚未运行优化。")
 
@@ -774,7 +840,7 @@ class MatrixCorrectApp:
             relief="flat",
             padx=12,
             pady=10,
-            font=("TkFixedFont", 9),
+            font=FONT_MONO,
         )
         self.diff_text.pack(fill="both", expand=True)
         self._render_history()

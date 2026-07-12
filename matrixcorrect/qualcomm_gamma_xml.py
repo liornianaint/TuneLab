@@ -58,8 +58,19 @@ def _parse_lut(region: ET.Element, channel: str) -> tuple[GammaLUT, int]:
         raise QualcommGammaXMLError(
             f"channel_{channel} LUT 长度应为 {declared_length}，实际为 {len(values)}。"
         )
+    if declared_length < 2:
+        raise QualcommGammaXMLError(f"channel_{channel} LUT 至少需要 2 点。")
     ranges = re.findall(r"\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]", tab.attrib.get("range", ""))
-    maximum = int(ranges[-1][1]) if ranges else max(values)
+    candidate_maxima = sorted({int(upper) for _lower, upper in ranges if int(upper) > 0})
+    value_maximum = max(values)
+    # Qualcomm range metadata may list several targets (8/10/12-bit) in one
+    # attribute.  The actual table endpoint identifies the active integer
+    # format; otherwise choose the narrowest declared range that contains it.
+    if value_maximum in candidate_maxima:
+        maximum = value_maximum
+    else:
+        covering = [candidate for candidate in candidate_maxima if candidate >= value_maximum]
+        maximum = min(covering) if covering else value_maximum
     if maximum <= 0 or any(value < 0 or value > maximum for value in values):
         raise QualcommGammaXMLError(f"channel_{channel} LUT 超出 0~{maximum}。")
     return values, maximum
@@ -96,7 +107,7 @@ class QualcommGammaDocument:
         except ET.ParseError as exc:
             raise QualcommGammaXMLError(f"Gamma XML 解析失败: {exc}") from exc
         root_name = _local_name(root.tag).lower()
-        if not root_name.startswith("gamma15_"):
+        if "gamma" not in root_name:
             raise QualcommGammaXMLError(f"不支持的 Gamma 根节点: {_local_name(root.tag)}")
 
         control_types: list[int] = []
@@ -264,4 +275,3 @@ class QualcommGammaDocument:
             ):
                 raise QualcommGammaXMLError(f"非目标 region #{index} 被修改，已拒绝保存。")
         return destination_path
-

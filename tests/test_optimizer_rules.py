@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from matrixcorrect.imatest import parse_imatest_csv
-from matrixcorrect.models import safe_improvement_percent
+from matrixcorrect.models import OptimizationConfig, safe_improvement_percent
 from matrixcorrect.optimizer import (
     NEUTRAL_PATCHES,
     NEUTRAL_PATCH_REGRESSION_LIMIT,
@@ -81,6 +81,32 @@ class OptimizerRuleTests(unittest.TestCase):
             names.append(path.name)
         self.assertEqual(len(names), 8)
 
+    def test_a_light_focus_13_14_finds_a_protected_engineering_candidate(self) -> None:
+        dataset = parse_imatest_csv(SOURCE / "A_summary.csv")
+        region, _ = self.document.find_region_for_cct(dataset.inferred_cct or 2850)
+        for maximum_strength in (0.8, 1.0):
+            with self.subTest(maximum_strength=maximum_strength):
+                result = optimize_ccm(
+                    dataset,
+                    region.matrix,
+                    config=OptimizationConfig(
+                        focus_patches=(13, 14),
+                        max_blend=maximum_strength,
+                    ),
+                )
+                focus = {patch.zone: patch for patch in result.patch_results if patch.zone in (13, 14)}
+                self.assertEqual(result.matrix_health.status, "PASS")
+                self.assertLess(result.mean_after, result.mean_before)
+                self.assertTrue(all(patch.delta_e_after < patch.delta_e_before for patch in focus.values()))
+                self.assertTrue(all(patch.regression_status != "FAIL" for patch in result.patch_results))
+                self.assertTrue(
+                    all(after >= before for before, after in zip(result.pass_rates.before_counts, result.pass_rates.after_counts))
+                )
+                for row in result.optimized_matrix:
+                    self.assertAlmostEqual(sum(row), 1.0, places=8)
+                    self.assertGreaterEqual(min(row), -3.0)
+                    self.assertLessEqual(max(row), 3.0)
+
     def test_reportlab_is_optional_until_pdf_export(self) -> None:
         dataset = parse_imatest_csv(SOURCE / "D65_normal_summary.csv")
         region, _ = self.document.find_region_for_cct(6500)
@@ -100,4 +126,3 @@ class OptimizerRuleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

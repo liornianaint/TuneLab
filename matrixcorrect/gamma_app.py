@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import tkinter as tk
 from pathlib import Path
@@ -13,7 +14,10 @@ from .gamma_models import (
     GrayDataset,
     GrayRangeAnalysis,
 )
+from .gamma_history import load_gamma_history, record_gamma_result, save_gamma_history
 from .gamma_optimizer import GammaOptimizationError, optimize_gamma_lut
+from .gamma_report import save_gamma_html_report
+from .gamma_settings import load_gamma_settings, save_gamma_settings
 from .gray_imatest import GrayCSVError, analyze_gray_range, parse_gray_csv
 from .qualcomm_gamma_xml import QualcommGammaDocument, QualcommGammaXMLError
 
@@ -115,8 +119,52 @@ class GammaOptimizationApp:
         self.selected_region: Optional[GammaRegion] = None
         self.result: Optional[GammaOptimizationResult] = None
         self.region_display_to_index: dict[str, int] = {}
+        self.settings = load_gamma_settings()
+        self.history = load_gamma_history()
+        self.xml_diff = ""
         self._configure_styles()
+        self._build_menu()
         self._build_ui()
+        try:
+            self.root.protocol("WM_DELETE_WINDOW", self.close)
+        except tk.TclError:
+            pass
+
+    def _build_menu(self) -> None:
+        menu = tk.Menu(self.root)
+        self.file_menu = tk.Menu(menu, tearoff=False)
+        self.file_menu.add_command(label="打开 Imatest Gray CSV...", command=self.load_csv)
+        self.file_menu.add_command(label="打开 Qualcomm Gamma XML...", command=self.load_xml)
+        self.file_menu.add_command(label="保存 Gamma XML...", command=self.save_xml)
+        self.file_menu.add_command(label="导出 Gamma 工程报告...", command=self.export_report)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="关闭", command=self.close)
+        menu.add_cascade(label="文件", menu=self.file_menu)
+
+        self.config_menu = tk.Menu(menu, tearoff=False)
+        self.config_menu.add_command(label="导入 Gamma 配置...", command=self.import_config)
+        self.config_menu.add_command(label="导出 Gamma 配置...", command=self.export_config)
+        menu.add_cascade(label="配置", menu=self.config_menu)
+
+        self.functions_menu = tk.Menu(menu, tearoff=False)
+        self.functions_menu.add_command(label="自动匹配 Region", command=self.auto_match_region)
+        self.functions_menu.add_command(label="Gamma 优化", command=self.run_optimization)
+        self.functions_menu.add_command(label="查看历史", command=self.show_history)
+        self.functions_menu.add_command(label="清空历史", command=self.clear_history)
+        menu.add_cascade(label="功能", menu=self.functions_menu)
+
+        self.help_menu = tk.Menu(menu, tearoff=False)
+        self.help_menu.add_command(label="参数说明", command=self.show_help)
+        self.help_menu.add_command(
+            label="关于",
+            command=lambda: messagebox.showinfo(
+                "关于 Gamma 优化",
+                "MatrixCorrect · Qualcomm Gamma LUT\n动态 LUT 点数/位宽 · Stepchart Regression Protection",
+                parent=self.root,
+            ),
+        )
+        menu.add_cascade(label="帮助", menu=self.help_menu)
+        self.root.configure(menu=menu)
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -158,7 +206,7 @@ class GammaOptimizationApp:
         title = ttk.Frame(outer, style="GammaRoot.TFrame")
         title.pack(fill="x", pady=(0, 10))
         ttk.Label(title, text="Gamma 优化", style="GammaTitle.TLabel").pack(side="left")
-        ttk.Label(title, text="Imatest Stepchart · Qualcomm Gamma15 257-point LUT", style="GammaMuted.TLabel").pack(side="left", padx=(12, 0), pady=(5, 0))
+        ttk.Label(title, text="Imatest Stepchart · Qualcomm Gamma LUT（点数/位宽由 XML 决定）", style="GammaMuted.TLabel").pack(side="left", padx=(12, 0), pady=(5, 0))
 
         toolbar = ttk.Frame(outer, padding=10, style="GammaCard.TFrame")
         toolbar.pack(fill="x", pady=(0, 8))
@@ -182,51 +230,68 @@ class GammaOptimizationApp:
         settings = ttk.Frame(outer, padding=10, style="GammaCard.TFrame")
         settings.pack(fill="x", pady=(0, 8))
         labels = (
-            ("目标 Gamma", 0), ("最大调整强度", 1), ("高光保护", 2), ("暗部保护", 3),
-            ("RGB 模式", 4), ("灰阶范围", 5), ("识别阈值 / Pixel", 6), ("手动起止 Zone", 7),
+            ("Gamma 提亮系数", 0), ("目标可识别阶数", 1), ("最大调整强度", 2),
+            ("高光保护", 3), ("暗部保护", 4), ("RGB 模式", 5),
+            ("灰阶范围", 6), ("识别阈值 / Pixel", 7), ("手动起止 Zone", 8),
         )
         for text, column in labels:
             ttk.Label(settings, text=text, style="GammaCard.TLabel").grid(row=0, column=column, sticky="w", padx=(0, 12))
-        self.target_gamma_var = tk.StringVar(value="0.45")
+        config = self.settings
+        self.target_gamma_var = tk.StringVar(value=f"{config.target_gamma:g}")
         ttk.Entry(settings, textvariable=self.target_gamma_var, width=9).grid(row=1, column=0, sticky="w", padx=(0, 12))
-        self.strength_var = tk.DoubleVar(value=70.0)
-        ttk.Scale(settings, from_=0, to=100, variable=self.strength_var, orient="horizontal", length=115).grid(row=1, column=1, sticky="w", padx=(0, 12))
-        self.highlight_var = tk.DoubleVar(value=75.0)
-        ttk.Scale(settings, from_=0, to=100, variable=self.highlight_var, orient="horizontal", length=105).grid(row=1, column=2, sticky="w", padx=(0, 12))
-        self.shadow_var = tk.DoubleVar(value=75.0)
-        ttk.Scale(settings, from_=0, to=100, variable=self.shadow_var, orient="horizontal", length=105).grid(row=1, column=3, sticky="w", padx=(0, 12))
-        self.rgb_mode_var = tk.StringVar(value=next(iter(self.RGB_LABELS)))
-        ttk.Combobox(settings, textvariable=self.rgb_mode_var, values=list(self.RGB_LABELS), state="readonly", width=18).grid(row=1, column=4, sticky="w", padx=(0, 12))
-        self.range_mode_var = tk.StringVar(value=next(iter(self.RANGE_LABELS)))
+        self.target_steps_var = tk.StringVar(value="自动" if config.target_step_count is None else str(config.target_step_count))
+        ttk.Entry(settings, textvariable=self.target_steps_var, width=9).grid(row=1, column=1, sticky="w", padx=(0, 12))
+        self.strength_var = tk.DoubleVar(value=config.maximum_adjustment * 100.0)
+        ttk.Scale(settings, from_=0, to=100, variable=self.strength_var, orient="horizontal", length=105).grid(row=1, column=2, sticky="w", padx=(0, 12))
+        self.highlight_var = tk.DoubleVar(value=config.highlight_protection * 100.0)
+        ttk.Scale(settings, from_=0, to=100, variable=self.highlight_var, orient="horizontal", length=95).grid(row=1, column=3, sticky="w", padx=(0, 12))
+        self.shadow_var = tk.DoubleVar(value=config.shadow_protection * 100.0)
+        ttk.Scale(settings, from_=0, to=100, variable=self.shadow_var, orient="horizontal", length=95).grid(row=1, column=4, sticky="w", padx=(0, 12))
+        rgb_label = next((label for label, value in self.RGB_LABELS.items() if value == config.rgb_mode), next(iter(self.RGB_LABELS)))
+        self.rgb_mode_var = tk.StringVar(value=rgb_label)
+        ttk.Combobox(settings, textvariable=self.rgb_mode_var, values=list(self.RGB_LABELS), state="readonly", width=18).grid(row=1, column=5, sticky="w", padx=(0, 12))
+        range_label = next((label for label, value in self.RANGE_LABELS.items() if value == config.range_mode), next(iter(self.RANGE_LABELS)))
+        self.range_mode_var = tk.StringVar(value=range_label)
         range_combo = ttk.Combobox(settings, textvariable=self.range_mode_var, values=list(self.RANGE_LABELS), state="readonly", width=22)
-        range_combo.grid(row=1, column=5, sticky="w", padx=(0, 12))
+        range_combo.grid(row=1, column=6, sticky="w", padx=(0, 12))
         range_combo.bind("<<ComboboxSelected>>", lambda _event: self._range_changed())
-        self.threshold_var = tk.StringVar(value="8")
+        self.threshold_var = tk.StringVar(value=f"{config.threshold:g}")
         threshold_entry = ttk.Entry(settings, textvariable=self.threshold_var, width=9)
-        threshold_entry.grid(row=1, column=6, sticky="w", padx=(0, 12))
+        threshold_entry.grid(row=1, column=7, sticky="w", padx=(0, 12))
         threshold_entry.bind("<Return>", lambda _event: self.reanalyze())
         threshold_entry.bind("<FocusOut>", lambda _event: self.reanalyze(quiet=True))
         manual = ttk.Frame(settings, style="GammaCard.TFrame")
-        manual.grid(row=1, column=7, sticky="w")
-        self.manual_start_var = tk.StringVar(value="1")
-        self.manual_end_var = tk.StringVar(value="12")
+        manual.grid(row=1, column=8, sticky="w")
+        self.manual_start_var = tk.StringVar(value=str(config.manual_start_zone or 1))
+        self.manual_end_var = tk.StringVar(value=str(config.manual_end_zone or 12))
         self.manual_start_entry = ttk.Entry(manual, textvariable=self.manual_start_var, width=5, state="disabled")
         self.manual_start_entry.pack(side="left")
         ttk.Label(manual, text=" – ", style="GammaCard.TLabel").pack(side="left")
         self.manual_end_entry = ttk.Entry(manual, textvariable=self.manual_end_var, width=5, state="disabled")
         self.manual_end_entry.pack(side="left")
-        settings.columnconfigure(8, weight=1)
+        settings.columnconfigure(9, weight=1)
 
         self.info_var = tk.StringVar(value="请打开 Gray CSV 与 Gamma XML。")
         ttk.Label(outer, textvariable=self.info_var, style="GammaMuted.TLabel").pack(fill="x", pady=(0, 6))
         self.status_var = tk.StringVar(value="等待数据")
         ttk.Label(outer, textvariable=self.status_var, foreground=BLUE, background="#EAF0FF", padding=(9, 6)).pack(fill="x", pady=(0, 8))
 
-        kpis = ttk.Frame(outer, style="GammaRoot.TFrame")
+        self.notebook = ttk.Notebook(outer)
+        self.notebook.pack(fill="both", expand=True)
+        self.curve_tab = ttk.Frame(self.notebook, padding=8, style="GammaRoot.TFrame")
+        self.engineering_tab = ttk.Frame(self.notebook, padding=8, style="GammaRoot.TFrame")
+        self.diagnosis_tab = ttk.Frame(self.notebook, padding=8, style="GammaRoot.TFrame")
+        self.history_tab = ttk.Frame(self.notebook, padding=8, style="GammaRoot.TFrame")
+        self.notebook.add(self.curve_tab, text="  曲线对比  ")
+        self.notebook.add(self.engineering_tab, text="  工程统计  ")
+        self.notebook.add(self.diagnosis_tab, text="  诊断与解释  ")
+        self.notebook.add(self.history_tab, text="  History / XML Diff  ")
+
+        kpis = ttk.Frame(self.curve_tab, style="GammaRoot.TFrame")
         kpis.pack(fill="x", pady=(0, 8))
         for column in range(8):
             kpis.columnconfigure(column, weight=1, uniform="gamma-kpi")
-        captions = ("原始 Zone", "连续有效", "有效范围", "Global Gamma", "RMSE", "Max Error", "RGB 偏差", "Curve Health")
+        captions = ("原始 Zone", "可识别 Before→After", "目标阶数", "Global Gamma", "RMSE", "RGB 偏差", "LUT Format", "Curve Health")
         self.kpi_vars: list[tk.StringVar] = []
         for column, caption in enumerate(captions):
             card = ttk.Frame(kpis, padding=(9, 7), style="GammaCard.TFrame")
@@ -236,7 +301,7 @@ class GammaOptimizationApp:
             ttk.Label(card, textvariable=value, style="GammaKpi.TLabel").pack(anchor="w")
             ttk.Label(card, text=caption, style="GammaCard.TLabel", foreground=MUTED).pack(anchor="w")
 
-        charts = ttk.Frame(outer, style="GammaRoot.TFrame")
+        charts = ttk.Frame(self.curve_tab, style="GammaRoot.TFrame")
         charts.pack(fill="both", expand=True, pady=(0, 8))
         for column in range(3):
             charts.columnconfigure(column, weight=1, uniform="gamma-chart")
@@ -245,24 +310,27 @@ class GammaOptimizationApp:
         self.response_plot.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
         self.local_plot = CurvePlot(charts, "Local Gamma", "Zone", "Gamma")
         self.local_plot.grid(row=0, column=1, sticky="nsew", padx=5)
-        self.lut_plot = CurvePlot(charts, "257 点 Gamma LUT", "LUT Index", "XML Value")
+        self.lut_plot = CurvePlot(charts, "Gamma LUT", "LUT Index", "XML Value")
         self.lut_plot.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
 
-        details = ttk.Panedwindow(outer, orient="horizontal")
+        details = ttk.Panedwindow(self.curve_tab, orient="horizontal")
         details.pack(fill="both", expand=True)
         pair_panel = ttk.Frame(details, padding=7, style="GammaCard.TFrame", width=410)
         zone_panel = ttk.Frame(details, padding=7, style="GammaCard.TFrame")
         details.add(pair_panel, weight=1)
-        details.add(zone_panel, weight=3)
+        details.add(zone_panel, weight=2)
         ttk.Label(pair_panel, text="相邻灰阶可区分性", style="GammaCard.TLabel").pack(anchor="w", pady=(0, 5))
         self.pair_tree = ttk.Treeview(
             pair_panel,
-            columns=("pair", "delta", "status"),
+            columns=("pair", "before", "target", "after", "status"),
             show="headings",
             height=8,
             style="Gamma.Treeview",
         )
-        for column, title, width in (("pair", "Zone i→i+1", 120), ("delta", "ΔPixel", 90), ("status", "识别", 120)):
+        for column, title, width in (
+            ("pair", "Zone i→i+1", 110), ("before", "Before Δ", 78),
+            ("target", "Target Δ", 78), ("after", "After Δ", 78), ("status", "识别", 100),
+        ):
             self.pair_tree.heading(column, text=title)
             self.pair_tree.column(column, width=width, anchor="center")
         pair_scroll = ttk.Scrollbar(pair_panel, orient="vertical", command=self.pair_tree.yview)
@@ -297,7 +365,84 @@ class GammaOptimizationApp:
         zone_frame.columnconfigure(0, weight=1)
         zone_frame.rowconfigure(0, weight=1)
         self.zone_tree.tag_configure("fit", background="#ECFDF3")
+        self.zone_tree.tag_configure("constraint", background="#FFF7E8")
         self.zone_tree.tag_configure("excluded", foreground=MUTED)
+
+        self.engineering_tree = ttk.Treeview(
+            self.engineering_tab,
+            columns=("check", "status", "value", "limit", "meaning"),
+            show="headings",
+            height=8,
+            style="Gamma.Treeview",
+        )
+        for column, caption, width in (
+            ("check", "Check", 190), ("status", "Status", 90), ("value", "Value", 220),
+            ("limit", "Limit", 240), ("meaning", "Meaning", 500),
+        ):
+            self.engineering_tree.heading(column, text=caption)
+            self.engineering_tree.column(column, width=width, anchor="w")
+        self.engineering_tree.tag_configure("PASS", foreground=GREEN)
+        self.engineering_tree.tag_configure("WARNING", foreground=AMBER)
+        self.engineering_tree.tag_configure("FAIL", foreground=RED)
+        self.engineering_tree.pack(fill="x")
+        self.engineering_text = tk.Text(
+            self.engineering_tab,
+            wrap="word",
+            background=PANEL,
+            foreground=INK,
+            relief="flat",
+            padx=14,
+            pady=12,
+        )
+        self.engineering_text.pack(fill="both", expand=True, pady=(8, 0))
+        self.engineering_text.insert("1.0", "尚未运行 Gamma 优化。")
+        self.engineering_text.configure(state="disabled")
+
+        self.diagnosis_text = tk.Text(
+            self.diagnosis_tab,
+            wrap="word",
+            background=PANEL,
+            foreground=INK,
+            relief="flat",
+            padx=16,
+            pady=14,
+        )
+        self.diagnosis_text.pack(fill="both", expand=True)
+        self.diagnosis_text.insert("1.0", "尚未运行 Gamma 优化。")
+        self.diagnosis_text.configure(state="disabled")
+
+        history_actions = ttk.Frame(self.history_tab, style="GammaRoot.TFrame")
+        history_actions.pack(fill="x", pady=(0, 8))
+        ttk.Label(history_actions, text="每次 Gamma 优化自动记录目标、阶数、RMSE、Curve Health 与 XML Diff。", style="GammaMuted.TLabel").pack(side="left")
+        ttk.Button(history_actions, text="清空历史", command=self.clear_history).pack(side="right")
+        self.history_tree = ttk.Treeview(
+            self.history_tab,
+            columns=("time", "dataset", "target", "steps", "rmse", "format", "health"),
+            show="headings",
+            height=7,
+            style="Gamma.Treeview",
+        )
+        for column, caption, width in (
+            ("time", "Time", 165), ("dataset", "Dataset", 190), ("target", "Gamma Factor", 105),
+            ("steps", "Steps", 110), ("rmse", "RMSE", 150), ("format", "LUT", 110), ("health", "Health", 85),
+        ):
+            self.history_tree.heading(column, text=caption)
+            self.history_tree.column(column, width=width, anchor="w")
+        self.history_tree.pack(fill="x")
+        self.history_tree.bind("<<TreeviewSelect>>", self._on_history_selected)
+        self.diff_text = tk.Text(
+            self.history_tab,
+            wrap="none",
+            background="#101828",
+            foreground="#F2F4F7",
+            insertbackground="white",
+            relief="flat",
+            padx=12,
+            pady=10,
+        )
+        self.diff_text.pack(fill="both", expand=True, pady=(8, 0))
+        self._range_changed()
+        self._render_history()
 
     def _range_changed(self) -> None:
         manual = self.RANGE_LABELS[self.range_mode_var.get()] == "manual"
@@ -339,12 +484,19 @@ class GammaOptimizationApp:
         for pair in analysis.pairs:
             self.pair_tree.insert(
                 "", "end",
-                values=(f"{pair.from_zone} → {pair.to_zone}", f"{pair.delta_pixel:.1f}", "可区分" if pair.distinguishable else "不可区分"),
+                values=(
+                    f"{pair.from_zone} → {pair.to_zone}",
+                    f"{pair.delta_pixel:.1f}",
+                    "—",
+                    "—",
+                    "可区分" if pair.distinguishable else "不可区分",
+                ),
                 tags=("valid" if pair.distinguishable else "invalid",),
             )
         self.kpi_vars[0].set(str(len(self.dataset.zones)))
-        self.kpi_vars[1].set(str(analysis.effective_count))
-        self.kpi_vars[2].set(f"Zone {analysis.start_zone}–{analysis.end_zone}" if analysis.selected_zones else "无")
+        self.kpi_vars[1].set(f"{analysis.effective_count} → —")
+        target_text = self.target_steps_var.get().strip()
+        self.kpi_vars[2].set(str(analysis.effective_count) if target_text in {"", "自动", "auto", "Auto"} else target_text)
         self.info_var.set(
             f"CSV：{self.dataset.source_path.name} · 原始 {len(self.dataset.zones)} Zone · "
             f"阈值 {analysis.threshold:g} · 连续有效 {analysis.effective_count} 阶 "
@@ -411,6 +563,8 @@ class GammaOptimizationApp:
                     break
         self.result = None
         self.save_button.configure(state="disabled")
+        self.kpi_vars[6].set(f"{self.selected_region.length} / {self.selected_region.maximum}")
+        self.lut_plot.title = f"{self.selected_region.length} 点 Gamma LUT · 0–{self.selected_region.maximum}"
         self._render_raw_charts()
         self.info_var.set(
             (self.info_var.get().split(" · XML：", 1)[0])
@@ -420,8 +574,13 @@ class GammaOptimizationApp:
 
     def _config(self) -> GammaOptimizationConfig:
         mode = self.RANGE_LABELS[self.range_mode_var.get()]
+        target_steps_text = self.target_steps_var.get().strip()
+        target_steps = None if target_steps_text.lower() in {"", "自动", "auto"} else int(target_steps_text)
+        if target_steps is not None and self.dataset is not None and target_steps > len(self.dataset.zones) - 1:
+            raise ValueError(f"目标可识别阶数最多为 {len(self.dataset.zones) - 1}。")
         config = GammaOptimizationConfig(
             target_gamma=float(self.target_gamma_var.get()),
+            target_step_count=target_steps,
             maximum_adjustment=self.strength_var.get() / 100.0,
             highlight_protection=self.highlight_var.get() / 100.0,
             shadow_protection=self.shadow_var.get() / 100.0,
@@ -443,11 +602,36 @@ class GammaOptimizationApp:
             if abs(config.threshold - self.analysis.threshold) > 1e-9:
                 self.analysis = analyze_gray_range(self.dataset, config.threshold)
             self.result = optimize_gamma_lut(self.dataset, self.selected_region, self.analysis, config=config)
+            self.xml_diff = self.document.diff_with_luts(
+                self.selected_region.index,
+                self.result.after_r,
+                self.result.after_g,
+                self.result.after_b,
+            )
         except (ValueError, GammaOptimizationError) as exc:
             messagebox.showerror("Gamma 优化失败", str(exc), parent=self.root)
             return
+        self.settings = config
+        try:
+            save_gamma_settings(config)
+        except OSError:
+            pass
+        self.history.append(
+            record_gamma_result(
+                self.result,
+                dataset_name=self.dataset.source_path.name,
+                xml_name=self.document.source_path.name,
+                region_label=self.selected_region.path_label(),
+                xml_diff=self.xml_diff,
+            )
+        )
+        try:
+            save_gamma_history(self.history)
+        except OSError:
+            pass
         self.save_button.configure(state="normal" if self.result.health.status != "FAIL" else "disabled")
         self._render_result()
+        self._render_history()
 
     def _render_raw_charts(self) -> None:
         if self.dataset is not None:
@@ -466,10 +650,14 @@ class GammaOptimizationApp:
         assert self.result is not None and self.dataset is not None and self.analysis is not None
         result = self.result
         metrics = result.metrics
-        self.kpi_vars[3].set(f"{metrics.global_gamma_before:.3f}→{metrics.global_gamma_after:.3f}")
+        self.kpi_vars[1].set(f"{metrics.distinguishable_before} → {metrics.distinguishable_after}")
+        self.kpi_vars[2].set(str(metrics.distinguishable_target))
+        self.kpi_vars[3].set(
+            f"{metrics.global_gamma_before:.3f}→{metrics.global_gamma_after:.3f}"
+        )
         self.kpi_vars[4].set(f"{metrics.rmse_before:.4f}→{metrics.rmse_after:.4f}")
-        self.kpi_vars[5].set(f"{metrics.maximum_error_before:.4f}→{metrics.maximum_error_after:.4f}")
-        self.kpi_vars[6].set(f"{metrics.rgb_gray_deviation_before:.4f}→{metrics.rgb_gray_deviation_after:.4f}")
+        self.kpi_vars[5].set(f"{metrics.rgb_gray_deviation_before:.4f}→{metrics.rgb_gray_deviation_after:.4f}")
+        self.kpi_vars[6].set(f"{result.lut_length} / {result.maximum_value}")
         self.kpi_vars[7].set(result.health.status)
         response_before = [(-next(zone.log_exposure for zone in self.dataset.zones if zone.zone == item.zone), item.density_before) for item in result.zone_results]
         response_target = [(-next(zone.log_exposure for zone in self.dataset.zones if zone.zone == item.zone), item.density_target) for item in result.zone_results]
@@ -478,10 +666,10 @@ class GammaOptimizationApp:
             (("Before", response_before, BLUE, False), ("Target", response_target, AMBER, True), ("After", response_after, GREEN, False))
         )
         local_before = [(item.zone, item.local_gamma_before) for item in result.zone_results if item.local_gamma_before is not None]
+        local_target = [(item.zone, item.local_gamma_target) for item in result.zone_results if item.local_gamma_target is not None]
         local_after = [(item.zone, item.local_gamma_after) for item in result.zone_results if item.local_gamma_after is not None]
-        target = [(item.zone, float(self.target_gamma_var.get())) for item in result.zone_results if item.local_gamma_before is not None]
         self.local_plot.set_series(
-            (("Before", local_before, BLUE, False), ("Target", target, AMBER, True), ("After", local_after, GREEN, False))
+            (("Before", local_before, BLUE, False), ("Target", local_target, AMBER, True), ("After", local_after, GREEN, False))
         )
         step = max(1, len(result.before_g) // 64)
         indexes = list(range(0, len(result.before_g), step))
@@ -495,6 +683,23 @@ class GammaOptimizationApp:
                 ("After R/B", [(index, (result.after_r[index] + result.after_b[index]) / 2.0) for index in indexes], PURPLE, True),
             )
         )
+        for tree_item in self.pair_tree.get_children():
+            self.pair_tree.delete(tree_item)
+        for pair in result.pair_results:
+            status = "达到目标" if pair.target_required and pair.after_distinguishable else "未达到" if pair.target_required else "可区分" if pair.after_distinguishable else "不可区分"
+            tag = "valid" if pair.after_distinguishable else "invalid"
+            self.pair_tree.insert(
+                "",
+                "end",
+                values=(
+                    f"{pair.from_zone} → {pair.to_zone}",
+                    f"{pair.delta_before:.1f}",
+                    f"{pair.delta_target:.1f}",
+                    f"{pair.delta_after:.1f}",
+                    status,
+                ),
+                tags=(tag,),
+            )
         for item in self.zone_tree.get_children():
             self.zone_tree.delete(item)
         for item in result.zone_results:
@@ -502,18 +707,236 @@ class GammaOptimizationApp:
             self.zone_tree.insert(
                 "", "end",
                 values=(
-                    item.zone, "参与" if item.used else "排除", f"{item.pixel_before:.1f}", f"{item.pixel_target:.1f}",
+                    item.zone, item.status, f"{item.pixel_before:.1f}", f"{item.pixel_target:.1f}",
                     f"{item.pixel_after:.1f}", f"{item.error_before:+.4f}", f"{item.error_after:+.4f}", improve,
                     "—" if item.local_gamma_before is None else f"{item.local_gamma_before:.3f}",
                     "—" if item.local_gamma_after is None else f"{item.local_gamma_after:.3f}",
                 ),
-                tags=("fit" if item.used else "excluded",),
+                tags=("fit" if item.used else "constraint" if item.status == "CONSTRAINT" else "excluded",),
             )
         self.status_var.set(
-            f"Gamma 优化完成：连续有效 {len(result.selected_zones)} 阶 Zone {result.selected_zones[0]}–{result.selected_zones[-1]}；"
+            f"Gamma 优化完成：可识别 {metrics.distinguishable_before}→{metrics.distinguishable_after} 阶，目标 {metrics.distinguishable_target}；"
             f"RMSE {metrics.rmse_before:.5f}→{metrics.rmse_after:.5f}；Curve Health={result.health.status}；"
-            f"实际强度={result.applied_strength:.0%}。"
+            f"提亮系数={result.target_gamma_factor:.3f}，实际强度={result.applied_strength:.0%}，LUT={result.lut_length}点/0–{result.maximum_value}。"
         )
+        self._render_engineering()
+        self._render_diagnostics()
+
+    def _render_engineering(self) -> None:
+        if self.result is None:
+            return
+        for item in self.engineering_tree.get_children():
+            self.engineering_tree.delete(item)
+        for index, check in enumerate(self.result.health.checks):
+            self.engineering_tree.insert(
+                "",
+                "end",
+                iid=f"gamma-check-{index}",
+                values=(check.name, check.status, check.value, check.limit, check.message),
+                tags=(check.status,),
+            )
+        metrics = self.result.metrics
+        loss_before = self.result.loss_before
+        loss_after = self.result.loss_after
+        lines = [
+            f"Curve Health: {self.result.health.status}",
+            f"LUT: {self.result.lut_length} points · integer 0–{self.result.maximum_value}",
+            f"Gamma lift factor: {self.result.target_gamma_factor:.3f} (1.0 nominal; larger is brighter)",
+            f"Recognizable steps: Before {metrics.distinguishable_before} · Target {metrics.distinguishable_target} · After {metrics.distinguishable_after}",
+            f"Global Gamma: {metrics.global_gamma_before:.5f} → {metrics.global_gamma_after:.5f} · target response {metrics.global_gamma_target:.5f}",
+            f"RMSE: {metrics.rmse_before:.6f} → {metrics.rmse_after:.6f}",
+            f"Max gray error: {metrics.maximum_error_before:.6f} → {metrics.maximum_error_after:.6f}",
+            f"Local Gamma error: {metrics.local_gamma_error_before:.6f} → {metrics.local_gamma_error_after:.6f}",
+            f"RGB gray deviation: {metrics.rgb_gray_deviation_before:.6f} → {metrics.rgb_gray_deviation_after:.6f}",
+            f"Monotonic: {self.result.health.monotonic} · reversals={self.result.health.reversal_count}",
+            f"Maximum LUT jump: {self.result.health.maximum_jump} · quantization error={self.result.health.quantization_error:.8f}",
+            "",
+            "Multi-objective Loss",
+            f"Total {loss_before.total:.6f} → {loss_after.total:.6f}",
+            f"Gray target={loss_after.gray_target:.6f} · Local Gamma={loss_after.local_gamma:.6f}",
+            f"Smoothness={loss_after.lut_smoothness:.6f} · LUT change={loss_after.lut_change:.6f}",
+            f"Highlight={loss_after.highlight:.6f} · Shadow={loss_after.shadow:.6f}",
+            f"RGB bias={loss_after.rgb_bias:.6f} · Step separation={loss_after.step_separation:.6f}",
+        ]
+        if self.result.warnings:
+            lines.extend(("", "Warnings", *(f"· {warning}" for warning in self.result.warnings)))
+        self.engineering_text.configure(state="normal")
+        self.engineering_text.delete("1.0", "end")
+        self.engineering_text.insert("1.0", "\n".join(lines))
+        self.engineering_text.configure(state="disabled")
+
+    def _render_diagnostics(self) -> None:
+        if self.result is None:
+            return
+        lines = ["Explainable Optimization", ""]
+        lines.extend(f"· {line}" for line in self.result.explainability)
+        for diagnosis in self.result.diagnostics:
+            lines.extend(
+                (
+                    "",
+                    f"[{diagnosis.severity}] {diagnosis.module} · Confidence {diagnosis.confidence:.0%}",
+                    f"Root Cause: {diagnosis.root_cause}",
+                    *(f"  Evidence: {item}" for item in diagnosis.evidence),
+                    f"Action: {diagnosis.action}",
+                )
+            )
+        self.diagnosis_text.configure(state="normal")
+        self.diagnosis_text.delete("1.0", "end")
+        self.diagnosis_text.insert("1.0", "\n".join(lines))
+        self.diagnosis_text.configure(state="disabled")
+
+    def _render_history(self) -> None:
+        if not hasattr(self, "history_tree"):
+            return
+        for item in self.history_tree.get_children():
+            self.history_tree.delete(item)
+        for reverse_index, record in enumerate(reversed(self.history)):
+            self.history_tree.insert(
+                "",
+                "end",
+                iid=f"gamma-history-{reverse_index}",
+                values=(
+                    record.timestamp,
+                    record.dataset_name,
+                    f"{record.target_gamma_factor:.3f}",
+                    f"{record.before_steps}→{record.after_steps} / {record.target_steps}",
+                    f"{record.rmse_before:.5f}→{record.rmse_after:.5f}",
+                    f"{record.lut_length}/{record.maximum_value}",
+                    record.curve_status,
+                ),
+            )
+
+    def _on_history_selected(self, _event: Optional[tk.Event] = None) -> None:
+        selection = self.history_tree.selection()
+        if not selection:
+            return
+        try:
+            reverse_index = int(selection[0].rsplit("-", 1)[1])
+            record = self.history[-1 - reverse_index]
+        except (ValueError, IndexError):
+            return
+        content = (
+            f"Timestamp: {record.timestamp}\nDataset: {record.dataset_name}\nXML: {record.xml_name}\n"
+            f"Region: {record.region_label}\nGamma Factor: {record.target_gamma_factor:.3f}\n"
+            f"Steps: {record.before_steps} → {record.after_steps} / target {record.target_steps}\n"
+            f"RMSE: {record.rmse_before:.6f} → {record.rmse_after:.6f}\n"
+            f"LUT: {record.lut_length} points / 0–{record.maximum_value}\nCurve Health: {record.curve_status}\n\n"
+            f"XML Diff\n{record.xml_diff or 'Not recorded'}"
+        )
+        self.diff_text.delete("1.0", "end")
+        self.diff_text.insert("1.0", content)
+
+    def show_history(self) -> None:
+        self.notebook.select(self.history_tab)
+
+    def clear_history(self) -> None:
+        if not messagebox.askyesno("清空 Gamma History", "确定清空所有 Gamma 优化记录吗？", parent=self.root):
+            return
+        self.history = []
+        try:
+            save_gamma_history(self.history)
+        except OSError as exc:
+            messagebox.showerror("清空失败", str(exc), parent=self.root)
+            return
+        self._render_history()
+        self.diff_text.delete("1.0", "end")
+
+    def _apply_config(self, config: GammaOptimizationConfig) -> None:
+        self.settings = config
+        self.target_gamma_var.set(f"{config.target_gamma:g}")
+        self.target_steps_var.set("自动" if config.target_step_count is None else str(config.target_step_count))
+        self.strength_var.set(config.maximum_adjustment * 100.0)
+        self.highlight_var.set(config.highlight_protection * 100.0)
+        self.shadow_var.set(config.shadow_protection * 100.0)
+        self.rgb_mode_var.set(next(label for label, value in self.RGB_LABELS.items() if value == config.rgb_mode))
+        self.range_mode_var.set(next(label for label, value in self.RANGE_LABELS.items() if value == config.range_mode))
+        self.threshold_var.set(f"{config.threshold:g}")
+        if config.manual_start_zone is not None:
+            self.manual_start_var.set(str(config.manual_start_zone))
+        if config.manual_end_zone is not None:
+            self.manual_end_var.set(str(config.manual_end_zone))
+        self._range_changed()
+        self.reanalyze(quiet=True)
+
+    def import_config(self) -> None:
+        path = filedialog.askopenfilename(
+            title="导入 Gamma 配置",
+            filetypes=[("JSON", "*.json"), ("所有文件", "*.*")],
+            parent=self.root,
+        )
+        if not path:
+            return
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            config = load_gamma_settings(path)
+            if not isinstance(payload, dict):
+                raise ValueError("配置根节点必须是 JSON object。")
+        except (OSError, ValueError, TypeError) as exc:
+            messagebox.showerror("导入失败", str(exc), parent=self.root)
+            return
+        self._apply_config(config)
+        self.status_var.set(f"已导入 Gamma 配置：{path}")
+
+    def export_config(self) -> None:
+        try:
+            config = self._config()
+        except ValueError as exc:
+            messagebox.showerror("配置无效", str(exc), parent=self.root)
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出 Gamma 配置",
+            defaultextension=".json",
+            initialfile="gamma_settings.json",
+            filetypes=[("JSON", "*.json")],
+            parent=self.root,
+        )
+        if not path:
+            return
+        try:
+            save_gamma_settings(config, path)
+        except OSError as exc:
+            messagebox.showerror("导出失败", str(exc), parent=self.root)
+            return
+        self.status_var.set(f"已导出 Gamma 配置：{path}")
+
+    def export_report(self) -> None:
+        if self.dataset is None or self.selected_region is None or self.result is None:
+            messagebox.showinfo("尚无结果", "请先完成 Gamma 优化。", parent=self.root)
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出 Gamma 工程报告",
+            defaultextension=".html",
+            initialfile=f"{self.dataset.source_path.stem}_gamma_report.html",
+            filetypes=[("HTML", "*.html")],
+            parent=self.root,
+        )
+        if not path:
+            return
+        try:
+            save_gamma_html_report(path, self.dataset, self.selected_region, self.result)
+        except OSError as exc:
+            messagebox.showerror("报告导出失败", str(exc), parent=self.root)
+            return
+        self.status_var.set(f"Gamma 工程报告已导出：{path}")
+
+    def show_help(self) -> None:
+        messagebox.showinfo(
+            "Gamma 参数说明",
+            "Gamma 提亮系数默认 1.0：1.0 保持标称亮度，数值越大 LUT 中间调越亮；"
+            "首尾点和 XML 整数上限保持不变。\n\n"
+            "目标可识别阶数使用 ΔPixel 阈值约束；自动表示至少保持当前连续阶数。"
+            "若目标与暗部/高光保护冲突，工具保留工程门禁并明确提示未达到。\n\n"
+            "LUT 点数与最大值从当前 Qualcomm XML 读取；本工程样例为 257 点、0–1023。",
+            parent=self.root,
+        )
+
+    def close(self) -> None:
+        try:
+            save_gamma_settings(self._config())
+            save_gamma_history(self.history)
+        except (OSError, ValueError, tk.TclError):
+            pass
+        self.root.destroy()
 
     def save_xml(self) -> None:
         if self.document is None or self.result is None or self.selected_region is None:

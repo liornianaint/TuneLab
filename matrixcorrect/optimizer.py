@@ -52,6 +52,15 @@ PASS_THRESHOLDS = (2.0, 3.0, 5.0, 10.0)
 PASS_RATE_COMPARATOR = "<="
 NEUTRAL_PATCHES = frozenset(range(19, 25))
 NEUTRAL_PATCH_REGRESSION_LIMIT = 0.50
+PRIMARY_ANCHOR_PATCHES = frozenset((13, 14, 15))
+LOCAL_SATURATION_EPSILON = 0.01
+# A focused tuning request can have no mathematically feasible candidate that
+# lowers the unweighted mean of every chromatic patch.  Permit only a tiny,
+# bounded global trade-off when the requested focus score improves materially;
+# all per-patch, pass-rate, saturation, neutral and matrix-health gates below
+# remain hard requirements.
+FOCUS_GLOBAL_MEAN_TRADEOFF = 0.01
+FOCUS_MIN_SCORE_IMPROVEMENT = 0.01
 
 
 @dataclass(frozen=True)
@@ -309,8 +318,24 @@ def _category_statistics(patches: list[PatchResult]) -> tuple[CategoryStatistics
 
 def _saturation_ratio(patches: list[PatchResult], *, after: bool) -> float:
     colors = [patch for patch in patches if patch.category != "Neutral" and patch.chroma_ideal > 1e-6]
-    numerator = sum((patch.chroma_after if after else patch.chroma_before) * patch.priority_weight for patch in colors)
-    denominator = sum(patch.chroma_ideal * patch.priority_weight for patch in colors)
+    # Treat the RGB primary triplet as one balanced engineering anchor.  A user
+    # selecting 13/14 must not silently change the definition of the global
+    # saturation measurement compared with selecting 13/14/15.
+    primary_anchor_weight = max(
+        (patch.priority_weight for patch in colors if patch.zone in PRIMARY_ANCHOR_PATCHES),
+        default=1.0,
+    )
+
+    def engineering_weight(patch: PatchResult) -> float:
+        if patch.zone in PRIMARY_ANCHOR_PATCHES:
+            return primary_anchor_weight
+        return patch.priority_weight
+
+    numerator = sum(
+        (patch.chroma_after if after else patch.chroma_before) * engineering_weight(patch)
+        for patch in colors
+    )
+    denominator = sum(patch.chroma_ideal * engineering_weight(patch) for patch in colors)
     return numerator / denominator if denominator else 1.0
 
 
@@ -437,8 +462,30 @@ def _protection_failure(
         return "matrix-health"
     colors = [patch for patch in candidate.patch_results if patch.category != "Neutral"]
     baseline_colors = [patch for patch in baseline.patch_results if patch.category != "Neutral"]
-    if mean(patch.delta_e_after for patch in colors) >= mean(patch.delta_e_after for patch in baseline_colors) - 1e-4:
-        return "no-mean-improvement"
+    focus = [patch for patch in colors if patch.zone in config.focus_patches]
+    baseline_focus = [patch for patch in baseline_colors if patch.zone in config.focus_patches]
+    focus_improvement = 0.0
+    if focus and baseline_focus:
+        focus_score = mean(
+            patch.delta_e_after
+            + 0.18 * abs(patch.delta_c_after)
+            + 0.04 * abs(patch.delta_h_after)
+            for patch in focus
+        )
+        baseline_focus_score = mean(
+            patch.delta_e_after
+            + 0.18 * abs(patch.delta_c_after)
+            + 0.04 * abs(patch.delta_h_after)
+            for patch in baseline_focus
+        )
+        focus_improvement = baseline_focus_score - focus_score
+    mean_delta = mean(patch.delta_e_after for patch in colors) - mean(
+        patch.delta_e_after for patch in baseline_colors
+    )
+    focused_tradeoff = (
+        focus_improvement >= FOCUS_MIN_SCORE_IMPROVEMENT
+        and mean_delta <= FOCUS_GLOBAL_MEAN_TRADEOFF
+    )
     for patch in colors:
         if patch.regression_status == "FAIL":
             return "patch-regression"
@@ -478,15 +525,17 @@ def _protection_failure(
         if patch.chroma_after - target > max(
             config.local_saturation_tolerance,
             before.chroma_after - target + allowed_growth,
-        ):
+        ) + LOCAL_SATURATION_EPSILON:
             return "local-saturation"
-    focus = [patch for patch in colors if patch.zone in config.focus_patches]
-    baseline_focus = [patch for patch in baseline.patch_results if patch.zone in config.focus_patches]
     if focus and baseline_focus:
-        focus_score = mean(patch.delta_e_after + 0.18 * abs(patch.delta_c_after) + 0.04 * abs(patch.delta_h_after) for patch in focus)
-        baseline_score = mean(patch.delta_e_after + 0.18 * abs(patch.delta_c_after) + 0.04 * abs(patch.delta_h_after) for patch in baseline_focus)
-        if focus_score >= baseline_score - 1e-4:
+        if focus_improvement < FOCUS_MIN_SCORE_IMPROVEMENT:
             return "focus-no-improvement"
+    # Evaluate the aggregate objective last so a rejected candidate reports the
+    # actual engineering/regression gate instead of masking it as a mean-only
+    # failure.  The focused exception is intentionally narrower than every
+    # gate above it.
+    if mean_delta >= -1e-4 and not focused_tradeoff:
+        return "no-mean-improvement"
     return None
 
 
@@ -520,7 +569,12 @@ def _refine_candidate(
                             rejected[failure] += 1
                             continue
                         if candidate.loss.total + 1e-9 < current.loss.total:
-                            current = replace(candidate, search_method="refined")
+                            method = (
+                                "primary-anchor-refined"
+                                if current.search_method.startswith("primary-anchor")
+                                else "refined"
+                            )
+                            current = replace(candidate, search_method=method)
                             changed = True
             if not changed:
                 break
@@ -730,6 +784,53 @@ def optimize_ccm(
         )
         if boundary is not None and (best is None or boundary.loss.total < best.loss.total):
             best = boundary
+
+    # When exactly two RGB primaries are selected, the weighted least-squares
+    # ray can become poorly conditioned and miss the safe basin that is found
+    # with the complete 13/14/15 primary anchor.  Use that complete triplet only
+    # to generate a search seed, then re-evaluate/back off every candidate with
+    # the user's original focus set and all original protection gates.
+    primary_focus = PRIMARY_ANCHOR_PATCHES.intersection(config.focus_patches)
+    if best is None and len(primary_focus) == 2:
+        anchor_focus = tuple(sorted(set(base_config.focus_patches).union(PRIMARY_ANCHOR_PATCHES)))
+        anchor_config = replace(base_config, focus_patches=anchor_focus)
+        try:
+            anchor_result = optimize_ccm(
+                dataset,
+                original_matrix,
+                composition=composition,
+                config=anchor_config,
+            )
+        except OptimizationError:
+            rejected["primary-anchor-unavailable"] += 1
+        else:
+            anchor_correction = _correction_for_final(
+                working_original,
+                anchor_result.optimized_matrix,
+                composition,
+            )
+            anchor_candidates: list[_Candidate] = []
+            for percent in range(100, 49, -1):
+                fraction = percent / 100.0
+                candidate = _evaluate_candidate(
+                    dataset,
+                    working_original,
+                    matrix_blend(anchor_correction, fraction),
+                    composition,
+                    config,
+                    anchor_result.regularization,
+                    fraction,
+                )
+                failure = _protection_failure(candidate, baseline, config)
+                if failure:
+                    rejected[f"primary-anchor-{failure}"] += 1
+                    continue
+                anchor_candidates.append(candidate)
+            if anchor_candidates:
+                best = replace(
+                    min(anchor_candidates, key=lambda item: item.loss.total),
+                    search_method="primary-anchor-backoff",
+                )
 
     if best is None:
         if baseline.health.status == "FAIL":

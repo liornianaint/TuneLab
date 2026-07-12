@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import tkinter as tk
 import unittest
+from tkinter import ttk
 from types import SimpleNamespace
 from unittest import mock
 
-from matrixcorrect.app import LabViewState, MatrixCorrectApp, calculate_lab_bounds
+from matrixcorrect.app import (
+    FONT_KPI,
+    FONT_SMALL_BOLD,
+    LabViewState,
+    MatrixCorrectApp,
+    calculate_lab_bounds,
+    lab_plane_hex,
+)
 from matrixcorrect.imatest import parse_imatest_csv
 from matrixcorrect.optimizer import optimize_ccm
 from matrixcorrect.qualcomm_xml import QualcommCCDocument
@@ -14,6 +22,9 @@ from .test_settings_history import ROOT
 
 
 class LabViewTests(unittest.TestCase):
+    def test_lab_plane_uses_the_same_imatest_like_lightness(self) -> None:
+        self.assertEqual(lab_plane_hex(-6.1, -3.5), "#cadee0")
+
     def test_auto_bounds_include_all_ideal_before_after_extremes(self) -> None:
         points = [(-42.0, -63.0), (50.0, 30.0), (4.0, -45.0)]
         a_min, a_max, b_min, b_max = calculate_lab_bounds(points)
@@ -128,6 +139,8 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertTrue(self.app.tree.cget("xscrollcommand"))
         self.assertTrue(self.app.tree.cget("yscrollcommand"))
         self.assertTrue(self.app.before_plot.canvas.bind("<MouseWheel>"))
+        if tk.TkVersion >= 9.0:
+            self.assertTrue(self.app.before_plot.canvas.bind("<TouchpadScroll>"))
         self.assertTrue(self.app.before_plot.canvas.bind("<Double-Button-1>"))
         self.assertFalse(self.app.before_plot.canvas.bind("<B1-Motion>"))
         self.assertFalse(self.app.before_plot.canvas.bind("<B2-Motion>"))
@@ -141,12 +154,31 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertIs(self.app.before_plot.view_state, self.app.after_plot.view_state)
         self.app.before_plot._reset_view(SimpleNamespace())
         self.assertEqual(self.app.lab_view.bounds, original_bounds)
+        if tk.TkVersion >= 9.0:
+            self.app.before_plot._on_touchpad_scroll(
+                SimpleNamespace(delta=120, x=left + side / 2.0, y=top + side / 2.0)
+            )
+            self.assertNotEqual(self.app.lab_view.bounds, original_bounds)
+            self.app.before_plot._reset_view(SimpleNamespace())
         visible_text = [
             str(child.cget("text"))
             for child in self.app.patch_table_panel.winfo_children()
             if "text" in child.keys()
         ]
         self.assertFalse(any("CIEDE2000" in text for text in visible_text))
+
+    def test_comparison_fonts_and_plot_colours_are_consistent(self) -> None:
+        style = ttk.Style(self.root)
+        self.assertEqual(style.lookup("Kpi.TLabel", "font"), FONT_KPI)
+        self.assertEqual(style.lookup("KpiCompact.TLabel", "font"), FONT_KPI)
+        self.assertEqual(str(self.app.tree.tag_configure("focus", "font")), FONT_SMALL_BOLD)
+        before_items = self.app.before_plot.canvas.find_withtag("plot-background")
+        after_items = self.app.after_plot.canvas.find_withtag("plot-background")
+        self.assertTrue(before_items)
+        self.assertEqual(len(before_items), len(after_items))
+        before_colours = [self.app.before_plot.canvas.itemcget(item, "fill") for item in before_items]
+        after_colours = [self.app.after_plot.canvas.itemcget(item, "fill") for item in after_items]
+        self.assertEqual(before_colours, after_colours)
 
     def test_plot_and_table_patch_selection_are_bidirectionally_linked(self) -> None:
         dataset = parse_imatest_csv(ROOT / "Source" / "D65_normal_summary.csv")

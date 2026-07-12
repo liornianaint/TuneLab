@@ -92,7 +92,11 @@ class GammaRegion:
 
 @dataclass(frozen=True)
 class GammaOptimizationConfig:
-    target_gamma: float = 0.45
+    # UI semantics: 1.0 keeps nominal brightness; a larger factor lifts the
+    # tone curve.  This is deliberately not the measured Density/Exposure
+    # regression slope reported as "Global Gamma" below.
+    target_gamma: float = 1.0
+    target_step_count: Optional[int] = None
     maximum_adjustment: float = 0.70
     highlight_protection: float = 0.75
     shadow_protection: float = 0.75
@@ -103,8 +107,10 @@ class GammaOptimizationConfig:
     manual_end_zone: Optional[int] = None
 
     def validate(self) -> None:
-        if not 0.10 <= self.target_gamma <= 1.20:
-            raise ValueError("目标 Gamma 必须在 0.10 到 1.20 之间。")
+        if not 0.25 <= self.target_gamma <= 4.0:
+            raise ValueError("Gamma 提亮系数必须在 0.25 到 4.0 之间；1.0 表示保持标称亮度。")
+        if self.target_step_count is not None and self.target_step_count < 3:
+            raise ValueError("目标可识别阶数不能少于 3。")
         if not 0.0 <= self.maximum_adjustment <= 1.0:
             raise ValueError("最大调整强度必须在 0 到 1 之间。")
         if not 0.0 <= self.highlight_protection <= 1.0:
@@ -134,6 +140,7 @@ class GammaLossBreakdown:
     highlight: float
     shadow: float
     rgb_bias: float
+    step_separation: float
 
 
 @dataclass(frozen=True)
@@ -170,12 +177,26 @@ class GammaZoneResult:
     error_after: float
     improvement_percent: Optional[float]
     local_gamma_before: Optional[float]
+    local_gamma_target: Optional[float]
     local_gamma_after: Optional[float]
+
+
+@dataclass(frozen=True)
+class GammaPairResult:
+    from_zone: int
+    to_zone: int
+    delta_before: float
+    delta_target: float
+    delta_after: float
+    before_distinguishable: bool
+    after_distinguishable: bool
+    target_required: bool
 
 
 @dataclass(frozen=True)
 class GammaMetrics:
     global_gamma_before: float
+    global_gamma_target: float
     global_gamma_after: float
     rmse_before: float
     rmse_after: float
@@ -185,6 +206,19 @@ class GammaMetrics:
     local_gamma_error_after: float
     rgb_gray_deviation_before: float
     rgb_gray_deviation_after: float
+    distinguishable_before: int
+    distinguishable_after: int
+    distinguishable_target: int
+
+
+@dataclass(frozen=True)
+class GammaModuleDiagnosis:
+    module: str
+    confidence: float
+    severity: str
+    root_cause: str
+    evidence: tuple[str, ...]
+    action: str
 
 
 @dataclass(frozen=True)
@@ -199,12 +233,16 @@ class GammaOptimizationResult:
     after_b: GammaLUT
     target_lut: tuple[float, ...]
     zone_results: tuple[GammaZoneResult, ...]
+    pair_results: tuple[GammaPairResult, ...]
     metrics: GammaMetrics
     loss_before: GammaLossBreakdown
     loss_after: GammaLossBreakdown
     health: GammaCurveHealth
     applied_strength: float
     rgb_mode: str
+    target_gamma_factor: float
+    lut_length: int
+    maximum_value: int
+    diagnostics: tuple[GammaModuleDiagnosis, ...] = ()
     explainability: tuple[str, ...] = ()
     warnings: tuple[str, ...] = field(default_factory=tuple)
-

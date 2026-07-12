@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import re
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 from .gamma_models import GrayDataset, GrayPair, GrayRangeAnalysis, GrayZone
 
@@ -159,14 +159,21 @@ def parse_gray_csv(path: Union[str, Path]) -> GrayDataset:
     )
 
 
-def analyze_gray_range(dataset: GrayDataset, threshold: float = 8.0) -> GrayRangeAnalysis:
+def analyze_pixel_values(
+    zone_pixels: Sequence[tuple[int, float]],
+    threshold: float = 8.0,
+    *,
+    middle_gray_zone: int = 8,
+) -> GrayRangeAnalysis:
+    """Analyze any Before/Target/After pixel sequence with the CSV rule."""
+
     if threshold < 0.0:
         raise ValueError("灰阶识别阈值不能小于 0。")
-    ordered = sorted(dataset.zones, key=lambda zone: zone.zone)
+    ordered = sorted(((int(zone), float(pixel)) for zone, pixel in zone_pixels), key=lambda item: item[0])
     pairs: list[GrayPair] = []
     for current, following in zip(ordered, ordered[1:]):
-        delta = current.pixel - following.pixel
-        pairs.append(GrayPair(current.zone, following.zone, delta, delta >= threshold))
+        delta = current[1] - following[1]
+        pairs.append(GrayPair(current[0], following[0], delta, delta >= threshold))
 
     runs: list[tuple[int, ...]] = []
     current_run: list[int] = []
@@ -186,7 +193,7 @@ def analyze_gray_range(dataset: GrayDataset, threshold: float = 8.0) -> GrayRang
     if current_run:
         runs.append(tuple(current_run))
 
-    middle = dataset.middle_gray_zone
+    middle = middle_gray_zone
     selected: tuple[int, ...] = ()
     if runs:
         def key(run: tuple[int, ...]) -> tuple[int, int, float, int]:
@@ -202,6 +209,14 @@ def analyze_gray_range(dataset: GrayDataset, threshold: float = 8.0) -> GrayRang
         selected_zones=selected,
         start_zone=selected[0] if selected else None,
         end_zone=selected[-1] if selected else None,
+    )
+
+
+def analyze_gray_range(dataset: GrayDataset, threshold: float = 8.0) -> GrayRangeAnalysis:
+    return analyze_pixel_values(
+        tuple((zone.zone, zone.pixel) for zone in dataset.zones),
+        threshold,
+        middle_gray_zone=dataset.middle_gray_zone,
     )
 
 
@@ -236,4 +251,3 @@ def select_fit_zones(
     if any(zone not in available for zone in selected):
         raise ValueError("灰阶选择包含 CSV 中不存在的 Zone。")
     return selected
-
