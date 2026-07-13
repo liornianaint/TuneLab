@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def prepare_icon() -> Path:
     from PIL import Image
 
-    source = ROOT / "source" / "app.png"
+    source = ROOT / "tunelab" / "assets" / "tunelab.png"
     destination = ROOT / "build" / "tunelab-app-icon.ico"
     destination.parent.mkdir(parents=True, exist_ok=True)
     with Image.open(source) as image:
@@ -55,10 +55,10 @@ def main() -> int:
         "--icon",
         str(icon),
         "--add-data",
-        f"{ROOT / 'source' / 'app.png'}{os.pathsep}source",
+        f"{ROOT / 'tunelab' / 'assets' / 'tunelab.png'}{os.pathsep}tunelab/assets",
         "--paths",
         str(ROOT),
-        str(ROOT / "run_matrixcorrect.py"),
+        str(ROOT / "run_tunelab.py"),
     ]
     print("Building:", " ".join(command))
     return subprocess.call(command, cwd=ROOT)

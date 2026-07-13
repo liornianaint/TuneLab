@@ -3,23 +3,26 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "matrixcorrect"
+name = "tunelab"
 version = "0.2.0"
-description = "Cross-platform Qualcomm CC13 color-correction matrix optimizer"
+description = "Cross-platform Qualcomm camera tuning workbench"
 readme = "README.md"
 requires-python = ">=3.9.6"
 license = { text = "Proprietary" }
-authors = [{ name = "MatrixCorrect" }]
+authors = [{ name = "TuneLab" }]
 dependencies = []
 
 [project.optional-dependencies]
 pdf = ["reportlab>=3.6"]
 
 [project.scripts]
-matrixcorrect = "matrixcorrect.app:main"
-matrixcorrect-gamma = "matrixcorrect.gamma_app:main"
-matrixcorrect-cli = "matrixcorrect.cli:main"
-matrixcorrect-golden = "matrixcorrect.golden:main"
+tunelab = "tunelab.app:main"
+tunelab-gamma = "tunelab.gamma.ui:main"
+tunelab-ccm = "tunelab.ccm.cli:main"
+tunelab-regression = "tunelab.regression:main"
 
 [tool.setuptools.packages.find]
-include = ["matrixcorrect*"]
+include = ["tunelab*"]
+
+[tool.setuptools.package-data]
+tunelab = ["assets/*.png"]

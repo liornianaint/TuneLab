@@ -14,7 +14,7 @@ APP_VERSION = "0.2.0"
 def prepare_icon() -> Path:
     from PIL import Image
 
-    source = ROOT / "source" / "app.png"
+    source = ROOT / "tunelab" / "assets" / "tunelab.png"
     destination = ROOT / "build" / "tunelab-app-icon.png"
     destination.parent.mkdir(parents=True, exist_ok=True)
     with Image.open(source) as image:
@@ -51,13 +51,13 @@ def main() -> int:
         "--icon",
         str(icon),
         "--add-data",
-        f"{ROOT / 'source' / 'app.png'}:source",
+        f"{ROOT / 'tunelab' / 'assets' / 'tunelab.png'}:tunelab/assets",
         "--paths",
         str(ROOT),
     ]
     if platform.system() == "Darwin":
         command.extend(["--osx-bundle-identifier", "com.tunelab.app"])
-    command.append(str(ROOT / "run_matrixcorrect.py"))
+    command.append(str(ROOT / "run_tunelab.py"))
     print("Building:", " ".join(command))
     result = subprocess.call(command, cwd=ROOT)
     if result == 0 and platform.system() == "Darwin":

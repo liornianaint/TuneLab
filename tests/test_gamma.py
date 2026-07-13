@@ -7,14 +7,14 @@ import re
 from pathlib import Path
 from unittest import mock
 
-from matrixcorrect.gamma_models import GammaOptimizationConfig
-from matrixcorrect.gamma_app import GammaOptimizationApp
-from matrixcorrect.gamma_history import load_gamma_history, record_gamma_result, save_gamma_history
-from matrixcorrect.gamma_optimizer import optimize_gamma_lut
-from matrixcorrect.gamma_report import save_gamma_html_report
-from matrixcorrect.gamma_settings import load_gamma_settings, save_gamma_settings
-from matrixcorrect.gray_imatest import analyze_gray_range, parse_gray_csv, select_fit_zones
-from matrixcorrect.qualcomm_gamma_xml import QualcommGammaDocument
+from tunelab.gamma.models import GammaOptimizationConfig
+from tunelab.gamma.ui import GammaWorkspace
+from tunelab.gamma.history import load_gamma_history, record_gamma_result, save_gamma_history
+from tunelab.gamma.optimizer import optimize_gamma_lut
+from tunelab.gamma.reporting import save_gamma_html_report
+from tunelab.gamma.settings import load_gamma_settings, save_gamma_settings
+from tunelab.gamma.imatest import analyze_gray_range, parse_gray_csv, select_fit_zones
+from tunelab.gamma.qualcomm_xml import QualcommGammaDocument
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -266,17 +266,17 @@ class GammaDesktopSmokeTests(unittest.TestCase):
             self.skipTest(f"Tk display is unavailable: {exc}")
         self.root.withdraw()
         self.settings_patcher = mock.patch(
-            "matrixcorrect.gamma_app.load_gamma_settings",
+            "tunelab.gamma.ui.load_gamma_settings",
             return_value=GammaOptimizationConfig(),
         )
-        self.history_patcher = mock.patch("matrixcorrect.gamma_app.load_gamma_history", return_value=[])
-        self.save_settings_patcher = mock.patch("matrixcorrect.gamma_app.save_gamma_settings")
-        self.save_history_patcher = mock.patch("matrixcorrect.gamma_app.save_gamma_history")
+        self.history_patcher = mock.patch("tunelab.gamma.ui.load_gamma_history", return_value=[])
+        self.save_settings_patcher = mock.patch("tunelab.gamma.ui.save_gamma_settings")
+        self.save_history_patcher = mock.patch("tunelab.gamma.ui.save_gamma_history")
         self.settings_patcher.start()
         self.history_patcher.start()
         self.save_settings_patcher.start()
         self.save_history_patcher.start()
-        self.app = GammaOptimizationApp(self.root)
+        self.app = GammaWorkspace(self.root)
 
     def tearDown(self) -> None:
         if hasattr(self, "root"):
@@ -308,7 +308,7 @@ class GammaDesktopSmokeTests(unittest.TestCase):
         self.assertGreaterEqual(self.app.result.metrics.distinguishable_after, 14)
         self.assertEqual(len(self.app.zone_tree.get_children()), 19)
         self.assertEqual(len(self.app.pair_tree.get_children()), 18)
-        with mock.patch("matrixcorrect.gamma_app.messagebox.askyesno", return_value=False) as confirmation, mock.patch.object(self.app.document, "save_with_luts") as save:
+        with mock.patch("tunelab.gamma.ui.messagebox.askyesno", return_value=False) as confirmation, mock.patch.object(self.app.document, "save_with_luts") as save:
             self.app.save_xml()
         self.assertIn(str(self.app.document.source_path), confirmation.call_args.args[1])
         save.assert_not_called()
