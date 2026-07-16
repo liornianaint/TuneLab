@@ -22,6 +22,7 @@ class ProjectStructureTests(unittest.TestCase):
     def test_packaging_exposes_tunelab_commands(self) -> None:
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('name = "tunelab"', metadata)
+        self.assertIn('email = "kaiyi.jiang@thundersoft.com"', metadata)
         self.assertIn('tunelab = "tunelab.app:main"', metadata)
         self.assertIn('tunelab-ccm = "tunelab.ccm.cli:main"', metadata)
         self.assertIn('tunelab-gamma = "tunelab.gamma.ui:main"', metadata)

@@ -10,6 +10,7 @@ from tkinter import ttk
 APP_NAME = "TuneLab"
 APP_VERSION = "0.2.0"
 APP_TAGLINE = "Qualcomm Camera Tuning Workbench"
+AUTHOR_EMAIL = "kaiyi.jiang@thundersoft.com"
 
 
 def application_icon_path() -> Path:
@@ -78,6 +79,13 @@ def show_about_dialog(root: tk.Misc, icon_path: Path | None = None) -> tk.Toplev
     tk.Label(body, text=APP_NAME, background=surface, foreground=ink, font=title_font).pack()
     tk.Label(body, text=APP_TAGLINE, background=surface, foreground=muted, font=body_font).pack(pady=(4, 0))
     tk.Label(body, text=f"版本 {APP_VERSION}", background=surface, foreground=ink, font=body_font).pack(pady=(12, 0))
+    tk.Label(
+        body,
+        text=f"作者联系邮箱：{AUTHOR_EMAIL}",
+        background=surface,
+        foreground=ink,
+        font=body_font,
+    ).pack(pady=(6, 0))
     ttk.Separator(body, orient="horizontal").pack(fill="x", pady=(18, 14))
     tk.Label(body, text="CC 校正 · Gamma 优化", background=surface, foreground=muted, font=small_font).pack()
     ttk.Button(body, text="关闭", command=dialog.destroy).pack(pady=(18, 0), ipadx=14)

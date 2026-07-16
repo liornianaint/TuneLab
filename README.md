@@ -2,6 +2,8 @@
 
 TuneLab 是一个面向 Qualcomm Camera 的跨平台调试工作台。目前包含 CC13 色彩矩阵与 Gamma15 两套独立工作流：读取 Imatest 数据、自动匹配 XML region、执行优化与工程校验，并安全回写目标配置。
 
+作者联系邮箱：<kaiyi.jiang@thundersoft.com>
+
 当前版本包含：
 
 - Windows / macOS 原生 Tk 桌面界面，兼容 Python 3.9.6+

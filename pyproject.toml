@@ -9,7 +9,7 @@ description = "Cross-platform Qualcomm camera tuning workbench"
 readme = "README.md"
 requires-python = ">=3.9.6"
 license = { text = "Proprietary" }
-authors = [{ name = "TuneLab" }]
+authors = [{ name = "TuneLab", email = "kaiyi.jiang@thundersoft.com" }]
 dependencies = []
 
 [project.optional-dependencies]

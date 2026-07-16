@@ -451,6 +451,7 @@ class DesktopUISmokeTests(unittest.TestCase):
         visit(dialog)
         self.assertIn("TuneLab", text)
         self.assertIn("版本 0.2.0", text)
+        self.assertIn("作者联系邮箱：kaiyi.jiang@thundersoft.com", text)
         self.assertFalse(any("Python Software Foundation" in value for value in text))
 
         self.app.show_cc_workspace()
