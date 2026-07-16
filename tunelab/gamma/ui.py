@@ -7,7 +7,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Iterable, Optional, Sequence
 
-from ..branding import application_icon_path, show_about_dialog
+from ..branding import application_icon_path, show_about_dialog, show_workbench_help
 from ..ui_foundation import (
     FONT_BODY,
     FONT_CARD_TITLE,
@@ -218,7 +218,9 @@ class GammaWorkspace:
         menu.add_cascade(label="工具", menu=self.functions_menu)
 
         self.help_menu = tk.Menu(menu, tearoff=False)
-        self.help_menu.add_command(label="参数说明", command=self.show_help)
+        self.help_menu.add_command(label="TuneLab 使用说明", command=self._show_workbench_help)
+        self.help_menu.add_separator()
+        self.help_menu.add_command(label="Gamma 参数说明", command=self.show_help)
         self.help_menu.add_command(label="关于 TuneLab", command=self._show_about)
         menu.add_cascade(label="帮助", menu=self.help_menu)
         self.root.configure(menu=menu)
@@ -228,6 +230,9 @@ class GammaWorkspace:
             self.on_about()
             return
         show_about_dialog(self.root, application_icon_path())
+
+    def _show_workbench_help(self) -> None:
+        show_workbench_help(self.root)
 
     def _configure_styles(self) -> None:
         style = configure_typography(self.root)

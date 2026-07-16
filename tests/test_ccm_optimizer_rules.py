@@ -107,7 +107,7 @@ class OptimizerRuleTests(unittest.TestCase):
                     self.assertGreaterEqual(min(row), -3.0)
                     self.assertLessEqual(max(row), 3.0)
 
-    def test_reportlab_is_optional_until_pdf_export(self) -> None:
+    def test_missing_default_reportlab_dependency_has_actionable_error(self) -> None:
         dataset = parse_imatest_csv(SOURCE / "D65_normal_summary.csv")
         region, _ = self.document.find_region_for_cct(6500)
         result = optimize_ccm(dataset, region.matrix)
@@ -120,7 +120,7 @@ class OptimizerRuleTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             with mock.patch("builtins.__import__", side_effect=blocked_import):
-                with self.assertRaisesRegex(RuntimeError, "导出 PDF 需要 reportlab"):
+                with self.assertRaisesRegex(RuntimeError, "默认 PDF 依赖 reportlab 未安装"):
                     save_analysis_pdf(Path(temporary) / "analysis.pdf", dataset, result)
 
 

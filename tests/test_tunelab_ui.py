@@ -7,6 +7,7 @@ from tkinter import ttk
 from types import SimpleNamespace
 from unittest import mock
 
+from tunelab.branding import WORKBENCH_HELP_TEXT
 from tunelab.app import (
     APP_TITLE,
     FONT_BODY,
@@ -170,7 +171,7 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertEqual(config_labels, ["导入配置...", "导出配置..."])
         self.assertEqual(
             [self.app.tools_menu.entrycget(index, "label") for index in range(self.app.tools_menu.index("end") + 1)],
-            ["首页", "Gamma 优化"],
+            ["首页", "Gamma 优化", "图像分析器..."],
         )
 
     def test_save_xml_defaults_to_confirmed_source_overwrite(self) -> None:
@@ -183,11 +184,28 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertIn(str(document.source_path), confirmation.call_args.args[1])
         save.assert_not_called()
 
-    def test_cancelled_home_settings_stays_on_home(self) -> None:
-        with mock.patch("tunelab.app.filedialog.askopenfilename", return_value=""):
-            self.app.home_settings_button.invoke()
-        self.assertTrue(self.app.home_view.winfo_manager())
-        self.assertFalse(self.app.cc_view.winfo_manager())
+    def test_home_header_has_help_without_unused_settings(self) -> None:
+        button_labels: list[str] = []
+
+        def visit(widget: tk.Misc) -> None:
+            for child in widget.winfo_children():
+                if child.winfo_class() == "TButton":
+                    button_labels.append(str(child.cget("text")))
+                visit(child)
+
+        visit(self.app.home_view)
+        self.assertIn("帮助", button_labels)
+        self.assertNotIn("设置", button_labels)
+        self.assertFalse(hasattr(self.app, "home_settings_button"))
+        with mock.patch("tunelab.app.show_workbench_help") as help_dialog:
+            self.app.home_help_button.invoke()
+        help_dialog.assert_called_once_with(self.root)
+
+    def test_workbench_help_is_module_neutral_and_extensible(self) -> None:
+        self.assertIn("当前可用模块以首页和“工具”菜单为准", WORKBENCH_HELP_TEXT)
+        self.assertIn("后续新增模块", WORKBENCH_HELP_TEXT)
+        self.assertIn("每个模块拥有独立的输入要求、算法边界和结果解释", WORKBENCH_HELP_TEXT)
+        self.assertNotIn("CSV 需要 R/G/B-meas", WORKBENCH_HELP_TEXT)
 
     def test_selected_region_is_always_visible(self) -> None:
         document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
@@ -452,6 +470,8 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertIn("TuneLab", text)
         self.assertIn("版本 0.2.0", text)
         self.assertIn("作者联系邮箱：kaiyi.jiang@thundersoft.com", text)
+        self.assertIn("本地运行 · 模块化工作区 · 持续扩展", text)
+        self.assertNotIn("CC 校正 · Gamma 优化", text)
         self.assertFalse(any("Python Software Foundation" in value for value in text))
 
         self.app.show_cc_workspace()

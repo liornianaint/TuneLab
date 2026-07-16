@@ -4,13 +4,27 @@ import sys
 import tkinter as tk
 import tkinter.font as tkfont
 from pathlib import Path
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 
 APP_NAME = "TuneLab"
 APP_VERSION = "0.2.0"
 APP_TAGLINE = "Qualcomm Camera Tuning Workbench"
 AUTHOR_EMAIL = "kaiyi.jiang@thundersoft.com"
+WORKBENCH_HELP_TEXT = (
+    "TuneLab 是一个持续扩展的本地 Camera Tuning 工作台。当前可用模块以首页和“工具”菜单为准；"
+    "后续新增模块也会从同一入口提供。\n\n"
+    "现有工具覆盖 CC 校正、Gamma 优化、普通图片像素与 ROI 检查等任务。"
+    "每个模块拥有独立的输入要求、算法边界和结果解释，请进入对应模块后查看其专属帮助。\n\n"
+    "所有计算均在本地完成，不调用云端服务。分析结果用于工程调试与方向判断；"
+    "涉及设备画质或参数修改时，仍应通过上机、重新拍摄和目标场景验证。"
+)
+
+
+def show_workbench_help(root: tk.Misc) -> None:
+    """Show module-neutral help that remains valid as TuneLab grows."""
+
+    messagebox.showinfo("TuneLab 使用说明", WORKBENCH_HELP_TEXT, parent=root)
 
 
 def application_icon_path() -> Path:
@@ -87,7 +101,7 @@ def show_about_dialog(root: tk.Misc, icon_path: Path | None = None) -> tk.Toplev
         font=body_font,
     ).pack(pady=(6, 0))
     ttk.Separator(body, orient="horizontal").pack(fill="x", pady=(18, 14))
-    tk.Label(body, text="CC 校正 · Gamma 优化", background=surface, foreground=muted, font=small_font).pack()
+    tk.Label(body, text="本地运行 · 模块化工作区 · 持续扩展", background=surface, foreground=muted, font=small_font).pack()
     ttk.Button(body, text="关闭", command=dialog.destroy).pack(pady=(18, 0), ipadx=14)
 
     def forget_dialog(event: tk.Event) -> None:

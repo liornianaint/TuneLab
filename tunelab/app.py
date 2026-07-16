@@ -9,7 +9,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Iterable, Optional
 
-from .branding import application_icon_path, show_about_dialog
+from .branding import application_icon_path, show_about_dialog, show_workbench_help
 from .ccm.color_science import lab_to_srgb
 from .ccm.history import load_history, record_from_result, save_history
 from .ccm.imatest import ImatestCSVError, parse_imatest_csv
@@ -713,6 +713,7 @@ class TuneLabApp:
         self._patch_sort_reverse = False
         self._history_sort_reverse = True
         self.gamma_workspace = None
+        self.image_inspector_workspace = None
 
         root.title(APP_TITLE)
         self.window_placement = fit_window_to_screen(root)
@@ -809,10 +810,13 @@ class TuneLabApp:
         tools_menu = tk.Menu(menu, tearoff=False)
         tools_menu.add_command(label="首页", command=self.show_home_workspace)
         tools_menu.add_command(label="Gamma 优化", command=self.open_gamma_optimizer)
+        tools_menu.add_command(label="图像分析器...", command=self.open_image_inspector)
         self.tools_menu = tools_menu
         menu.add_cascade(label="工具", menu=tools_menu)
         help_menu = tk.Menu(menu, tearoff=False)
-        help_menu.add_command(label="算法边界", command=self.show_assumptions)
+        help_menu.add_command(label="TuneLab 使用说明", command=self.show_help)
+        help_menu.add_separator()
+        help_menu.add_command(label="CC 算法边界", command=self.show_cc_assumptions)
         help_menu.add_command(label="关于 TuneLab", command=self.show_about)
         self.help_menu = help_menu
         menu.add_cascade(label="帮助", menu=help_menu)
@@ -829,8 +833,10 @@ class TuneLabApp:
         tools_menu = tk.Menu(menu, tearoff=False)
         tools_menu.add_command(label="CC 校正", command=self.show_cc_workspace)
         tools_menu.add_command(label="Gamma 优化", command=self.open_gamma_optimizer)
+        tools_menu.add_command(label="图像分析器...", command=self.open_image_inspector)
         menu.add_cascade(label="工具", menu=tools_menu)
         help_menu = tk.Menu(menu, tearoff=False)
+        help_menu.add_command(label="TuneLab 使用说明", command=self.show_help)
         help_menu.add_command(label="关于 TuneLab", command=self.show_about)
         self.help_menu = help_menu
         menu.add_cascade(label="帮助", menu=help_menu)
@@ -848,6 +854,7 @@ class TuneLabApp:
         ttk.Button(sidebar, text="⌂   首页", command=self.show_home_workspace, style="ActiveNav.TButton").pack(fill="x", pady=(0, 8))
         ttk.Button(sidebar, text="◈   CC 校正", command=self.show_cc_workspace, style="Nav.TButton").pack(fill="x", pady=4)
         ttk.Button(sidebar, text="⌁   Gamma 优化", command=self.open_gamma_optimizer, style="Nav.TButton").pack(fill="x", pady=4)
+        ttk.Button(sidebar, text="▧   图像分析器", command=self.open_image_inspector, style="Nav.TButton").pack(fill="x", pady=4)
         ttk.Label(sidebar, text="●  本地工作区", foreground=GREEN, background=PANEL, font=FONT_SMALL).pack(anchor="w", side="bottom", pady=(0, 4))
 
         content = ttk.Frame(home, padding=(36, 26), style="Home.TFrame")
@@ -861,15 +868,15 @@ class TuneLabApp:
         brand.pack(side="left", pady=(4, 0))
         ttk.Label(brand, text="TuneLab", style="HomeBrand.TLabel").pack(anchor="w")
         ttk.Label(brand, text="Qualcomm Camera Tuning Workbench", style="Subtitle.TLabel").pack(anchor="w", pady=(3, 0))
-        ttk.Button(hero, text="帮助", command=self.show_assumptions, style="Quiet.TButton").pack(side="right", padx=(8, 0))
-        self.home_settings_button = ttk.Button(hero, text="设置", command=self.import_settings, style="Quiet.TButton")
-        self.home_settings_button.pack(side="right", padx=(8, 0))
+        self.home_help_button = ttk.Button(hero, text="帮助", command=self.show_help, style="Quiet.TButton")
+        self.home_help_button.pack(side="right", padx=(8, 0))
 
         ttk.Label(content, text="常用工具", style="HomeSection.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 12))
         tools = ttk.Frame(content, style="Home.TFrame")
         tools.grid(row=2, column=0, sticky="nsew")
         tools.columnconfigure(0, weight=1, uniform="home-tools")
         tools.columnconfigure(1, weight=1, uniform="home-tools")
+        tools.columnconfigure(2, weight=1, uniform="home-tools")
         tools.rowconfigure(0, minsize=280)
         self._build_home_tool_card(
             tools, 0, "▣", "CC 校正", "CCM / CC13",
@@ -879,13 +886,25 @@ class TuneLabApp:
             tools, 1, "⌁", "Gamma 优化", "灰阶 / LUT",
             "灰阶曲线与 LUT 优化\n提升层次与对比度表现", self.open_gamma_optimizer, "#12B76A",
         )
+        self._build_home_tool_card(
+            tools, 2, "▧", "图像分析器", "普通图片 / ROI",
+            "浏览文件夹并选择 1–4 张图片\n检查像素、ROI 和颜色变化", self.open_image_inspector, "#7F56D9",
+        )
 
     def show_about(self) -> None:
         self._about_dialog = show_about_dialog(self.root, self.app_icon_source_path)
 
+    def show_help(self) -> None:
+        show_workbench_help(self.root)
+
     def _build_home_tool_card(self, parent: tk.Misc, column: int, glyph: str, title: str, subtitle: str, description: str, command: Callable[[], object], colour: str) -> None:
         card = ttk.Frame(parent, padding=22, style="HomeCard.TFrame")
-        card.grid(row=0, column=column, sticky="nsew", padx=(0, 10) if column == 0 else (10, 0))
+        card.grid(
+            row=0,
+            column=column,
+            sticky="nsew",
+            padx=(0, 8) if column == 0 else (8, 8) if column == 1 else (8, 0),
+        )
         ttk.Label(card, text=glyph, foreground=colour, background=PANEL, font=FONT_TITLE).pack(anchor="w")
         ttk.Label(card, text=title, style="HomeToolTitle.TLabel").pack(anchor="w", pady=(10, 0))
         ttk.Label(card, text=subtitle, style="Card.TLabel", foreground=MUTED).pack(anchor="w", pady=(2, 14))
@@ -1374,6 +1393,8 @@ class TuneLabApp:
 
     def open_gamma_optimizer(self):
         self.home_view.pack_forget()
+        if self.image_inspector_workspace is not None and self.image_inspector_workspace.is_alive():
+            self.image_inspector_workspace.hide()
         if self.gamma_workspace is None or not self.gamma_workspace.is_alive():
             from .gamma.ui import GammaWorkspace
 
@@ -1389,6 +1410,44 @@ class TuneLabApp:
                 self.gamma_workspace = GammaWorkspace(self.root, on_close=self.show_cc_workspace, on_home=self.show_home_workspace, on_about=self.show_about)
         return self.gamma_workspace
 
+    def open_image_inspector(self):
+        try:
+            from .image_inspector.ui import ImageInspectorWorkspace
+        except ImportError as exc:
+            messagebox.showerror(
+                "图像分析器依赖缺失",
+                "TuneLab 默认依赖未完整安装。\n源码工程请运行：python3 run_tunelab.py\n"
+                "或在工程虚拟环境中执行：python -m pip install -e .\n\n" + str(exc),
+                parent=self.root,
+            )
+            return None
+        self.home_view.pack_forget()
+        self.cc_view.pack_forget()
+        if self.gamma_workspace is not None and self.gamma_workspace.is_alive():
+            self.gamma_workspace.hide()
+        try:
+            if self.image_inspector_workspace is None or not self.image_inspector_workspace.is_alive():
+                self.image_inspector_workspace = ImageInspectorWorkspace(
+                    self.root,
+                    on_close=self.show_cc_workspace,
+                    on_home=self.show_home_workspace,
+                    on_gamma=self.open_gamma_optimizer,
+                    on_about=self.show_about,
+                )
+            elif not self.image_inspector_workspace.show():
+                self.image_inspector_workspace = ImageInspectorWorkspace(
+                    self.root,
+                    on_close=self.show_cc_workspace,
+                    on_home=self.show_home_workspace,
+                    on_gamma=self.open_gamma_optimizer,
+                    on_about=self.show_about,
+                )
+        except RuntimeError as exc:
+            messagebox.showerror("图像分析器无法启动", str(exc), parent=self.root)
+            self.show_home_workspace()
+            return None
+        return self.image_inspector_workspace
+
     def show_cc_workspace(self) -> None:
         self.home_view.pack_forget()
         if self.gamma_workspace is not None:
@@ -1396,6 +1455,8 @@ class TuneLabApp:
                 self.gamma_workspace.hide()
             else:
                 self.gamma_workspace = None
+        if self.image_inspector_workspace is not None and self.image_inspector_workspace.is_alive():
+            self.image_inspector_workspace.hide()
         self.root.title(CCM_WORKSPACE_TITLE)
         self._configure_styles()
         self._build_menu()
@@ -1405,6 +1466,8 @@ class TuneLabApp:
         self.cc_view.pack_forget()
         if self.gamma_workspace is not None and self.gamma_workspace.is_alive():
             self.gamma_workspace.hide()
+        if self.image_inspector_workspace is not None and self.image_inspector_workspace.is_alive():
+            self.image_inspector_workspace.hide()
         self.root.title(APP_TITLE)
         self._configure_styles()
         self._build_home_menu()
@@ -1421,6 +1484,8 @@ class TuneLabApp:
             save_history(self.history)
         except OSError:
             pass
+        if self.image_inspector_workspace is not None:
+            self.image_inspector_workspace.shutdown()
         self.root.destroy()
 
     def _on_show_motion_changed(self) -> None:
@@ -1979,9 +2044,9 @@ class TuneLabApp:
             self._persist_settings()
         self._set_status(f"已导出分析报告：{path}", "success")
 
-    def show_assumptions(self) -> None:
+    def show_cc_assumptions(self) -> None:
         messagebox.showinfo(
-            "算法边界",
+            "CC 算法边界",
             "1. 先稳定 AWB、曝光与 Gamma，再优化 CC。\n"
             "2. CSV 需要 R/G/B-meas 与 R/G/B-ideal 的 ColorChecker 段。\n"
             "3. Delta CCM 在去 Gamma 后的线性 sRGB 域拟合，并强制每行和为 1。\n"

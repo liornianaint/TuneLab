@@ -286,7 +286,9 @@ def save_analysis_pdf(
         from reportlab.pdfbase.ttfonts import TTFont
         from reportlab.platypus import KeepTogether, PageBreak, Paragraph, Preformatted, SimpleDocTemplate, Spacer, Table, TableStyle
     except ImportError as exc:
-        raise RuntimeError("导出 PDF 需要 reportlab：python -m pip install reportlab") from exc
+        raise RuntimeError(
+            "TuneLab 默认 PDF 依赖 reportlab 未安装；请运行 python3 run_tunelab.py 重新同步工程环境。"
+        ) from exc
 
     path = Path(destination)
     path.parent.mkdir(parents=True, exist_ok=True)
