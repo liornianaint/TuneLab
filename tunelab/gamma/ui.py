@@ -3,12 +3,28 @@ from __future__ import annotations
 import json
 import math
 import tkinter as tk
-import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Iterable, Optional, Sequence
 
 from ..branding import application_icon_path, show_about_dialog
+from ..ui_foundation import (
+    FONT_BODY,
+    FONT_CARD_TITLE,
+    FONT_KPI,
+    FONT_MONO,
+    FONT_PLOT_TITLE,
+    FONT_SMALL,
+    FONT_SMALL_BOLD,
+    FONT_TITLE,
+    ROW_HEIGHT,
+    TABLE_HEADING_BG,
+    bind_responsive_wrap,
+    configure_action_styles,
+    configure_typography,
+    elide_canvas_text,
+    fit_window_to_screen,
+)
 from .models import (
     GammaOptimizationConfig,
     GammaOptimizationResult,
@@ -17,7 +33,7 @@ from .models import (
     GrayRangeAnalysis,
 )
 from .history import load_gamma_history, record_gamma_result, save_gamma_history
-from .optimizer import GammaOptimizationError, optimize_gamma_lut
+from .optimizer import GammaOptimizationError, minimum_continuity_gap, optimize_gamma_lut
 from .reporting import save_gamma_html_report
 from .settings import load_gamma_settings, save_gamma_settings
 from .imatest import GrayCSVError, analyze_gray_range, parse_gray_csv
@@ -33,22 +49,21 @@ GREEN = "#0F9D75"
 RED = "#D92D20"
 AMBER = "#B54708"
 PURPLE = "#7F56D9"
-FONT_BODY = "TuneLabBodyFont"
-FONT_SMALL = "TuneLabSmallFont"
-FONT_SMALL_BOLD = "TuneLabSmallBoldFont"
-FONT_TITLE = "TuneLabTitleFont"
-FONT_CARD_TITLE = "TuneLabCardTitleFont"
-FONT_KPI = "TuneLabKpiFont"
-FONT_PLOT_TITLE = "TuneLabPlotTitleFont"
-FONT_MONO = "TuneLabMonoFont"
-
-
 class CurvePlot(ttk.Frame):
-    def __init__(self, master: tk.Misc, title: str, x_label: str, y_label: str) -> None:
+    def __init__(
+        self,
+        master: tk.Misc,
+        title: str,
+        x_label: str,
+        y_label: str,
+        *,
+        show_markers: bool = True,
+    ) -> None:
         super().__init__(master, style="GammaCard.TFrame")
         self.title = title
         self.x_label = x_label
         self.y_label = y_label
+        self.show_markers = show_markers
         self.series: list[tuple[str, tuple[tuple[float, float], ...], str, bool]] = []
         self.canvas = tk.Canvas(self, background=PANEL, highlightthickness=0, height=260)
         self.canvas.pack(fill="both", expand=True)
@@ -67,7 +82,19 @@ class CurvePlot(ttk.Frame):
         width = max(320, canvas.winfo_width())
         height = max(220, canvas.winfo_height())
         left, right, top, bottom = 72.0, width - 18.0, 42.0, height - 44.0
-        canvas.create_text(14, 15, text=self.title, anchor="w", fill=INK, font=FONT_PLOT_TITLE)
+        canvas.create_text(
+            14,
+            15,
+            text=elide_canvas_text(
+                canvas,
+                self.title,
+                FONT_PLOT_TITLE,
+                max(80, width - 28),
+            ),
+            anchor="w",
+            fill=INK,
+            font=FONT_PLOT_TITLE,
+        )
         points = [point for _name, values, _color, _dashed in self.series for point in values]
         if not points:
             canvas.create_text(width / 2, height / 2, text="等待数据", fill=MUTED)
@@ -108,10 +135,18 @@ class CurvePlot(ttk.Frame):
             for x_value, y_value in values:
                 coordinates.extend((x_pos(x_value), y_pos(y_value)))
             if len(coordinates) >= 4:
-                canvas.create_line(*coordinates, fill=color, width=2.1, dash=(5, 3) if dashed else ())
-            for x_value, y_value in values:
-                x_coordinate, y_coordinate = x_pos(x_value), y_pos(y_value)
-                canvas.create_oval(x_coordinate - 2.5, y_coordinate - 2.5, x_coordinate + 2.5, y_coordinate + 2.5, fill=color, outline="")
+                canvas.create_line(
+                    *coordinates,
+                    fill=color,
+                    width=2.1,
+                    dash=(5, 3) if dashed else (),
+                    capstyle=tk.ROUND,
+                    joinstyle=tk.ROUND,
+                )
+            if self.show_markers:
+                for x_value, y_value in values:
+                    x_coordinate, y_coordinate = x_pos(x_value), y_pos(y_value)
+                    canvas.create_oval(x_coordinate - 2.5, y_coordinate - 2.5, x_coordinate + 2.5, y_coordinate + 2.5, fill=color, outline="")
             canvas.create_line(legend_x, 29, legend_x + 20, 29, fill=color, width=2, dash=(5, 3) if dashed else ())
             canvas.create_text(legend_x + 24, 29, text=name, anchor="w", fill=INK, font=FONT_SMALL)
             legend_x += 28 + max(52, len(name) * 8)
@@ -149,6 +184,11 @@ class GammaWorkspace:
         # close button must continue to close TuneLab, not destroy this module
         # and leave the root with a stale callback.
         if self.on_close is None:
+            self.window_placement = fit_window_to_screen(
+                self.root,
+                desired_width=1540,
+                desired_height=980,
+            )
             try:
                 self.root.protocol("WM_DELETE_WINDOW", self.close)
             except tk.TclError:
@@ -157,7 +197,7 @@ class GammaWorkspace:
     def _build_menu(self) -> None:
         menu = tk.Menu(self.root)
         self.file_menu = tk.Menu(menu, tearoff=False)
-        self.file_menu.add_command(label="打开 Imatest Gray CSV...", command=self.load_csv)
+        self.file_menu.add_command(label="打开 Gamma CSV...", command=self.load_csv)
         self.file_menu.add_command(label="打开 Qualcomm Gamma XML...", command=self.load_xml)
         self.file_menu.add_command(label="保存 Gamma XML...", command=self.save_xml)
         self.file_menu.add_command(label="导出 Gamma 工程报告...", command=self.export_report)
@@ -190,43 +230,17 @@ class GammaWorkspace:
         show_about_dialog(self.root, application_icon_path())
 
     def _configure_styles(self) -> None:
-        style = ttk.Style(self.root)
-        if self.on_close is None and "clam" in style.theme_names():
-            # Aqua follows macOS dark appearance and otherwise supplies white
-            # Treeview text, which clashes with the explicit light engineering
-            # cards/tags used by this cross-platform tool.
-            style.theme_use("clam")
-        default_font = tkfont.Font(root=self.root, name="TkDefaultFont", exists=True)
-        text_font = tkfont.Font(root=self.root, name="TkTextFont", exists=True)
-        heading_font = tkfont.Font(root=self.root, name="TkHeadingFont", exists=True)
-        fixed_font = tkfont.Font(root=self.root, name="TkFixedFont", exists=True)
-        base_size = max(11, min(12, abs(int(default_font.cget("size")))))
-
-        def install_font(name: str, *, size: int, weight: str = "normal", source: tkfont.Font = default_font) -> None:
-            try:
-                font = tkfont.Font(root=self.root, name=name, exists=True)
-            except tk.TclError:
-                font = tkfont.Font(root=self.root, name=name, exists=False)
-            font.configure(family=source.actual("family"), size=size, weight=weight)
-
-        install_font(FONT_BODY, size=base_size, source=text_font)
-        install_font(FONT_SMALL, size=max(10, base_size - 1), source=text_font)
-        install_font(FONT_SMALL_BOLD, size=max(10, base_size - 1), weight="bold", source=heading_font)
-        install_font(FONT_CARD_TITLE, size=13, weight="bold", source=heading_font)
-        install_font(FONT_KPI, size=base_size + 2, weight="bold", source=heading_font)
-        install_font(FONT_TITLE, size=19, weight="bold", source=heading_font)
-        install_font(FONT_PLOT_TITLE, size=13, weight="bold", source=heading_font)
-        install_font(FONT_MONO, size=max(10, base_size - 1), source=fixed_font)
+        style = configure_typography(self.root)
         style.configure("GammaRoot.TFrame", background=BG)
         style.configure("GammaCard.TFrame", background=PANEL)
         style.configure("GammaCard.TLabel", background=PANEL, foreground=INK, font=FONT_BODY)
         style.configure("GammaTitle.TLabel", background=BG, foreground=INK, font=FONT_TITLE)
         style.configure("GammaMuted.TLabel", background=BG, foreground=MUTED, font=FONT_BODY)
         style.configure("GammaKpi.TLabel", background=PANEL, foreground=INK, font=FONT_KPI)
-        style.configure("GammaPrimary.TButton", background=BLUE, foreground="white", padding=(14, 8), font=FONT_BODY)
+        configure_action_styles(style)
         style.configure(
             "Gamma.Treeview",
-            rowheight=25,
+            rowheight=ROW_HEIGHT,
             background=PANEL,
             fieldbackground=PANEL,
             foreground=INK,
@@ -234,80 +248,86 @@ class GammaWorkspace:
         )
         style.configure(
             "Gamma.Treeview.Heading",
-            background="#EAECF0",
+            background=TABLE_HEADING_BG,
             foreground=INK,
             font=FONT_SMALL_BOLD,
         )
 
     def _build_ui(self) -> None:
         self.root.title("TuneLab · Qualcomm Gamma 1.5 LUT 优化")
-        try:
-            self.root.geometry("1540x980")
-            self.root.minsize(1180, 760)
-        except tk.TclError:
-            pass
-        outer = ttk.Frame(self.root, padding=(18, 14), style="GammaRoot.TFrame")
+        outer = ttk.Frame(self.root, padding=(16, 10), style="GammaRoot.TFrame")
         self.outer = outer
         outer.pack(fill="both", expand=True)
         title = ttk.Frame(outer, style="GammaRoot.TFrame")
-        title.pack(fill="x", pady=(0, 10))
+        title.pack(fill="x", pady=(0, 6))
         ttk.Label(title, text="Gamma 优化", style="GammaTitle.TLabel").pack(side="left")
         ttk.Label(title, text="Imatest Stepchart · Qualcomm Gamma LUT（点数/位宽由 XML 决定）", style="GammaMuted.TLabel").pack(side="left", padx=(12, 0), pady=(5, 0))
 
-        toolbar = ttk.Frame(outer, padding=10, style="GammaCard.TFrame")
-        toolbar.pack(fill="x", pady=(0, 8))
+        toolbar = ttk.Frame(outer, padding=(10, 7), style="GammaCard.TFrame")
+        self.toolbar_panel = toolbar
+        toolbar.pack(fill="x", pady=(0, 6))
         toolbar.columnconfigure(5, weight=1)
-        ttk.Button(toolbar, text="打开 Gray CSV", command=self.load_csv).grid(row=0, column=0, rowspan=2, sticky="ns", padx=(0, 7))
-        ttk.Button(toolbar, text="打开 Gamma XML", command=self.load_xml).grid(row=0, column=1, rowspan=2, sticky="ns", padx=(0, 12))
-        ttk.Label(toolbar, text="CCT / K", style="GammaCard.TLabel").grid(row=0, column=2, sticky="w")
+        ttk.Button(toolbar, text="1  打开 Gamma CSV", command=self.load_csv).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ttk.Button(toolbar, text="2  打开 Gamma XML", command=self.load_xml).grid(row=0, column=1, sticky="ew", padx=(0, 12))
+        ttk.Label(toolbar, text="CCT", style="GammaCard.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 5))
         self.cct_var = tk.StringVar(value="6500")
-        ttk.Entry(toolbar, textvariable=self.cct_var, width=8).grid(row=1, column=2, sticky="w")
-        ttk.Button(toolbar, text="自动匹配 Region", command=self.auto_match_region).grid(row=1, column=3, sticky="w", padx=(6, 12))
-        ttk.Label(toolbar, text="当前 Region / 完整触发路径", style="GammaCard.TLabel").grid(row=0, column=4, columnspan=2, sticky="w")
-        self.region_var = tk.StringVar()
-        self.region_combo = ttk.Combobox(toolbar, textvariable=self.region_var, state="readonly", width=62)
-        self.region_combo.grid(row=1, column=4, columnspan=2, sticky="ew", padx=(0, 12))
-        self.region_combo.bind("<<ComboboxSelected>>", self._on_region_selected)
-        self.optimize_button = ttk.Button(toolbar, text="Gamma 优化", command=self.run_optimization, style="GammaPrimary.TButton")
-        self.optimize_button.grid(row=0, column=6, rowspan=2, sticky="ns", padx=(0, 7))
-        self.save_button = ttk.Button(toolbar, text="保存 Gamma XML", command=self.save_xml, state="disabled")
-        self.save_button.grid(row=0, column=7, rowspan=2, sticky="ns")
-
-        settings = ttk.Frame(outer, padding=10, style="GammaCard.TFrame")
-        settings.pack(fill="x", pady=(0, 8))
-        labels = (
-            ("Gamma 提亮系数", 0), ("目标可识别阶数", 1), ("最大调整强度", 2),
-            ("高光保护", 3), ("暗部保护", 4), ("RGB 模式", 5),
-            ("灰阶范围", 6), ("识别阈值 / Pixel", 7), ("手动起止 Zone", 8),
+        ttk.Entry(toolbar, textvariable=self.cct_var, width=8).grid(row=0, column=3, sticky="w", padx=(0, 8))
+        self.region_match_button = ttk.Button(
+            toolbar,
+            text="自动匹配 Region",
+            command=self.auto_match_region,
+            style="RegionMatch.TButton",
         )
-        for text, column in labels:
-            ttk.Label(settings, text=text, style="GammaCard.TLabel").grid(row=0, column=column, sticky="w", padx=(0, 12))
+        self.region_match_button.grid(row=0, column=4, sticky="ew", padx=(0, 8))
+        self.region_var = tk.StringVar()
+        self.region_combo = ttk.Combobox(toolbar, textvariable=self.region_var, state="readonly", width=12)
+        self.region_combo.grid(row=0, column=5, sticky="ew", padx=(0, 8))
+        self.region_combo.bind("<<ComboboxSelected>>", self._on_region_selected)
+        self.optimize_button = ttk.Button(toolbar, text="3  自动优化", command=self.run_optimization, style="Primary.TButton")
+        self.optimize_button.grid(row=0, column=6, sticky="ew", padx=(0, 8))
+        self.save_button = ttk.Button(toolbar, text="保存 XML", command=self.save_xml, state="disabled")
+        self.save_button.grid(row=0, column=7, sticky="ew")
+
+        settings = ttk.Frame(outer, padding=(10, 6), style="GammaCard.TFrame")
+        self.settings_panel = settings
+        settings.pack(fill="x", pady=(0, 6))
         config = self.settings
+        ttk.Label(settings, text="Gamma", style="GammaCard.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 5))
         self.target_gamma_var = tk.StringVar(value=f"{config.target_gamma:g}")
-        ttk.Entry(settings, textvariable=self.target_gamma_var, width=9).grid(row=1, column=0, sticky="w", padx=(0, 12))
+        ttk.Entry(settings, textvariable=self.target_gamma_var, width=8).grid(row=0, column=1, sticky="w", padx=(0, 14))
+        ttk.Label(settings, text="目标阶数", style="GammaCard.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 5))
         self.target_steps_var = tk.StringVar(value="自动" if config.target_step_count is None else str(config.target_step_count))
-        ttk.Entry(settings, textvariable=self.target_steps_var, width=9).grid(row=1, column=1, sticky="w", padx=(0, 12))
+        ttk.Entry(settings, textvariable=self.target_steps_var, width=8).grid(row=0, column=3, sticky="w", padx=(0, 14))
+        ttk.Label(settings, text="调整强度", style="GammaCard.TLabel").grid(row=0, column=4, sticky="w", padx=(0, 5))
         self.strength_var = tk.DoubleVar(value=config.maximum_adjustment * 100.0)
-        ttk.Scale(settings, from_=0, to=100, variable=self.strength_var, orient="horizontal", length=105).grid(row=1, column=2, sticky="w", padx=(0, 12))
+        ttk.Scale(settings, from_=0, to=100, variable=self.strength_var, orient="horizontal", length=105).grid(row=0, column=5, sticky="w", padx=(0, 14))
+        ttk.Label(settings, text="高光保护", style="GammaCard.TLabel").grid(row=0, column=6, sticky="w", padx=(0, 5))
         self.highlight_var = tk.DoubleVar(value=config.highlight_protection * 100.0)
-        ttk.Scale(settings, from_=0, to=100, variable=self.highlight_var, orient="horizontal", length=95).grid(row=1, column=3, sticky="w", padx=(0, 12))
+        ttk.Scale(settings, from_=0, to=100, variable=self.highlight_var, orient="horizontal", length=90).grid(row=0, column=7, sticky="w", padx=(0, 14))
+        ttk.Label(settings, text="暗部保护", style="GammaCard.TLabel").grid(row=0, column=8, sticky="w", padx=(0, 5))
         self.shadow_var = tk.DoubleVar(value=config.shadow_protection * 100.0)
-        ttk.Scale(settings, from_=0, to=100, variable=self.shadow_var, orient="horizontal", length=95).grid(row=1, column=4, sticky="w", padx=(0, 12))
+        ttk.Scale(settings, from_=0, to=100, variable=self.shadow_var, orient="horizontal", length=90).grid(row=0, column=9, sticky="w")
+        secondary = ttk.Frame(settings, style="GammaCard.TFrame")
+        secondary.grid(row=1, column=0, columnspan=10, sticky="ew", pady=(5, 0))
         rgb_label = next((label for label, value in self.RGB_LABELS.items() if value == config.rgb_mode), next(iter(self.RGB_LABELS)))
+        ttk.Label(secondary, text="RGB", style="GammaCard.TLabel").pack(side="left", padx=(0, 5))
         self.rgb_mode_var = tk.StringVar(value=rgb_label)
-        ttk.Combobox(settings, textvariable=self.rgb_mode_var, values=list(self.RGB_LABELS), state="readonly", width=18).grid(row=1, column=5, sticky="w", padx=(0, 12))
+        ttk.Combobox(secondary, textvariable=self.rgb_mode_var, values=list(self.RGB_LABELS), state="readonly", width=17).pack(side="left", padx=(0, 14))
         range_label = next((label for label, value in self.RANGE_LABELS.items() if value == config.range_mode), next(iter(self.RANGE_LABELS)))
+        ttk.Label(secondary, text="灰阶范围", style="GammaCard.TLabel").pack(side="left", padx=(0, 5))
         self.range_mode_var = tk.StringVar(value=range_label)
-        range_combo = ttk.Combobox(settings, textvariable=self.range_mode_var, values=list(self.RANGE_LABELS), state="readonly", width=22)
-        range_combo.grid(row=1, column=6, sticky="w", padx=(0, 12))
+        range_combo = ttk.Combobox(secondary, textvariable=self.range_mode_var, values=list(self.RANGE_LABELS), state="readonly", width=21)
+        range_combo.pack(side="left", padx=(0, 14))
         range_combo.bind("<<ComboboxSelected>>", lambda _event: self._range_changed())
+        ttk.Label(secondary, text="阈值 / Pixel", style="GammaCard.TLabel").pack(side="left", padx=(0, 5))
         self.threshold_var = tk.StringVar(value=f"{config.threshold:g}")
-        threshold_entry = ttk.Entry(settings, textvariable=self.threshold_var, width=9)
-        threshold_entry.grid(row=1, column=7, sticky="w", padx=(0, 12))
+        threshold_entry = ttk.Entry(secondary, textvariable=self.threshold_var, width=9)
+        threshold_entry.pack(side="left", padx=(0, 14))
         threshold_entry.bind("<Return>", lambda _event: self.reanalyze())
         threshold_entry.bind("<FocusOut>", lambda _event: self.reanalyze(quiet=True))
-        manual = ttk.Frame(settings, style="GammaCard.TFrame")
-        manual.grid(row=1, column=8, sticky="w")
+        ttk.Label(secondary, text="手动 Zone", style="GammaCard.TLabel").pack(side="left", padx=(0, 5))
+        manual = ttk.Frame(secondary, style="GammaCard.TFrame")
+        manual.pack(side="left")
         self.manual_start_var = tk.StringVar(value=str(config.manual_start_zone or 1))
         self.manual_end_var = tk.StringVar(value=str(config.manual_end_zone or 12))
         self.manual_start_entry = ttk.Entry(manual, textvariable=self.manual_start_var, width=5, state="disabled")
@@ -317,10 +337,20 @@ class GammaWorkspace:
         self.manual_end_entry.pack(side="left")
         settings.columnconfigure(9, weight=1)
 
-        self.info_var = tk.StringVar(value="请打开 Gray CSV 与 Gamma XML。")
-        ttk.Label(outer, textvariable=self.info_var, style="GammaMuted.TLabel").pack(fill="x", pady=(0, 6))
+        self.info_var = tk.StringVar(value="请打开 Gamma CSV 与 Gamma XML。")
+        self.info_label = ttk.Label(outer, textvariable=self.info_var, style="GammaMuted.TLabel")
+        self.info_label.pack(fill="x", pady=(0, 3))
+        bind_responsive_wrap(self.info_label)
         self.status_var = tk.StringVar(value="等待数据")
-        ttk.Label(outer, textvariable=self.status_var, foreground=BLUE, background="#EAF0FF", padding=(9, 6)).pack(fill="x", pady=(0, 8))
+        self.status_label = ttk.Label(
+            outer,
+            textvariable=self.status_var,
+            foreground=BLUE,
+            background="#EAF0FF",
+            padding=(8, 4),
+        )
+        self.status_label.pack(fill="x", pady=(0, 5))
+        bind_responsive_wrap(self.status_label)
 
         self.notebook = ttk.Notebook(outer)
         self.notebook.pack(fill="both", expand=True)
@@ -333,14 +363,17 @@ class GammaWorkspace:
         self.notebook.add(self.diagnosis_tab, text="  诊断与解释  ")
         self.notebook.add(self.history_tab, text="  History / XML Diff  ")
 
+        self.curve_tab.columnconfigure(0, weight=1)
+        self.curve_tab.rowconfigure(1, weight=5, minsize=230)
+        self.curve_tab.rowconfigure(2, weight=4, minsize=250)
         kpis = ttk.Frame(self.curve_tab, style="GammaRoot.TFrame")
-        kpis.pack(fill="x", pady=(0, 8))
+        kpis.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         for column in range(8):
             kpis.columnconfigure(column, weight=1, uniform="gamma-kpi")
-        captions = ("原始 Zone", "可识别 Before→After", "目标阶数", "Global Gamma", "RMSE", "RGB 偏差", "LUT Format", "Curve Health")
+        captions = ("原始 Zone", "连续阶数", "目标阶数", "Global Gamma", "RMSE", "RGB 偏差", "LUT 格式", "曲线健康")
         self.kpi_vars: list[tk.StringVar] = []
         for column, caption in enumerate(captions):
-            card = ttk.Frame(kpis, padding=(9, 7), style="GammaCard.TFrame")
+            card = ttk.Frame(kpis, padding=(8, 5), style="GammaCard.TFrame")
             card.grid(row=0, column=column, sticky="nsew", padx=(0, 5 if column < 7 else 0))
             value = tk.StringVar(value="—")
             self.kpi_vars.append(value)
@@ -348,7 +381,8 @@ class GammaWorkspace:
             ttk.Label(card, text=caption, style="GammaCard.TLabel", foreground=MUTED).pack(anchor="w")
 
         charts = ttk.Frame(self.curve_tab, style="GammaRoot.TFrame")
-        charts.pack(fill="both", expand=True, pady=(0, 8))
+        self.charts_panel = charts
+        charts.grid(row=1, column=0, sticky="nsew", pady=(0, 6))
         for column in range(3):
             charts.columnconfigure(column, weight=1, uniform="gamma-chart")
         charts.rowconfigure(0, weight=1)
@@ -356,11 +390,18 @@ class GammaWorkspace:
         self.response_plot.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
         self.local_plot = CurvePlot(charts, "Local Gamma", "Zone", "Gamma")
         self.local_plot.grid(row=0, column=1, sticky="nsew", padx=5)
-        self.lut_plot = CurvePlot(charts, "Gamma LUT", "LUT Index", "XML Value")
+        self.lut_plot = CurvePlot(
+            charts,
+            "Gamma LUT",
+            "LUT Index",
+            "XML Value",
+            show_markers=False,
+        )
         self.lut_plot.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
 
         details = ttk.Panedwindow(self.curve_tab, orient="horizontal")
-        details.pack(fill="both", expand=True)
+        self.details_panel = details
+        details.grid(row=2, column=0, sticky="nsew")
         pair_panel = ttk.Frame(details, padding=7, style="GammaCard.TFrame", width=410)
         zone_panel = ttk.Frame(details, padding=7, style="GammaCard.TFrame")
         details.add(pair_panel, weight=1)
@@ -507,7 +548,7 @@ class GammaWorkspace:
 
     def load_csv(self, path: Optional[str] = None) -> None:
         selected = path or filedialog.askopenfilename(
-            title="打开 Imatest Gray / Stepchart CSV",
+            title="打开 Gamma CSV",
             filetypes=[("CSV", "*.csv"), ("所有文件", "*.*")],
         )
         if not selected:
@@ -515,7 +556,7 @@ class GammaWorkspace:
         try:
             self.dataset = parse_gray_csv(selected)
         except (OSError, GrayCSVError) as exc:
-            messagebox.showerror("Gray CSV 读取失败", str(exc), parent=self.root)
+            messagebox.showerror("Gamma CSV 读取失败", str(exc), parent=self.root)
             return
         self.result = None
         self.save_button.configure(state="disabled")
@@ -599,7 +640,7 @@ class GammaWorkspace:
             return
         self._select_region(region.index)
         self.status_var.set(
-            f"CCT {cct:g}K {'精确命中' if mode == 'exact' else '选择最近'} Gamma region #{region.index}。"
+            f"CCT {cct:g}K {'精确命中' if mode == 'exact' else '选择最近'} Gamma Region #{region.index}。"
         )
 
     def _on_region_selected(self, _event: Optional[tk.Event] = None) -> None:
@@ -650,7 +691,7 @@ class GammaWorkspace:
 
     def run_optimization(self) -> None:
         if self.dataset is None or self.analysis is None or self.document is None or self.selected_region is None:
-            messagebox.showinfo("资料未齐", "请打开 Gray CSV、Gamma XML 并选择 Region。", parent=self.root)
+            messagebox.showinfo("资料未齐", "请打开 Gamma CSV、Gamma XML 并选择 Region。", parent=self.root)
             return
         try:
             config = self._config()
@@ -684,7 +725,7 @@ class GammaWorkspace:
             save_gamma_history(self.history)
         except OSError:
             pass
-        self.save_button.configure(state="normal" if self.result.health.status != "FAIL" else "disabled")
+        self.save_button.configure(state="normal" if self._result_is_writable() else "disabled")
         self._render_result()
         self._render_history()
 
@@ -695,18 +736,57 @@ class GammaWorkspace:
             self.response_plot.set_series((("Before", response, BLUE, False),))
             self.local_plot.set_series((("Before", local, BLUE, False),))
         if self.selected_region is not None:
-            step = max(1, self.selected_region.length // 64)
-            before = [(index, self.selected_region.channel_g[index]) for index in range(0, self.selected_region.length, step)]
-            if before[-1][0] != self.selected_region.length - 1:
-                before.append((self.selected_region.length - 1, self.selected_region.channel_g[-1]))
+            before = list(enumerate(self.selected_region.channel_g))
+            self._update_lut_plot_title((self.selected_region.channel_g,), "Before")
             self.lut_plot.set_series((("Before G", before, BLUE, False),))
+
+    def _update_lut_plot_title(
+        self,
+        curves: Sequence[Sequence[float]],
+        label: str,
+        *,
+        shape_status: Optional[str] = None,
+        natural_status: Optional[str] = None,
+    ) -> None:
+        steps = [
+            following - current
+            for curve in curves
+            for current, following in zip(curve, curve[1:])
+        ]
+        if not steps:
+            self.lut_plot.title = "Gamma LUT"
+            return
+        plateaus = sum(step <= 0 for step in steps)
+        quality = ""
+        if shape_status is not None:
+            quality += f" · 形状保持 {shape_status}"
+        if natural_status is not None:
+            quality += f" · 自然平滑 {natural_status}"
+        self.lut_plot.title = (
+            f"Gamma LUT · {label} Δ {min(steps):g}–{max(steps):g} · "
+            f"平台 {plateaus}{quality}"
+        )
 
     def _render_result(self) -> None:
         assert self.result is not None and self.dataset is not None and self.analysis is not None
         result = self.result
         metrics = result.metrics
+        lut_changed = any(
+            before != after
+            for before_curve, after_curve in (
+                (result.before_r, result.after_r),
+                (result.before_g, result.after_g),
+                (result.before_b, result.after_b),
+            )
+            for before, after in zip(before_curve, after_curve)
+        )
+        safe_after_generated = result.applied_strength > 0.0 and lut_changed
         self.kpi_vars[1].set(f"{metrics.distinguishable_before} → {metrics.distinguishable_after}")
-        self.kpi_vars[2].set(str(metrics.distinguishable_target))
+        self.kpi_vars[2].set(
+            str(metrics.distinguishable_target)
+            if result.requested_step_count == metrics.distinguishable_target
+            else f"{result.requested_step_count} → 安全 {metrics.distinguishable_target}"
+        )
         self.kpi_vars[3].set(
             f"{metrics.global_gamma_before:.3f}→{metrics.global_gamma_after:.3f}"
         )
@@ -717,27 +797,62 @@ class GammaWorkspace:
         response_before = [(-next(zone.log_exposure for zone in self.dataset.zones if zone.zone == item.zone), item.density_before) for item in result.zone_results]
         response_target = [(-next(zone.log_exposure for zone in self.dataset.zones if zone.zone == item.zone), item.density_target) for item in result.zone_results]
         response_after = [(-next(zone.log_exposure for zone in self.dataset.zones if zone.zone == item.zone), item.density_after) for item in result.zone_results]
-        self.response_plot.set_series(
-            (("Before", response_before, BLUE, False), ("Target", response_target, AMBER, True), ("After", response_after, GREEN, False))
-        )
+        response_series = [
+            ("Before", response_before, BLUE, False),
+            ("Target", response_target, AMBER, True),
+        ]
+        if safe_after_generated:
+            response_series.append(("After", response_after, GREEN, False))
+        self.response_plot.set_series(tuple(response_series))
         local_before = [(item.zone, item.local_gamma_before) for item in result.zone_results if item.local_gamma_before is not None]
         local_target = [(item.zone, item.local_gamma_target) for item in result.zone_results if item.local_gamma_target is not None]
         local_after = [(item.zone, item.local_gamma_after) for item in result.zone_results if item.local_gamma_after is not None]
-        self.local_plot.set_series(
-            (("Before", local_before, BLUE, False), ("Target", local_target, AMBER, True), ("After", local_after, GREEN, False))
-        )
-        step = max(1, len(result.before_g) // 64)
-        indexes = list(range(0, len(result.before_g), step))
-        if indexes[-1] != len(result.before_g) - 1:
-            indexes.append(len(result.before_g) - 1)
-        self.lut_plot.set_series(
+        local_series = [
+            ("Before", local_before, BLUE, False),
+            ("Target", local_target, AMBER, True),
+        ]
+        if safe_after_generated:
+            local_series.append(("After", local_after, GREEN, False))
+        self.local_plot.set_series(tuple(local_series))
+        indexes = range(len(result.before_g))
+        shape_check = next(
             (
-                ("Before G", [(index, result.before_g[index]) for index in indexes], BLUE, False),
-                ("Target", [(index, result.target_lut[index]) for index in indexes], AMBER, True),
-                ("After G", [(index, result.after_g[index]) for index in indexes], GREEN, False),
-                ("After R/B", [(index, (result.after_r[index] + result.after_b[index]) / 2.0) for index in indexes], PURPLE, True),
-            )
+                check
+                for check in result.health.checks
+                if check.name == "LUT Shape Preservation"
+            ),
+            None,
         )
+        natural_check = next(
+            (
+                check
+                for check in result.health.checks
+                if check.name == "LUT Natural Smoothness"
+            ),
+            None,
+        )
+        if safe_after_generated:
+            self._update_lut_plot_title(
+                (result.after_r, result.after_g, result.after_b),
+                "After RGB",
+                shape_status=(None if shape_check is None else shape_check.status),
+                natural_status=(None if natural_check is None else natural_check.status),
+            )
+            self.lut_plot.set_series(
+                (
+                    ("Before G", [(index, result.before_g[index]) for index in indexes], BLUE, False),
+                    ("After G", [(index, result.after_g[index]) for index in indexes], GREEN, False),
+                    ("After R/B", [(index, (result.after_r[index] + result.after_b[index]) / 2.0) for index in indexes], PURPLE, True),
+                )
+            )
+        else:
+            self._update_lut_plot_title(
+                (result.before_r, result.before_g, result.before_b),
+                "未生成安全 After · 已保留原 LUT",
+            )
+            self.lut_plot.set_series(
+                (("Before G", [(index, result.before_g[index]) for index in indexes], BLUE, False),)
+            )
         for tree_item in self.pair_tree.get_children():
             self.pair_tree.delete(tree_item)
         for pair in result.pair_results:
@@ -769,11 +884,25 @@ class GammaWorkspace:
                 ),
                 tags=("fit" if item.used else "constraint" if item.status == "CONSTRAINT" else "excluded",),
             )
-        self.status_var.set(
-            f"Gamma 优化完成：可识别 {metrics.distinguishable_before}→{metrics.distinguishable_after} 阶，目标 {metrics.distinguishable_target}；"
-            f"RMSE {metrics.rmse_before:.5f}→{metrics.rmse_after:.5f}；Curve Health={result.health.status}；"
-            f"提亮系数={result.target_gamma_factor:.3f}，实际强度={result.applied_strength:.0%}，LUT={result.lut_length}点/0–{result.maximum_value}。"
-        )
+        if safe_after_generated:
+            target_summary = (
+                f"目标 {metrics.distinguishable_target}"
+                if result.requested_step_count == metrics.distinguishable_target
+                else (
+                    f"请求 {result.requested_step_count}，"
+                    f"最高安全 {metrics.distinguishable_target}"
+                )
+            )
+            self.status_var.set(
+                f"Gamma 优化完成：连续可识别 {metrics.distinguishable_before}→{metrics.distinguishable_after} 阶，{target_summary}；"
+                f"RMSE {metrics.rmse_before:.5f}→{metrics.rmse_after:.5f}；Curve Health={result.health.status}；"
+                f"提亮系数={result.target_gamma_factor:.3f}，实际强度={result.applied_strength:.0%}，LUT={result.lut_length}点/0–{result.maximum_value}。"
+            )
+        else:
+            self.status_var.set(
+                f"目标 {metrics.distinguishable_target} 阶未通过形状/平滑门禁；未生成或显示不安全 After，"
+                f"已保留原 LUT 和 {metrics.distinguishable_before} 阶 Before，写回已禁用。"
+            )
         self._render_engineering()
         self._render_diagnostics()
 
@@ -790,6 +919,27 @@ class GammaWorkspace:
                 values=(check.name, check.status, check.value, check.limit, check.message),
                 tags=(check.status,),
             )
+        required_pairs = [pair for pair in self.result.pair_results if pair.target_required]
+        required_gap = self._minimum_continuity_gap()
+        continuity_ok = (
+            len(required_pairs) == self.result.metrics.distinguishable_target
+            and all(pair.delta_after >= required_gap for pair in required_pairs)
+            and self.result.metrics.distinguishable_after == self.result.metrics.distinguishable_target
+        )
+        minimum_gap = min((pair.delta_after for pair in required_pairs), default=0.0)
+        self.engineering_tree.insert(
+            "",
+            "end",
+            iid="gamma-check-continuity",
+            values=(
+                "Gray Step Continuity",
+                "PASS" if continuity_ok else "FAIL",
+                f"continuous={self.result.metrics.distinguishable_after}; min ΔPixel={minimum_gap:.2f}",
+                f"{self.result.metrics.distinguishable_target} contiguous; every ΔPixel≥{required_gap:g}",
+                "目标灰阶必须属于同一连续区间，不累计断点后的孤立灰阶。",
+            ),
+            tags=("PASS" if continuity_ok else "FAIL",),
+        )
         metrics = self.result.metrics
         loss_before = self.result.loss_before
         loss_after = self.result.loss_after
@@ -797,7 +947,7 @@ class GammaWorkspace:
             f"Curve Health: {self.result.health.status}",
             f"LUT: {self.result.lut_length} points · integer 0–{self.result.maximum_value}",
             f"Gamma lift factor: {self.result.target_gamma_factor:.3f} (1.0 nominal; larger is brighter)",
-            f"Recognizable steps: Before {metrics.distinguishable_before} · Target {metrics.distinguishable_target} · After {metrics.distinguishable_after}",
+            f"Recognizable steps: Before {metrics.distinguishable_before} · Requested {self.result.requested_step_count} · Safe target {metrics.distinguishable_target} · After {metrics.distinguishable_after}",
             f"Global Gamma: {metrics.global_gamma_before:.5f} → {metrics.global_gamma_after:.5f} · target response {metrics.global_gamma_target:.5f}",
             f"RMSE: {metrics.rmse_before:.6f} → {metrics.rmse_after:.6f}",
             f"Max gray error: {metrics.maximum_error_before:.6f} → {metrics.maximum_error_after:.6f}",
@@ -1028,8 +1178,12 @@ class GammaWorkspace:
         if self.document is None or self.result is None or self.selected_region is None:
             messagebox.showinfo("尚无结果", "请先完成 Gamma 优化。", parent=self.root)
             return
-        if self.result.health.status == "FAIL":
-            messagebox.showerror("Curve Health 未通过", "Curve Health=FAIL，禁止写回 Gamma XML。", parent=self.root)
+        if not self._result_is_writable():
+            messagebox.showerror(
+                "Gamma 工程门禁未通过",
+                "目标连续灰阶、Curve Health 或有效 LUT 变更未通过，禁止写回 Gamma XML。",
+                parent=self.root,
+            )
             return
         path = self.document.source_path
         if not messagebox.askyesno(
@@ -1050,6 +1204,50 @@ class GammaWorkspace:
             messagebox.showerror("Gamma XML 保存失败", str(exc), parent=self.root)
             return
         self.status_var.set(f"已覆盖并回读校验：{path}；只修改 Gamma region #{self.selected_region.index}。")
+
+    def _result_is_writable(self) -> bool:
+        if self.result is None or self.result.health.status == "FAIL":
+            return False
+        required_pairs = [pair for pair in self.result.pair_results if pair.target_required]
+        required_gap = self._minimum_continuity_gap()
+        natural_check = next(
+            (
+                check
+                for check in self.result.health.checks
+                if check.name == "LUT Natural Smoothness"
+            ),
+            None,
+        )
+        shape_check = next(
+            (
+                check
+                for check in self.result.health.checks
+                if check.name == "LUT Shape Preservation"
+            ),
+            None,
+        )
+        return (
+            self.result.applied_strength > 0.0
+            and shape_check is not None
+            and shape_check.status == "PASS"
+            and natural_check is not None
+            and natural_check.status == "PASS"
+            and self.result.metrics.distinguishable_after == self.result.metrics.distinguishable_target
+            and len(required_pairs) == self.result.metrics.distinguishable_target
+            and all(pair.delta_after >= required_gap for pair in required_pairs)
+            and any(
+                before != after
+                for before_curve, after_curve in (
+                    (self.result.before_r, self.result.after_r),
+                    (self.result.before_g, self.result.after_g),
+                    (self.result.before_b, self.result.after_b),
+                )
+                for before, after in zip(before_curve, after_curve)
+            )
+        )
+
+    def _minimum_continuity_gap(self) -> float:
+        return minimum_continuity_gap(self.settings.threshold)
 
 
 def open_gamma_window(master: tk.Misc) -> GammaWorkspace:

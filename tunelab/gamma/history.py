@@ -47,7 +47,7 @@ def record_gamma_result(
         xml_name=xml_name,
         region_label=region_label,
         target_gamma_factor=result.target_gamma_factor,
-        target_steps=metrics.distinguishable_target,
+        target_steps=result.requested_step_count,
         before_steps=metrics.distinguishable_before,
         after_steps=metrics.distinguishable_after,
         rmse_before=metrics.rmse_before,

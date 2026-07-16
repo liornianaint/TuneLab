@@ -239,6 +239,7 @@ class GammaOptimizationResult:
     loss_after: GammaLossBreakdown
     health: GammaCurveHealth
     applied_strength: float
+    requested_step_count: int
     rgb_mode: str
     target_gamma_factor: float
     lut_length: int

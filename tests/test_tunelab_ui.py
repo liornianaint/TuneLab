@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+import tkinter.font as tkfont
 import unittest
 from tkinter import ttk
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from tunelab.app import (
     APP_TITLE,
     FONT_BODY,
     FONT_KPI,
+    FONT_MONO,
     FONT_SMALL_BOLD,
     FONT_TITLE,
     LAB_PLACEHOLDER_BOUNDS,
@@ -18,6 +20,8 @@ from tunelab.app import (
     calculate_lab_bounds,
     lab_plane_hex,
 )
+from tunelab.ui_foundation import calculate_window_placement, fit_window_to_screen
+from tunelab.ui_foundation import FONT_BODY_BOLD
 from tunelab.ccm.imatest import parse_imatest_csv
 from tunelab.ccm.optimizer import optimize_ccm
 from tunelab.ccm.qualcomm_xml import QualcommCCDocument
@@ -67,6 +71,38 @@ class LabViewTests(unittest.TestCase):
         self.assertEqual(view.bounds, original)
 
 
+class WindowPlacementTests(unittest.TestCase):
+    def test_window_fills_large_and_small_screens_without_outer_margins(self) -> None:
+        desktop = calculate_window_placement(
+            1512,
+            982,
+            desired_width=1520,
+            desired_height=1080,
+        )
+        self.assertEqual((desktop.width, desktop.height, desktop.x, desktop.y), (1512, 982, 0, 0))
+        compact = calculate_window_placement(
+            1024,
+            640,
+            desired_width=1520,
+            desired_height=980,
+        )
+        self.assertLessEqual(compact.width, 1024)
+        self.assertLessEqual(compact.height, 640)
+        self.assertEqual(compact.x * 2 + compact.width, 1024)
+        self.assertEqual(compact.y * 2 + compact.height, 640)
+
+    def test_fit_uses_native_maximized_work_area_with_full_screen_fallback(self) -> None:
+        window = mock.Mock()
+        window.winfo_screenwidth.return_value = 1512
+        window.winfo_screenheight.return_value = 982
+        window.winfo_vrootx.return_value = 0
+        window.winfo_vrooty.return_value = 0
+        placement = fit_window_to_screen(window)
+        self.assertEqual(placement.geometry, "1512x982+0+0")
+        window.geometry.assert_called_once_with("1512x982+0+0")
+        window.state.assert_called_once_with("zoomed")
+
+
 class DesktopUISmokeTests(unittest.TestCase):
     def setUp(self) -> None:
         try:
@@ -91,7 +127,7 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertEqual(
             labels,
             [
-                "打开 Imatest CSV...",
+                "打开 CC CSV...",
                 "打开 Qualcomm CC XML...",
                 "保存 XML...",
                 "导出工程报告...",
@@ -110,6 +146,23 @@ class DesktopUISmokeTests(unittest.TestCase):
         visit(self.root)
         self.assertEqual(button_labels.count("保存 XML"), 1)
         self.assertNotIn("保存参数", button_labels)
+        self.assertEqual(str(self.app.region_match_button.cget("text")), "自动匹配 Region")
+        self.assertEqual(str(self.app.region_match_button.cget("style")), "RegionMatch.TButton")
+        self.assertEqual(str(self.app.optimize_button.cget("text")), "3  自动优化")
+        style = ttk.Style(self.root)
+        self.assertEqual(style.lookup("Primary.TButton", "background"), "#2563EB")
+        self.assertEqual(
+            style.lookup("Primary.TButton", "background", ("active",)),
+            "#1D4ED8",
+        )
+        self.assertEqual(
+            style.lookup("Primary.TButton", "foreground", ("active",)),
+            "white",
+        )
+        self.assertEqual(
+            style.lookup("RegionMatch.TButton", "foreground", ("active",)),
+            "#344054",
+        )
         config_labels = [
             self.app.config_menu.entrycget(index, "label")
             for index in range(self.app.config_menu.index("end") + 1)
@@ -200,6 +253,17 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertEqual(style.lookup("Kpi.TLabel", "font"), FONT_KPI)
         self.assertEqual(style.lookup("KpiCompact.TLabel", "font"), FONT_KPI)
         self.assertEqual(str(self.app.tree.tag_configure("focus", "font")), FONT_SMALL_BOLD)
+        self.assertEqual(style.lookup("TButton", "font"), FONT_BODY)
+        self.assertEqual(style.lookup("TCombobox", "font"), FONT_BODY)
+        self.assertEqual(style.lookup("TNotebook.Tab", "font"), FONT_BODY)
+        self.assertEqual(style.lookup("ActiveNav.TButton", "font"), FONT_BODY_BOLD)
+        body_family = tkfont.Font(root=self.root, name=FONT_BODY, exists=True).actual("family")
+        for font_name in (FONT_MONO, "TkDefaultFont", "TkHeadingFont", "TkFixedFont", "TkMenuFont"):
+            with self.subTest(font_name=font_name):
+                self.assertEqual(
+                    body_family,
+                    tkfont.Font(root=self.root, name=font_name, exists=True).actual("family"),
+                )
         before_items = self.app.before_plot.canvas.find_withtag("plot-background")
         after_items = self.app.after_plot.canvas.find_withtag("plot-background")
         self.assertTrue(before_items)
@@ -316,7 +380,10 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertFalse(self.app.before_plot.canvas.find_withtag("tooltip"))
 
         close_callback = self.root.protocol("WM_DELETE_WINDOW")
-        gamma = self.app.open_gamma_optimizer()
+        with mock.patch("tunelab.gamma.ui.fit_window_to_screen") as refit:
+            gamma = self.app.open_gamma_optimizer()
+        refit.assert_not_called()
+        self.root.update_idletasks()
         self.assertIs(self.root.nametowidget(gamma.outer.winfo_parent()), self.root)
         self.assertFalse(self.app.cc_view.winfo_manager())
         self.assertEqual(self.root.protocol("WM_DELETE_WINDOW"), close_callback)
@@ -343,10 +410,21 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertNotIn("快捷操作", visible_text)
         self.assertNotIn("Qualcomm CC13", visible_text)
         self.app.show_cc_workspace()
+        self.root.update_idletasks()
         self.assertFalse(self.app.home_view.winfo_manager())
         self.assertTrue(self.app.cc_view.winfo_manager())
+        self.assertLessEqual(self.app.controls_panel.winfo_reqwidth(), 992)
+        self.assertLessEqual(self.app.controls_panel.winfo_reqheight(), 50)
+        self.assertLessEqual(self.app.parameters_panel.winfo_reqwidth(), 992)
+        self.assertLessEqual(self.app.parameters_panel.winfo_reqheight(), 82)
         gamma = self.app.open_gamma_optimizer()
+        self.root.update_idletasks()
         self.assertTrue(gamma.outer.winfo_manager())
+        self.assertLessEqual(gamma.toolbar_panel.winfo_reqwidth(), 992)
+        self.assertLessEqual(gamma.toolbar_panel.winfo_reqheight(), 50)
+        self.assertLessEqual(gamma.settings_panel.winfo_reqwidth(), 992)
+        self.assertLessEqual(gamma.settings_panel.winfo_reqheight(), 82)
+        self.assertGreaterEqual(gamma.pair_tree.winfo_reqheight(), 250)
         style = ttk.Style(self.root)
         self.assertEqual(style.lookup("GammaTitle.TLabel", "font"), FONT_TITLE)
         self.assertEqual(style.lookup("GammaCard.TLabel", "font"), FONT_BODY)

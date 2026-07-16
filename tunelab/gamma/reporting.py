@@ -40,7 +40,7 @@ def save_gamma_html_report(
 <body><h1>TuneLab · Qualcomm Gamma Engineering Report</h1>
 <p>Dataset: {html.escape(dataset.source_path.name)} · Region #{region.index} · {region.length} points / 0–{region.maximum}</p>
 <h2>Summary</h2><table><tr><th>Metric</th><th>Before</th><th>Target</th><th>After</th></tr>
-<tr><td>Recognizable steps</td><td>{metrics.distinguishable_before}</td><td>{metrics.distinguishable_target}</td><td>{metrics.distinguishable_after}</td></tr>
+<tr><td>Recognizable steps</td><td>{metrics.distinguishable_before}</td><td>requested {result.requested_step_count} / safe {metrics.distinguishable_target}</td><td>{metrics.distinguishable_after}</td></tr>
 <tr><td>Global Gamma</td><td>{metrics.global_gamma_before:.5f}</td><td>{metrics.global_gamma_target:.5f}</td><td>{metrics.global_gamma_after:.5f}</td></tr>
 <tr><td>RMSE</td><td>{metrics.rmse_before:.6f}</td><td>—</td><td>{metrics.rmse_after:.6f}</td></tr>
 <tr><td>RGB gray deviation</td><td>{metrics.rgb_gray_deviation_before:.6f}</td><td>—</td><td>{metrics.rgb_gray_deviation_after:.6f}</td></tr></table>

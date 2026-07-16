@@ -4,13 +4,23 @@ import tempfile
 import tkinter as tk
 import unittest
 import re
+import math
 from pathlib import Path
+from tkinter import ttk
 from unittest import mock
 
-from tunelab.gamma.models import GammaOptimizationConfig
+from tunelab.gamma.models import (
+    GammaOptimizationConfig,
+    GrayDataset,
+    GrayZone,
+)
 from tunelab.gamma.ui import GammaWorkspace
 from tunelab.gamma.history import load_gamma_history, record_gamma_result, save_gamma_history
-from tunelab.gamma.optimizer import optimize_gamma_lut
+from tunelab.gamma.optimizer import (
+    _curve_health,
+    minimum_continuity_gap,
+    optimize_gamma_lut,
+)
 from tunelab.gamma.reporting import save_gamma_html_report
 from tunelab.gamma.settings import load_gamma_settings, save_gamma_settings
 from tunelab.gamma.imatest import analyze_gray_range, parse_gray_csv, select_fit_zones
@@ -222,6 +232,267 @@ class GammaOptimizerRegressionTests(unittest.TestCase):
         self.assertGreaterEqual(brighter.metrics.distinguishable_after, brighter.metrics.distinguishable_before)
 
 
+class CapturedGammaContinuityRegressionTests(unittest.TestCase):
+    @staticmethod
+    def _captured_dataset() -> GrayDataset:
+        # The July 13 capture had one 12-stage run plus two isolated dark pairs.
+        # Keep the measured pixel sequence here so this failure cannot regress
+        # even when local source/ analysis files are unavailable.
+        pixels = (
+            242.3, 227.5, 212.0, 198.7, 183.6, 169.4, 161.1, 149.1,
+            136.4, 124.9, 116.7, 106.1, 96.3, 89.7, 86.3, 83.6,
+            79.3, 66.9, 50.0, 43.4,
+        )
+        normalized = (
+            .9502, .8921, .8316, .7793, .7198, .6642, .6319, .5849,
+            .5351, .4897, .4577, .4163, .3777, .3517, .3385, .3277,
+            .3110, .2625, .1960, .1702,
+        )
+        densities = (
+            .0222, .0496, .0801, .1083, .1428, .1777, .1993, .2329,
+            .2716, .3100, .3394, .3806, .4229, .4538, .4705, .4845,
+            .5072, .5808, .7077, .7689,
+        )
+        rgb_means = (
+            (245.7, 241.2, 238.4), (231.0, 225.0, 225.0),
+            (214.0, 209.6, 210.5), (200.3, 195.6, 198.5),
+            (183.8, 180.4, 184.0), (169.4, 166.6, 170.8),
+            (158.7, 157.1, 160.4), (147.3, 145.6, 149.6),
+            (135.3, 133.9, 138.2), (124.1, 123.0, 127.8),
+            (115.4, 114.8, 120.7), (104.0, 104.4, 110.7),
+            (93.8, 94.0, 101.9), (85.4, 86.8, 95.0),
+            (79.6, 80.9, 90.2), (73.1, 73.9, 83.8),
+            (66.6, 66.3, 76.8), (56.4, 55.9, 65.5),
+            (47.5, 46.6, 55.3), (43.0, 42.0, 50.0),
+        )
+        zones = tuple(
+            GrayZone(
+                zone=index,
+                pixel=pixel,
+                pixel_normalized=pixel_normalized,
+                log_exposure=-0.05 - 0.10 * (index - 1),
+                density=density,
+                mean_r=rgb[0],
+                mean_g=rgb[1],
+                mean_b=rgb[2],
+            )
+            for index, (pixel, pixel_normalized, density, rgb) in enumerate(
+                zip(pixels, normalized, densities, rgb_means),
+                1,
+            )
+        )
+        return GrayDataset(Path("gray_after_summary.csv"), zones)
+
+    def test_disconnected_capture_reaches_even_contiguous_17_and_18_stage_runs(self) -> None:
+        dataset = self._captured_dataset()
+        analysis = analyze_gray_range(dataset, 8.0)
+        region = QualcommGammaDocument.load(SOURCE / "gamma15_ipe_v2.xml").regions[0]
+        self.assertEqual(analysis.effective_count, 12)
+        self.assertEqual(analysis.runs, (tuple(range(1, 13)), (17, 18)))
+
+        for target_steps in (17, 18):
+            for maximum_adjustment in (0.70, 1.0):
+                with self.subTest(target=target_steps, strength=maximum_adjustment):
+                    result = optimize_gamma_lut(
+                        dataset,
+                        region,
+                        analysis,
+                        config=GammaOptimizationConfig(
+                            target_step_count=target_steps,
+                            maximum_adjustment=maximum_adjustment,
+                            highlight_protection=1.0,
+                            shadow_protection=1.0,
+                        ),
+                    )
+                    required = [
+                        pair for pair in result.pair_results if pair.target_required
+                    ]
+                    gaps = [pair.delta_after for pair in required]
+                    self.assertEqual(result.requested_step_count, target_steps)
+                    self.assertEqual(result.metrics.distinguishable_target, target_steps)
+                    self.assertEqual(len(required), target_steps)
+                    self.assertEqual(result.metrics.distinguishable_after, target_steps)
+                    self.assertEqual(result.applied_strength, maximum_adjustment)
+                    self.assertEqual(result.health.status, "PASS")
+                    self.assertLessEqual(
+                        result.health.maximum_jump,
+                        18,
+                        "17/18 阶候选不应重新形成 19-code 的局部增益峰。",
+                    )
+                    maximum_slope_change = max(
+                        abs(
+                            (curve[index + 1] - curve[index])
+                            - (curve[index] - curve[index - 1])
+                        )
+                        for curve in (
+                            result.after_r,
+                            result.after_g,
+                            result.after_b,
+                        )
+                        for index in range(1, len(curve) - 1)
+                    )
+                    self.assertLessEqual(maximum_slope_change, 3)
+                    if target_steps == 17 or maximum_adjustment == 1.0:
+                        self.assertLessEqual(maximum_slope_change, 2)
+                    self.assertNotEqual(result.after_g, result.before_g)
+                    self.assertGreaterEqual(
+                        min(gaps),
+                        minimum_continuity_gap(8.0),
+                    )
+                    self.assertLessEqual(max(gaps) - min(gaps), 3.0)
+                    self.assertFalse(
+                        any("最高安全结果" in warning for warning in result.warnings)
+                    )
+                    self.assertTrue(
+                        any("高阶均匀化已启用" in line for line in result.explainability)
+                    )
+                    for check_name in (
+                        "LUT Shape Preservation",
+                        "LUT Natural Smoothness",
+                        "LUT Slope Continuity",
+                    ):
+                        self.assertEqual(
+                            next(
+                                check.status
+                                for check in result.health.checks
+                                if check.name == check_name
+                            ),
+                            "PASS",
+                        )
+                    for curve in (result.after_r, result.after_g, result.after_b):
+                        self.assertTrue(
+                            all(
+                                following > current
+                                for current, following in zip(curve, curve[1:])
+                            ),
+                            "平滑 Gamma LUT 不应包含量化平台。",
+                        )
+
+    def test_curve_health_rejects_a_plateau_followed_by_a_jump(self) -> None:
+        before = tuple(round(1023 * index / 256.0) for index in range(257))
+        after = list(before)
+        for index in range(40, 50):
+            after[index] = after[39]
+        health = _curve_health(
+            (before, before, before),
+            (tuple(after), tuple(after), tuple(after)),
+            0.0,
+            1023,
+        )
+        check = next(
+            item for item in health.checks if item.name == "LUT Slope Continuity"
+        )
+        self.assertEqual(check.status, "FAIL")
+        plateau_check = next(
+            item for item in health.checks if item.name == "LUT Plateaus"
+        )
+        self.assertEqual(plateau_check.status, "FAIL")
+        self.assertEqual(health.status, "FAIL")
+
+    def test_curve_health_rejects_repeated_brightness_acceleration(self) -> None:
+        before = tuple(round(1023 * index / 256.0) for index in range(257))
+        steps = [3, 5] * 127 + [3, 4]
+        after = [0]
+        for step in steps:
+            after.append(after[-1] + step)
+        health = _curve_health(
+            (before, before, before),
+            (tuple(after), tuple(after), tuple(after)),
+            0.0,
+            1023,
+            enforce_naturalness=True,
+        )
+        self.assertEqual(
+            next(
+                check.status
+                for check in health.checks
+                if check.name == "LUT Slope Continuity"
+            ),
+            "PASS",
+        )
+        self.assertEqual(
+            next(
+                check.status
+                for check in health.checks
+                if check.name == "LUT Natural Smoothness"
+            ),
+            "FAIL",
+        )
+        self.assertEqual(health.status, "FAIL")
+
+    def test_curve_health_rejects_a_broad_s_curve_even_when_rms_is_smooth(self) -> None:
+        before = tuple(1023.0 * index / 256.0 for index in range(257))
+        after = list(before)
+        for index in range(5, 76):
+            after[index] -= 40.0 * math.sin(math.pi * (index - 5) / 70.0) ** 2
+        health = _curve_health(
+            (before, before, before),
+            (tuple(after), tuple(after), tuple(after)),
+            0.0,
+            1023,
+            enforce_naturalness=True,
+        )
+        self.assertTrue(
+            all(following > current for current, following in zip(after, after[1:]))
+        )
+        self.assertEqual(
+            next(
+                check.status
+                for check in health.checks
+                if check.name == "LUT Natural Smoothness"
+            ),
+            "PASS",
+        )
+        self.assertEqual(
+            next(
+                check.status
+                for check in health.checks
+                if check.name == "LUT Shape Preservation"
+            ),
+            "FAIL",
+        )
+        self.assertEqual(health.status, "FAIL")
+
+    def test_explicit_15_stage_target_is_exact_smooth_and_even(self) -> None:
+        dataset = self._captured_dataset()
+        document = QualcommGammaDocument.load(SOURCE / "gamma15_ipe_v2.xml")
+        result = optimize_gamma_lut(
+            dataset,
+            document.regions[0],
+            analyze_gray_range(dataset, 8.0),
+            config=GammaOptimizationConfig(
+                target_step_count=15,
+                maximum_adjustment=1.0,
+                highlight_protection=1.0,
+                shadow_protection=1.0,
+            ),
+        )
+        self.assertEqual(result.requested_step_count, 15)
+        self.assertEqual(result.metrics.distinguishable_target, 15)
+        self.assertEqual(result.metrics.distinguishable_after, 15)
+        self.assertEqual(result.applied_strength, 1.0)
+        self.assertNotEqual(result.after_g, result.before_g)
+        required = [pair.delta_after for pair in result.pair_results if pair.target_required]
+        self.assertGreaterEqual(min(required), minimum_continuity_gap(8.0))
+        self.assertLessEqual(max(required) - min(required), 3.2)
+        self.assertFalse(any("最高安全结果" in warning for warning in result.warnings))
+        shape_check = next(
+            check
+            for check in result.health.checks
+            if check.name == "LUT Shape Preservation"
+        )
+        self.assertEqual(shape_check.status, "PASS")
+        natural_check = next(
+            check
+            for check in result.health.checks
+            if check.name == "LUT Natural Smoothness"
+        )
+        self.assertEqual(natural_check.status, "PASS")
+        for curve in (result.after_r, result.after_g, result.after_b):
+            steps = [following - current for current, following in zip(curve, curve[1:])]
+            self.assertGreaterEqual(min(steps), 1)
+
+
 class GammaEngineeringExperienceTests(unittest.TestCase):
     def test_settings_history_and_html_report_round_trip(self) -> None:
         dataset = parse_gray_csv(SOURCE / "gray_summary.csv")
@@ -305,13 +576,71 @@ class GammaDesktopSmokeTests(unittest.TestCase):
         self.assertIsNotNone(self.app.result)
         assert self.app.result is not None
         self.assertEqual(self.app.result.health.status, "PASS")
-        self.assertGreaterEqual(self.app.result.metrics.distinguishable_after, 14)
+        self.assertEqual(self.app.result.metrics.distinguishable_after, 14)
+        self.assertEqual(str(self.app.save_button.cget("state")), "normal")
+        self.assertFalse(self.app.lut_plot.show_markers)
+        self.assertTrue(
+            all(len(points) == self.app.result.lut_length for _name, points, _color, _dashed in self.app.lut_plot.series)
+        )
+        self.assertIn("平台 0", self.app.lut_plot.title)
+        self.assertIn("自然平滑 PASS", self.app.lut_plot.title)
+        self.assertFalse(
+            any(name.startswith("Target") for name, _points, _color, _dashed in self.app.lut_plot.series)
+        )
+        self.assertEqual(self.app.engineering_tree.item("gamma-check-continuity", "values")[1], "PASS")
         self.assertEqual(len(self.app.zone_tree.get_children()), 19)
         self.assertEqual(len(self.app.pair_tree.get_children()), 18)
         with mock.patch("tunelab.gamma.ui.messagebox.askyesno", return_value=False) as confirmation, mock.patch.object(self.app.document, "save_with_luts") as save:
             self.app.save_xml()
         self.assertIn(str(self.app.document.source_path), confirmation.call_args.args[1])
         save.assert_not_called()
+
+    def test_unmet_target_cannot_be_written_as_isolated_partial_stages(self) -> None:
+        self.app.load_csv(str(SOURCE / "gray_summary.csv"))
+        self.app.load_xml(str(SOURCE / "gamma15_ipe_v2.xml"))
+        self.app.target_steps_var.set("18")
+        self.app.strength_var.set(0.0)
+        self.app.run_optimization()
+        self.assertIsNotNone(self.app.result)
+        assert self.app.result is not None
+        self.assertLess(
+            self.app.result.metrics.distinguishable_after,
+            self.app.result.metrics.distinguishable_target,
+        )
+        self.assertEqual(str(self.app.save_button.cget("state")), "disabled")
+        self.assertEqual(self.app.engineering_tree.item("gamma-check-continuity", "values")[1], "FAIL")
+        with mock.patch("tunelab.gamma.ui.messagebox.showerror") as blocked, mock.patch.object(
+            self.app.document,
+            "save_with_luts",
+        ) as save:
+            self.app.save_xml()
+        blocked.assert_called_once()
+        save.assert_not_called()
+
+    def test_requested_15_shows_and_allows_the_exact_smooth_lut(self) -> None:
+        self.app.load_xml(str(SOURCE / "gamma15_ipe_v2.xml"))
+        self.app.dataset = CapturedGammaContinuityRegressionTests._captured_dataset()
+        self.app.analysis = analyze_gray_range(self.app.dataset, 8.0)
+        self.app.target_steps_var.set("15")
+        self.app.strength_var.set(100.0)
+        self.app.highlight_var.set(100.0)
+        self.app.shadow_var.set(100.0)
+        self.app.run_optimization()
+
+        self.assertIsNotNone(self.app.result)
+        assert self.app.result is not None
+        self.assertEqual(self.app.result.requested_step_count, 15)
+        self.assertEqual(self.app.result.metrics.distinguishable_after, 15)
+        self.assertGreater(self.app.result.applied_strength, 0.0)
+        self.assertNotEqual(self.app.result.after_g, self.app.result.before_g)
+        self.assertEqual(
+            [name for name, _points, _color, _dashed in self.app.lut_plot.series],
+            ["Before G", "After G", "After R/B"],
+        )
+        self.assertIn("After RGB", self.app.lut_plot.title)
+        self.assertIn("目标 15", self.app.status_var.get())
+        self.assertEqual(self.app.kpi_vars[2].get(), "15")
+        self.assertEqual(str(self.app.save_button.cget("state")), "normal")
 
     def test_gamma_window_has_cc_style_menus_and_engineering_tabs(self) -> None:
         file_labels = [
@@ -321,7 +650,7 @@ class GammaDesktopSmokeTests(unittest.TestCase):
         self.assertEqual(
             file_labels,
             [
-                "打开 Imatest Gray CSV...",
+                "打开 Gamma CSV...",
                 "打开 Qualcomm Gamma XML...",
                 "保存 Gamma XML...",
                 "导出 Gamma 工程报告...",
@@ -332,6 +661,19 @@ class GammaDesktopSmokeTests(unittest.TestCase):
         self.assertEqual(
             [self.app.config_menu.entrycget(index, "label") for index in range(self.app.config_menu.index("end") + 1)],
             ["导入 Gamma 配置...", "导出 Gamma 配置..."],
+        )
+        self.assertEqual(str(self.app.region_match_button.cget("text")), "自动匹配 Region")
+        self.assertEqual(str(self.app.region_match_button.cget("style")), "RegionMatch.TButton")
+        self.assertEqual(str(self.app.optimize_button.cget("text")), "3  自动优化")
+        self.assertEqual(str(self.app.optimize_button.cget("style")), "Primary.TButton")
+        style = ttk.Style(self.root)
+        self.assertEqual(
+            style.lookup("Primary.TButton", "background", ("active",)),
+            "#1D4ED8",
+        )
+        self.assertEqual(
+            style.lookup("Primary.TButton", "foreground", ("active",)),
+            "white",
         )
         self.assertEqual(
             [self.app.notebook.tab(tab, "text").strip() for tab in self.app.notebook.tabs()],

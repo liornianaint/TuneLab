@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import tkinter as tk
-import tkinter.font as tkfont
 import math
 import platform
 from dataclasses import dataclass, replace
@@ -19,6 +18,28 @@ from .ccm.optimizer import OptimizationError, optimize_ccm
 from .ccm.qualcomm_xml import QualcommCCDocument, QualcommXMLError
 from .ccm.reporting import save_analysis_report
 from .ccm.settings import CcmSettings, application_data_dir, load_settings, save_settings
+from .ui_foundation import (
+    BODY_SIZE,
+    FONT_BODY,
+    FONT_BODY_BOLD,
+    FONT_CARD_TITLE,
+    FONT_KPI,
+    FONT_MONO,
+    FONT_PLOT_TITLE,
+    FONT_SMALL,
+    FONT_SMALL_BOLD,
+    FONT_TITLE,
+    ROW_HEIGHT,
+    SECTION_SIZE,
+    SMALL_SIZE,
+    TABLE_HEADING_BG,
+    TITLE_SIZE,
+    bind_responsive_wrap,
+    configure_action_styles,
+    configure_typography,
+    elide_canvas_text,
+    fit_window_to_screen,
+)
 
 
 APP_NAME = "TuneLab"
@@ -35,29 +56,20 @@ AMBER = "#B54708"
 BORDER = "#DDE3EC"
 LAB_PLOT_LIGHTNESS = 87.0
 LAB_PLACEHOLDER_BOUNDS = (-70.0, 70.0, -70.0, 70.0)
-FONT_BODY = "TuneLabBodyFont"
-FONT_SMALL = "TuneLabSmallFont"
-FONT_SMALL_BOLD = "TuneLabSmallBoldFont"
-FONT_CARD_TITLE = "TuneLabCardTitleFont"
-FONT_KPI = "TuneLabKpiFont"
-FONT_TITLE = "TuneLabTitleFont"
-FONT_PLOT_TITLE = "TuneLabPlotTitleFont"
-FONT_MONO = "TuneLabMonoFont"
-
 # One typography/token source for Tk, Canvas and tables.  Font families are
 # derived from Tk's named system fonts, so each OS keeps its native fallback
 # chain for mixed Chinese, English and numeric text.
 UI = {
-    "body_size": 12,
-    "table_size": 10,
-    "title_size": 19,
-    "section_size": 13,
+    "body_size": BODY_SIZE,
+    "table_size": SMALL_SIZE,
+    "title_size": TITLE_SIZE,
+    "section_size": SECTION_SIZE,
     "control_padding": (10, 6),
     "compact_padding": (8, 4),
-    "row_height": 29,
+    "row_height": ROW_HEIGHT,
     "selection": "#DCEBFF",
     "focus_patch": "#EEF4FF",
-    "table_heading": "#F2F4F7",
+    "table_heading": TABLE_HEADING_BG,
     "disabled": "#98A2B3",
     "hover": "#EAECF0",
 }
@@ -405,7 +417,19 @@ class LabPlot(ttk.Frame):
         left, top, side = self._plot_geometry()
         right, bottom = left + side, top + side
         a_min, a_max, b_min, b_max = self.view_state.bounds
-        canvas.create_text(left, 16, text=self.title, fill=INK, anchor="w", font=FONT_PLOT_TITLE)
+        canvas.create_text(
+            left,
+            16,
+            text=elide_canvas_text(
+                canvas,
+                self.title,
+                FONT_PLOT_TITLE,
+                max(80, int(canvas.winfo_width() - left - 18)),
+            ),
+            fill=INK,
+            anchor="w",
+            font=FONT_PLOT_TITLE,
+        )
 
         tile_count = max(12, min(26, round(side / 18.0)))
         for row in range(tile_count):
@@ -691,8 +715,7 @@ class TuneLabApp:
         self.gamma_workspace = None
 
         root.title(APP_TITLE)
-        root.geometry("1520x980")
-        root.minsize(1180, 760)
+        self.window_placement = fit_window_to_screen(root)
         root.configure(background=BG)
         try:
             root.tk.call("tk", "appname", "tunelab")
@@ -708,40 +731,16 @@ class TuneLabApp:
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after_idle(self._install_app_icon)
         root.after_idle(self._persist_settings)
-        self._set_status("请先打开 Imatest CSV 和 Qualcomm CC XML。")
+        self._set_status("请先打开 CC CSV 和 Qualcomm CC XML。")
 
     def _configure_styles(self) -> None:
-        style = ttk.Style(self.root)
-        if "clam" in style.theme_names():
-            style.theme_use("clam")
-        # tkfont.nametofont gained the ``root`` keyword after Python 3.9.
-        # Constructing an existing named Font directly works on both the
-        # system Python 3.9.6/Tk 8.5 and Homebrew Python 3.14/Tk 9 paths.
-        default_font = tkfont.Font(root=self.root, name="TkDefaultFont", exists=True)
-        text_font = tkfont.Font(root=self.root, name="TkTextFont", exists=True)
-        heading_font = tkfont.Font(root=self.root, name="TkHeadingFont", exists=True)
-        fixed_font = tkfont.Font(root=self.root, name="TkFixedFont", exists=True)
-        base_size = max(11, min(UI["body_size"], abs(int(default_font.cget("size")))))
-
-        def install_font(name: str, *, size: int, weight: str = "normal", source: tkfont.Font = default_font) -> None:
-            try:
-                font = tkfont.Font(root=self.root, name=name, exists=True)
-            except tk.TclError:
-                font = tkfont.Font(root=self.root, name=name, exists=False)
-            font.configure(
-                family=source.actual("family"),
-                size=size,
-                weight=weight,
-            )
-
-        install_font(FONT_BODY, size=base_size, source=text_font)
-        install_font(FONT_SMALL, size=max(UI["table_size"], base_size - 1), source=text_font)
-        install_font(FONT_SMALL_BOLD, size=max(UI["table_size"], base_size - 1), weight="bold", source=heading_font)
-        install_font(FONT_CARD_TITLE, size=UI["section_size"], weight="bold", source=heading_font)
-        install_font(FONT_KPI, size=base_size + 2, weight="bold", source=heading_font)
-        install_font(FONT_TITLE, size=UI["title_size"], weight="bold", source=heading_font)
-        install_font(FONT_PLOT_TITLE, size=UI["section_size"], weight="bold", source=heading_font)
-        install_font(FONT_MONO, size=max(UI["table_size"], base_size - 1), source=fixed_font)
+        style = configure_typography(
+            self.root,
+            body_size=UI["body_size"],
+            small_size=UI["table_size"],
+            title_size=UI["title_size"],
+            section_size=UI["section_size"],
+        )
         style.configure("Root.TFrame", background=BG)
         style.configure("Home.TFrame", background="#F8FAFC")
         style.configure("Sidebar.TFrame", background="#FFFFFF", relief="flat")
@@ -762,13 +761,12 @@ class TuneLabApp:
         style.configure("Matrix.TLabel", background="#F8FAFC", foreground=INK, padding=(4, 4), font=FONT_MONO)
         style.configure("TButton", font=FONT_BODY, padding=UI["control_padding"], borderwidth=0)
         style.map("TButton", background=[("active", UI["hover"]), ("pressed", BORDER)])
-        style.configure("Primary.TButton", background=BLUE, foreground="white", padding=(14, 7), borderwidth=0)
-        style.map("Primary.TButton", background=[("active", "#1D4ED8"), ("disabled", UI["disabled"])])
+        configure_action_styles(style)
         style.configure("Quiet.TButton", foreground="#344054", padding=UI["compact_padding"])
         style.configure("Nav.TButton", background="#FFFFFF", foreground="#344054", anchor="w", padding=(16, 11), font=FONT_BODY, borderwidth=0)
         style.map("Nav.TButton", background=[("active", "#EEF4FF")], foreground=[("active", "#155EEF")])
-        style.configure("ActiveNav.TButton", background="#EAF2FF", foreground="#155EEF", anchor="w", padding=(16, 11), font=FONT_SMALL_BOLD, borderwidth=0)
-        style.configure("CardLink.TButton", background=PANEL, foreground="#155EEF", padding=(0, 4), borderwidth=0, font=FONT_SMALL_BOLD)
+        style.configure("ActiveNav.TButton", background="#EAF2FF", foreground="#155EEF", anchor="w", padding=(16, 11), font=FONT_BODY_BOLD, borderwidth=0)
+        style.configure("CardLink.TButton", background=PANEL, foreground="#155EEF", padding=(0, 4), borderwidth=0, font=FONT_BODY_BOLD)
         style.map("CardLink.TButton", background=[("active", PANEL)], foreground=[("active", "#004EEB")])
         style.configure("TEntry", font=FONT_BODY, padding=(7, 5))
         style.configure("TCombobox", font=FONT_BODY, padding=(7, 5))
@@ -796,7 +794,7 @@ class TuneLabApp:
     def _build_menu(self) -> None:
         menu = tk.Menu(self.root)
         file_menu = tk.Menu(menu, tearoff=False)
-        file_menu.add_command(label="打开 Imatest CSV...", command=self.load_csv)
+        file_menu.add_command(label="打开 CC CSV...", command=self.load_csv)
         file_menu.add_command(label="打开 Qualcomm CC XML...", command=self.load_xml)
         file_menu.add_command(label="保存 XML...", command=self.save_xml)
         file_menu.add_command(label="导出工程报告...", command=self.save_report)
@@ -823,7 +821,7 @@ class TuneLabApp:
     def _build_home_menu(self) -> None:
         menu = tk.Menu(self.root)
         file_menu = tk.Menu(menu, tearoff=False)
-        file_menu.add_command(label="打开 Imatest CSV...", command=lambda: self._run_cc_action(self.load_csv))
+        file_menu.add_command(label="打开 CC CSV...", command=lambda: self._run_cc_action(self.load_csv))
         file_menu.add_command(label="打开 Qualcomm XML...", command=lambda: self._run_cc_action(self.load_xml))
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self.close)
@@ -891,7 +889,14 @@ class TuneLabApp:
         ttk.Label(card, text=glyph, foreground=colour, background=PANEL, font=FONT_TITLE).pack(anchor="w")
         ttk.Label(card, text=title, style="HomeToolTitle.TLabel").pack(anchor="w", pady=(10, 0))
         ttk.Label(card, text=subtitle, style="Card.TLabel", foreground=MUTED).pack(anchor="w", pady=(2, 14))
-        ttk.Label(card, text=description, style="Card.TLabel", justify="left").pack(anchor="w")
+        description_label = ttk.Label(
+            card,
+            text=description,
+            style="Card.TLabel",
+            justify="left",
+        )
+        description_label.pack(fill="x", anchor="w")
+        bind_responsive_wrap(description_label, minimum=180)
         ttk.Button(card, text="打开  →", command=command, style="CardLink.TButton").pack(anchor="w", pady=(22, 0))
 
     def _run_cc_action(self, action: Callable[[], None]) -> None:
@@ -903,98 +908,116 @@ class TuneLabApp:
         self.notebook.select(3)
 
     def _build_ui(self) -> None:
-        outer = ttk.Frame(self.root, padding=(16, 12), style="Root.TFrame")
+        outer = ttk.Frame(self.root, padding=(16, 10), style="Root.TFrame")
         self.cc_view = outer
         outer.pack(fill="both", expand=True)
         header = ttk.Frame(outer, style="Root.TFrame")
-        header.pack(fill="x", pady=(0, 12))
+        header.pack(fill="x", pady=(0, 6))
         ttk.Label(header, text="CC 校正", style="Title.TLabel").pack(side="left")
         ttk.Label(header, text="Imatest ColorChecker · Qualcomm CC13 Matrix", style="Subtitle.TLabel").pack(side="left", padx=(14, 0), pady=(8, 0))
 
-        controls = ttk.Frame(outer, padding=14, style="Card.TFrame")
-        controls.pack(fill="x", pady=(0, 10))
+        controls = ttk.Frame(outer, padding=(10, 7), style="Card.TFrame")
+        self.controls_panel = controls
+        controls.pack(fill="x", pady=(0, 6))
         controls.columnconfigure(5, weight=1)
-        ttk.Button(controls, text="1  打开 Imatest CSV", command=self.load_csv).grid(row=0, column=0, rowspan=2, padx=(0, 8), sticky="ns")
-        ttk.Button(controls, text="2  打开 CC XML", command=self.load_xml).grid(row=0, column=1, rowspan=2, padx=(0, 16), sticky="ns")
-        ttk.Label(controls, text="CCT / K", style="Card.TLabel").grid(row=0, column=2, sticky="w")
+        ttk.Button(controls, text="1  打开 CC CSV", command=self.load_csv).grid(row=0, column=0, padx=(0, 8), sticky="ew")
+        ttk.Button(controls, text="2  打开 CC XML", command=self.load_xml).grid(row=0, column=1, padx=(0, 12), sticky="ew")
+        ttk.Label(controls, text="CCT", style="Card.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 5))
         self.cct_var = tk.StringVar()
-        ttk.Entry(controls, textvariable=self.cct_var, width=9).grid(row=1, column=2, sticky="w", padx=(0, 6))
-        ttk.Button(controls, text="自动匹配", command=self.auto_match_region, style="Quiet.TButton").grid(row=1, column=3, sticky="w", padx=(0, 14))
-        ttk.Label(controls, text="CCT region / 完整触发路径", style="Card.TLabel").grid(row=0, column=4, columnspan=2, sticky="w")
+        ttk.Entry(controls, textvariable=self.cct_var, width=8).grid(row=0, column=3, sticky="w", padx=(0, 8))
+        self.region_match_button = ttk.Button(
+            controls,
+            text="自动匹配 Region",
+            command=self.auto_match_region,
+            style="RegionMatch.TButton",
+        )
+        self.region_match_button.grid(row=0, column=4, sticky="ew", padx=(0, 8))
         self.region_var = tk.StringVar()
-        self.region_combo = ttk.Combobox(controls, textvariable=self.region_var, state="readonly", width=58)
-        self.region_combo.grid(row=1, column=4, columnspan=2, sticky="ew", padx=(0, 14))
+        self.region_combo = ttk.Combobox(controls, textvariable=self.region_var, state="readonly", width=12)
+        self.region_combo.grid(row=0, column=5, sticky="ew", padx=(0, 8))
         self.region_combo.bind("<<ComboboxSelected>>", self._on_region_selected)
-        ttk.Label(controls, text="组合约定", style="Card.TLabel").grid(row=0, column=6, sticky="w")
+        self.optimize_button = ttk.Button(controls, text="3  自动优化", command=self.run_optimization, style="Primary.TButton")
+        self.optimize_button.grid(row=0, column=6, sticky="ew", padx=(0, 8))
+        self.save_xml_button = ttk.Button(controls, text="保存 XML", command=self.save_xml, state="disabled")
+        self.save_xml_button.grid(row=0, column=7, sticky="ew")
+
+        parameters = ttk.Frame(outer, padding=(10, 6), style="Card.TFrame")
+        self.parameters_panel = parameters
+        parameters.pack(fill="x", pady=(0, 6))
+        config = self.settings.optimization
         composition_label = next(
             (label for label, value in self.COMPOSITION_LABELS.items() if value == self.settings.composition),
             next(iter(self.COMPOSITION_LABELS)),
         )
         self.composition_var = tk.StringVar(value=composition_label)
+        ttk.Label(parameters, text="组合", style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 5))
         ttk.Combobox(
-            controls,
+            parameters,
             textvariable=self.composition_var,
             values=list(self.COMPOSITION_LABELS),
             state="readonly",
-            width=27,
-        ).grid(row=1, column=6, sticky="w", padx=(0, 14))
-        ttk.Label(controls, text="最大强度", style="Card.TLabel").grid(row=0, column=7, sticky="w")
+            width=22,
+        ).grid(row=0, column=1, sticky="w", padx=(0, 14))
+        ttk.Label(parameters, text="强度", style="Card.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 5))
         self.strength_var = tk.DoubleVar(value=self.settings.optimization.max_blend * 100.0)
-        ttk.Scale(controls, from_=20, to=100, variable=self.strength_var, orient="horizontal", length=100).grid(row=1, column=7, sticky="w", padx=(0, 14))
-        self.optimize_button = ttk.Button(controls, text="3  自动优化", command=self.run_optimization, style="Primary.TButton")
-        self.optimize_button.grid(row=0, column=8, rowspan=2, sticky="ns")
-        self.save_xml_button = ttk.Button(controls, text="保存 XML", command=self.save_xml, state="disabled")
-        self.save_xml_button.grid(row=0, column=9, rowspan=2, sticky="ns", padx=(8, 0))
-
-        parameters = ttk.Frame(outer, padding=(14, 10), style="Card.TFrame")
-        parameters.pack(fill="x", pady=(0, 10))
-        config = self.settings.optimization
-        ttk.Label(parameters, text="优化策略", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Scale(parameters, from_=20, to=100, variable=self.strength_var, orient="horizontal", length=110).grid(row=0, column=3, sticky="w", padx=(0, 14))
+        ttk.Label(parameters, text="策略", style="Card.TLabel").grid(row=0, column=4, sticky="w", padx=(0, 5))
         self.strategy_var = tk.StringVar(value=config.strategy)
         ttk.Combobox(
             parameters,
             textvariable=self.strategy_var,
             values=("conservative", "balanced", "aggressive"),
             state="readonly",
-            width=14,
-        ).grid(row=1, column=0, sticky="w", padx=(0, 12))
-        ttk.Label(parameters, text="正则化", style="Card.TLabel").grid(row=0, column=1, sticky="w")
+            width=12,
+        ).grid(row=0, column=5, sticky="w", padx=(0, 14))
+        ttk.Label(parameters, text="正则", style="Card.TLabel").grid(row=0, column=6, sticky="w", padx=(0, 5))
         self.regularization_var = tk.StringVar(value="Auto" if config.regularization is None else f"{config.regularization:g}")
-        ttk.Entry(parameters, textvariable=self.regularization_var, width=10).grid(row=1, column=1, sticky="w", padx=(0, 12))
-        ttk.Label(parameters, text="饱和度系数", style="Card.TLabel").grid(row=0, column=2, sticky="w")
+        ttk.Entry(parameters, textvariable=self.regularization_var, width=8).grid(row=0, column=7, sticky="w", padx=(0, 14))
+        ttk.Label(parameters, text="饱和", style="Card.TLabel").grid(row=0, column=8, sticky="w", padx=(0, 5))
         self.saturation_var = tk.StringVar(value=f"{config.saturation_factor:g}")
-        ttk.Entry(parameters, textvariable=self.saturation_var, width=9).grid(row=1, column=2, sticky="w", padx=(0, 12))
-        ttk.Label(parameters, text="重点色块", style="Card.TLabel").grid(row=0, column=3, sticky="w")
+        ttk.Entry(parameters, textvariable=self.saturation_var, width=7).grid(row=0, column=9, sticky="w")
+        secondary = ttk.Frame(parameters, style="Card.TFrame")
+        secondary.grid(row=1, column=0, columnspan=10, sticky="ew", pady=(5, 0))
+        ttk.Label(secondary, text="重点色块", style="Card.TLabel").pack(side="left", padx=(0, 5))
         self.focus_patches_var = tk.StringVar(value=",".join(str(zone) for zone in config.focus_patches))
-        ttk.Entry(parameters, textvariable=self.focus_patches_var, width=15).grid(row=1, column=3, sticky="w", padx=(0, 12))
-        ttk.Label(parameters, text="重点权重", style="Card.TLabel").grid(row=0, column=4, sticky="w")
+        ttk.Entry(secondary, textvariable=self.focus_patches_var, width=15).pack(side="left", padx=(0, 14))
+        ttk.Label(secondary, text="权重", style="Card.TLabel").pack(side="left", padx=(0, 5))
         self.focus_weight_var = tk.StringVar(value=f"{config.focus_weight:g}")
-        ttk.Entry(parameters, textvariable=self.focus_weight_var, width=9).grid(row=1, column=4, sticky="w", padx=(0, 12))
-        ttk.Label(parameters, text="系数范围", style="Card.TLabel").grid(row=0, column=5, sticky="w")
-        bounds = ttk.Frame(parameters, style="Card.TFrame")
-        bounds.grid(row=1, column=5, sticky="w", padx=(0, 12))
+        ttk.Entry(secondary, textvariable=self.focus_weight_var, width=7).pack(side="left", padx=(0, 14))
+        ttk.Label(secondary, text="系数范围", style="Card.TLabel").pack(side="left", padx=(0, 5))
+        bounds = ttk.Frame(secondary, style="Card.TFrame")
+        bounds.pack(side="left", padx=(0, 14))
         self.coefficient_min_var = tk.StringVar(value=f"{config.coefficient_min:g}")
         self.coefficient_max_var = tk.StringVar(value=f"{config.coefficient_max:g}")
         ttk.Entry(bounds, textvariable=self.coefficient_min_var, width=7).pack(side="left")
         ttk.Label(bounds, text=" / ", style="Card.TLabel").pack(side="left")
         ttk.Entry(bounds, textvariable=self.coefficient_max_var, width=7).pack(side="left")
         self.show_motion_var = tk.BooleanVar(value=self.settings.show_motion)
-        ttk.Checkbutton(parameters, text="显示轨迹", variable=self.show_motion_var, command=self._on_show_motion_changed).grid(row=1, column=6, sticky="w", padx=(0, 12))
-        ttk.Button(parameters, text="恢复 a*b* 视图", command=self._reset_lab_view, style="Quiet.TButton").grid(row=1, column=7, sticky="w", padx=(0, 12))
-        ttk.Label(parameters, text="参数自动保存 · 图中滚轮缩放 / 双击复位", style="Card.TLabel").grid(row=1, column=8, sticky="e")
-        parameters.columnconfigure(8, weight=1)
+        ttk.Checkbutton(secondary, text="显示轨迹", variable=self.show_motion_var, command=self._on_show_motion_changed).pack(side="left", padx=(0, 14))
+        ttk.Button(secondary, text="恢复 a*b* 视图", command=self._reset_lab_view, style="Quiet.TButton").pack(side="left")
+        parameters.columnconfigure(9, weight=1)
 
         info = ttk.Frame(outer, style="Root.TFrame")
-        info.pack(fill="x", pady=(0, 10))
+        info.pack(fill="x", pady=(0, 4))
+        info.columnconfigure(0, weight=1, uniform="source-info")
+        info.columnconfigure(1, weight=1, uniform="source-info")
+        info.columnconfigure(2, weight=1)
         self.csv_label = ttk.Label(info, text="CSV：未加载", style="Subtitle.TLabel")
-        self.csv_label.pack(side="left")
+        self.csv_label.grid(row=0, column=0, sticky="w")
         self.xml_label = ttk.Label(info, text="XML：未加载", style="Subtitle.TLabel")
-        self.xml_label.pack(side="left", padx=(22, 0))
+        self.xml_label.grid(row=0, column=1, sticky="w", padx=(18, 0))
         self.active_region_var = tk.StringVar(value="当前 Region：未选择")
-        ttk.Label(info, textvariable=self.active_region_var, style="ActiveRegion.TLabel").pack(side="right", padx=(18, 0))
+        self.active_region_label = ttk.Label(
+            info,
+            textvariable=self.active_region_var,
+            style="ActiveRegion.TLabel",
+            anchor="e",
+        )
+        self.active_region_label.grid(row=0, column=2, sticky="e", padx=(18, 0))
         self.status_var = tk.StringVar()
         self.status_label = ttk.Label(outer, textvariable=self.status_var, style="Status.TLabel")
-        self.status_label.pack(fill="x", pady=(0, 10))
+        self.status_label.pack(fill="x", pady=(0, 6))
+        bind_responsive_wrap(self.status_label)
 
         self.notebook = ttk.Notebook(outer)
         self.notebook.pack(fill="both", expand=True)
@@ -1008,7 +1031,7 @@ class TuneLabApp:
         self.notebook.add(history_tab, text="  History / XML Diff  ")
 
         summary_row = ttk.Frame(overview, style="Root.TFrame")
-        summary_row.pack(fill="x", pady=(0, 8))
+        summary_row.pack(fill="x", pady=(0, 6))
         for column in range(4):
             summary_row.columnconfigure(column, weight=1, uniform="summary-kpi")
         for column in range(4, 7):
@@ -1016,7 +1039,7 @@ class TuneLabApp:
         summary_row.rowconfigure(0, weight=1)
         self.kpi_vars: list[tk.StringVar] = []
         for column, caption in enumerate(("平均 ΔE00", "最大 ΔE00", "平均改善", "改善 / 退化")):
-            frame = ttk.Frame(summary_row, padding=(8, 7), style="Card.TFrame")
+            frame = ttk.Frame(summary_row, padding=(7, 5), style="Card.TFrame")
             frame.grid(row=0, column=column, sticky="nsew", padx=(0, 6))
             value_var = tk.StringVar(value="—")
             self.kpi_vars.append(value_var)
@@ -1036,6 +1059,7 @@ class TuneLabApp:
         self.optimized_panel.grid(row=0, column=6, sticky="nsew")
 
         plot_container = ttk.Frame(overview, style="Root.TFrame")
+        self.plot_container = plot_container
         plot_container.pack(fill="both", expand=True)
         plot_container.columnconfigure(0, weight=1, uniform="lab-plots")
         plot_container.columnconfigure(1, weight=1, uniform="lab-plots")
@@ -1564,7 +1588,7 @@ class TuneLabApp:
         self._set_status("Matrix History 已清空。", "success")
 
     def load_csv(self) -> None:
-        path = filedialog.askopenfilename(title="打开 Imatest summary CSV", filetypes=[("CSV", "*.csv"), ("所有文件", "*.*")])
+        path = filedialog.askopenfilename(title="打开 CC CSV", filetypes=[("CSV", "*.csv"), ("所有文件", "*.*")])
         if not path:
             return
         try:
@@ -1621,7 +1645,7 @@ class TuneLabApp:
         else:
             self.region_combo.current(0)
             self._select_region(0)
-        self._set_status(f"已加载 {Path(path).name}；请选择或自动匹配 CCT region。")
+        self._set_status(f"已加载 {Path(path).name}；请选择或自动匹配 Region。")
 
     def auto_match_region(self) -> None:
         if not self.document:
@@ -1639,10 +1663,10 @@ class TuneLabApp:
             return
         self._select_region(region.index)
         if mode == "exact":
-            self._set_status(f"CCT {cct:g}K 精确命中 region #{region.index}: {region.path_label()}")
+            self._set_status(f"CCT {cct:g}K 精确命中 Region #{region.index}: {region.path_label()}")
         else:
             self._set_status(
-                f"CCT {cct:g}K 位于 XML transition/gap；已选最近 region #{region.index}。"
+                f"CCT {cct:g}K 位于 XML transition/gap；已选最近 Region #{region.index}。"
                 "Qualcomm 运行时可能在相邻矩阵间插值，请确认要写入的端点。"
             )
 
@@ -1669,7 +1693,7 @@ class TuneLabApp:
 
     def run_optimization(self) -> None:
         if self.dataset is None or self.document is None or self.selected_region is None:
-            messagebox.showinfo("资料未齐", "请先打开 Imatest CSV、CC XML，并选择 CCT region。")
+            messagebox.showinfo("资料未齐", "请先打开 CC CSV、CC XML，并选择 CCT Region。")
             return
         composition = self.COMPOSITION_LABELS[self.composition_var.get()]
         try:
