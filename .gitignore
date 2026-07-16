@@ -9,5 +9,5 @@ dist/
 *.spec
 outputs/
 .DS_Store
-sources/*
+source/*
 examples/
