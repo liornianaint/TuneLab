@@ -39,7 +39,7 @@ def main() -> int:
     try:
         import PyInstaller  # noqa: F401
     except ImportError:
-        print("请先运行: py -m pip install pyinstaller reportlab pillow", file=sys.stderr)
+        print("请先在工程虚拟环境运行: python -m pip install -e . pyinstaller", file=sys.stderr)
         return 2
     icon = prepare_icon()
     command = [

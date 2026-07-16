@@ -10,10 +10,12 @@ readme = "README.md"
 requires-python = ">=3.9.6"
 license = { text = "Proprietary" }
 authors = [{ name = "TuneLab", email = "kaiyi.jiang@thundersoft.com" }]
-dependencies = []
-
-[project.optional-dependencies]
-pdf = ["reportlab>=3.6"]
+dependencies = [
+    "numpy>=1.23",
+    "Pillow>=9.2",
+    "opencv-python>=4.7",
+    "reportlab>=3.6",
+]
 
 [project.scripts]
 tunelab = "tunelab.app:main"

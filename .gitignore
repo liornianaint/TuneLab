@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
+.venv/
+*.egg-info/
 .tmp/
 # Local analysis renders generated from the source PPTX files.
 build/
