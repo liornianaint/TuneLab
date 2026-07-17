@@ -135,8 +135,25 @@ def evaluate_matrix_health(
         fixed_delta_e = max(fixed_delta_e, delta_e_2000(srgb_to_lab(float_rgb), srgb_to_lab(fixed_rgb)))
 
     coefficient_status = "PASS" if min_value >= config.coefficient_min - 1e-9 and max_value <= config.coefficient_max + 1e-9 else "FAIL"
-    row_error = max(abs(value - 1.0) for value in row_sums)
-    row_status = _status(row_error, 1e-7, 1e-5)
+    if config.allow_common_neutral_scale:
+        neutral_scale = sum(row_sums) / 3.0
+        row_error = max(abs(value - neutral_scale) for value in row_sums)
+        row_pass_limit = 1.1e-6
+        row_warning_limit = 1e-5
+        row_name = "Neutral Axis / Row Sum"
+        row_limit = "PASS spread <= 1.1e-6; FAIL > 1e-5"
+        row_message = (
+            f"三行和相等可保持中性轴；当前公共亮度尺度为 {neutral_scale:.7f}。"
+        )
+    else:
+        neutral_scale = 1.0
+        row_error = max(abs(value - 1.0) for value in row_sums)
+        row_pass_limit = 1e-7
+        row_warning_limit = 1e-5
+        row_name = "Row Sum"
+        row_limit = "PASS error <= 1e-7; FAIL > 1e-5"
+        row_message = "每行和为 1，保持中性轴与名义亮度。"
+    row_status = _status(row_error, row_pass_limit, row_warning_limit)
     condition_status = _status(cond, config.condition_warning, config.condition_fail)
     determinant_status = _status(abs(det), config.determinant_warning, config.determinant_fail, lower_is_better=False)
     rank_status = "PASS" if rank == 3 else "FAIL"
@@ -145,7 +162,13 @@ def evaluate_matrix_health(
     fixed_status = _status(fixed_delta_e, 0.02, 0.10)
     checks = (
         EngineeringCheck("Coefficient Range", coefficient_status, f"[{min_value:.5f}, {max_value:.5f}]", f"[{config.coefficient_min:g}, {config.coefficient_max:g}]", "所有最终 CC 系数必须在工程范围内。"),
-        EngineeringCheck("Row Sum", row_status, ", ".join(f"{value:.7f}" for value in row_sums), "PASS error <= 1e-7; FAIL > 1e-5", "保持中性轴，避免对白/灰染色。"),
+        EngineeringCheck(
+            row_name,
+            row_status,
+            ", ".join(f"{value:.7f}" for value in row_sums),
+            row_limit,
+            row_message,
+        ),
         EngineeringCheck("Condition Number", condition_status, f"{cond:.4f}", f"PASS <= {config.condition_warning:g}; FAIL > {config.condition_fail:g}", "Frobenius condition number，越低越稳健。"),
         EngineeringCheck("Determinant", determinant_status, f"{det:.6f}", f"abs(det) >= {config.determinant_warning:g}", "过小表示矩阵接近奇异。"),
         EngineeringCheck("Rank", rank_status, str(rank), "3", "CCM 必须保持满秩。"),

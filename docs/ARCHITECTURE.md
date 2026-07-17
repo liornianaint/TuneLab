@@ -23,6 +23,9 @@ Qualcomm XML ─> Trigger Tree ─> Selected CCT Region ─> Old CCM ─┤
 - `ccm/reporting.py`、`ccm/settings.py`、`ccm/history.py`：CCM 报告、配置与历史记录
 - `ccm/cli.py`：CCM 批处理入口
 - `gamma/`：Gamma 数据模型、Imatest 解析、Qualcomm XML、优化、报告、配置、历史与页面
+- `colorchecker/engine.py`：ColorChecker MCC24/几何后备检测、成对色块取样、3000K/4000K 实拍色彩还原标定、mired 插值与整图 Delta CCM 仿真
+- `colorchecker/ui.py`：测试图/目标图/CC XML 的独立工作区、Region 选择、三图对比与覆盖回写
+- `image_inspector/`：普通场景 1–4 图浏览、像素/ROI 分析、匹配与 CSV 导出
 - `regression.py`：跨 CCM/Gamma 的 Golden Dataset 发现、验收和汇总
 
 ## 2. 为什么不直接用 CSV 求一个新绝对 CCM
@@ -46,9 +49,17 @@ M_new = M_old × Aᵀ              # 旧 Excel/C7 行向量等价形式
 
 这使工具能在没有 RAW 和 sensor spectral response 的情况下给出工程上可用的首轮方向，同时明确保留“必须上机复测”的边界。
 
+图像驱动的 ColorChecker 工作区复用 `QualcommCCDocument` 与同一套指标/工程检查。MCC24 自动识别两张图的 24 个中心色块，并把目标色块的 linear-sRGB 亮度逐块匹配到测试图，再构造与 Imatest 等价的 measured/ideal dataset。
+
+默认色彩还原模式不让 JPEG 最小二乘重新稀释已实拍验证的调色方向，而是保存 3000K/4000K 的 `source_matrix → target_matrix` 标定对，先计算 Delta `A=M_target×M_source⁻¹`，再按 CCT 在 mired 空间插值。强度使用 `A(α)=I+α(A-I)`。图像自动拟合保留为未标定资料的备选模式。
+
+资料标定预览与 XML 数学分层：XML 只回写组合后的 3×3 `M_new`；预览则使用随工程固化的 3000K/4000K 实拍 Before→After 二次 RGB 响应面，特征为 `1,R,G,B,R²,G²,B²,RG,RB,GB`，在 mired 空间插值后按强度与原图混合。该模型吸收样例中 CCM 节点之后实际观察到的 Gamma、Tone Mapping、饱和度和剪切，使预览接近所给 After；自动拟合预览仍使用 linear sRGB。目标对比图没有固定白点假设，只用于色块对照与诊断。
+
 ## 3. 约束与稳健性
 
-- Delta CCM 与最终 CCM 每行和严格等于 1，避免把中性 RGB 轴染色。
+- 通用自动拟合仍要求 Delta CCM 与最终 CCM 每行和严格等于 1。
+- 实拍标定模式允许最终矩阵三行和为同一个非 1 数值；等行和保证中性 RGB 仍映射为中性，公共值作为亮度尺度单独显示。4000K 验证矩阵的公共尺度约为 `0.757635`。
+- 已匹配 target matrix 的 Region 不会再次应用同一 Delta，避免重复校正。
 - ideal 线性亮度先匹配 measured 亮度，防止用 CC 追逐曝光/Gamma 误差。
 - Ridge 正则化把 `A` 拉向单位阵，避免 18 个色块上的过拟合。
 - 自动搜索多个正则化与 blend 候选，并直接搜索最终 Matrix 的三组行内系数对。

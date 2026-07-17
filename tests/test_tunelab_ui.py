@@ -171,7 +171,7 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertEqual(config_labels, ["导入配置...", "导出配置..."])
         self.assertEqual(
             [self.app.tools_menu.entrycget(index, "label") for index in range(self.app.tools_menu.index("end") + 1)],
-            ["首页", "Gamma 优化", "图像分析器..."],
+            ["首页", "Gamma 优化", "ColorChecker 图像校正...", "图像分析器..."],
         )
 
     def test_save_xml_defaults_to_confirmed_source_overwrite(self) -> None:

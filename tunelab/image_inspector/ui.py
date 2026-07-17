@@ -570,6 +570,7 @@ class ImageInspectorWorkspace:
         on_close: Optional[Callable[[], None]] = None,
         on_home: Optional[Callable[[], None]] = None,
         on_gamma: Optional[Callable[[], object]] = None,
+        on_colorchecker: Optional[Callable[[], object]] = None,
         on_about: Optional[Callable[[], None]] = None,
     ) -> None:
         if CORE_DEPENDENCY_ERROR is not None:
@@ -581,6 +582,7 @@ class ImageInspectorWorkspace:
         self.on_close = on_close
         self.on_home = on_home
         self.on_gamma = on_gamma
+        self.on_colorchecker = on_colorchecker
         self.on_about = on_about
         self.settings = load_image_inspector_settings()
         self.last_directory = self.settings.last_directory
@@ -706,6 +708,8 @@ class ImageInspectorWorkspace:
             tools_menu.add_command(label="CC 校正", command=self.on_close)
         if self.on_gamma is not None:
             tools_menu.add_command(label="Gamma 优化", command=self.on_gamma)
+        if self.on_colorchecker is not None:
+            tools_menu.add_command(label="ColorChecker 图像校正", command=self.on_colorchecker)
         if tools_menu.index("end") is not None:
             menu.add_cascade(label="工具", menu=tools_menu)
 

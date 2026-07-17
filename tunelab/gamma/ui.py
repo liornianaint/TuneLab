@@ -162,11 +162,15 @@ class GammaWorkspace:
         *,
         on_close: Optional[Callable[[], None]] = None,
         on_home: Optional[Callable[[], None]] = None,
+        on_colorchecker: Optional[Callable[[], object]] = None,
+        on_image_inspector: Optional[Callable[[], object]] = None,
         on_about: Optional[Callable[[], None]] = None,
     ) -> None:
         self.root = root
         self.on_close = on_close
         self.on_home = on_home
+        self.on_colorchecker = on_colorchecker
+        self.on_image_inspector = on_image_inspector
         self.on_about = on_about
         self.dataset: Optional[GrayDataset] = None
         self.analysis: Optional[GrayRangeAnalysis] = None
@@ -215,6 +219,10 @@ class GammaWorkspace:
             self.functions_menu.add_command(label="首页", command=self.on_home)
         if self.on_close is not None:
             self.functions_menu.add_command(label="CC 校正", command=self.on_close)
+        if self.on_colorchecker is not None:
+            self.functions_menu.add_command(label="ColorChecker 图像校正", command=self.on_colorchecker)
+        if self.on_image_inspector is not None:
+            self.functions_menu.add_command(label="图像分析器", command=self.on_image_inspector)
         menu.add_cascade(label="工具", menu=self.functions_menu)
 
         self.help_menu = tk.Menu(menu, tearoff=False)

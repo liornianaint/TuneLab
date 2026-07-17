@@ -13,6 +13,7 @@ authors = [{ name = "TuneLab", email = "kaiyi.jiang@thundersoft.com" }]
 dependencies = [
     "numpy>=1.23",
     "Pillow>=9.2",
+    "pillow-heif>=0.18",
     "opencv-python>=4.7",
     "reportlab>=3.6",
 ]

@@ -107,6 +107,15 @@ def load_image(path: Union[str, Path]) -> ImageData:
         raise ImageLoadError("TuneLab 默认图像依赖 Pillow 未安装；请重新同步工程环境。") from exc
 
     source_path = Path(path).expanduser()
+    if source_path.suffix.lower() in {".heic", ".heif"}:
+        try:
+            from pillow_heif import register_heif_opener
+
+            register_heif_opener()
+        except ImportError as exc:
+            raise ImageLoadError(
+                "HEIC/HEIF 解码依赖 pillow-heif 未安装；请运行 python3 run_tunelab.py 重新同步工程环境。"
+            ) from exc
     if not source_path.is_file():
         raise ImageLoadError(f"图片不存在：{source_path}")
     try:
