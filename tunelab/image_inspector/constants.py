@@ -19,4 +19,4 @@ COLOR_CONVERSION_CHUNK_PIXELS = 250_000
 MOTION_THROTTLE_MS = 40
 RENDER_THROTTLE_MS = 24
 
-SUPPORTED_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+SUPPORTED_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".heic", ".heif")

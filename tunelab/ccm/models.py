@@ -136,6 +136,12 @@ class OptimizationConfig:
     condition_fail: float = 25.0
     determinant_warning: float = 0.08
     determinant_fail: float = 0.02
+    # A conventional CCM keeps every row sum at exactly 1.0.  Some validated
+    # Qualcomm tuning profiles instead use the same non-unity sum on all three
+    # rows.  That still maps neutral RGB to neutral RGB; it only introduces a
+    # common luminance scale.  Keep the stricter historical behaviour unless a
+    # workflow explicitly opts into that ISP convention.
+    allow_common_neutral_scale: bool = False
     fixed_point_fraction_bits: int = 12
     loss_delta_e: float = 1.0
     loss_delta_c: float = 0.28

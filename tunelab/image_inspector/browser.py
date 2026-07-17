@@ -50,6 +50,13 @@ def discover_images(folder: Union[str, Path]) -> list[Path]:
 
 def load_thumbnail(path: Union[str, Path], size: Tuple[int, int] = THUMBNAIL_SIZE) -> ThumbnailData:
     source = Path(path)
+    if source.suffix.lower() in {".heic", ".heif"}:
+        try:
+            from pillow_heif import register_heif_opener
+
+            register_heif_opener()
+        except ImportError as exc:
+            raise ImageFolderError("HEIC/HEIF 缩略图依赖 pillow-heif；请重新同步工程环境。") from exc
     try:
         with Image.open(source) as opened:
             original_size = opened.size

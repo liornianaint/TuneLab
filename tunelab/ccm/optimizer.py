@@ -195,10 +195,22 @@ def _fit_constrained_matrix(
     return tuple(rows)  # type: ignore[return-value]
 
 
-def _predict(patch_rgb: Vector3, correction: Matrix3) -> tuple[Vector3, Vector3, float]:
-    corrected_linear = mat_vec(correction, srgb_to_linear(patch_rgb))
-    overflow = sum(max(0.0, -value) + max(0.0, value - 1.0) for value in corrected_linear)
-    return linear_to_srgb(corrected_linear), corrected_linear, overflow
+def _predict(
+    patch_rgb: Vector3,
+    correction: Matrix3,
+    *,
+    prediction_domain: str = "linear",
+) -> tuple[Vector3, Vector3, float]:
+    if prediction_domain == "linear":
+        corrected = mat_vec(correction, srgb_to_linear(patch_rgb))
+        display = linear_to_srgb(corrected)
+    elif prediction_domain == "encoded":
+        corrected = mat_vec(correction, patch_rgb)
+        display = tuple(max(0.0, min(1.0, value)) for value in corrected)  # type: ignore[assignment]
+    else:
+        raise OptimizationError(f"未知 Patch 预测域: {prediction_domain}")
+    overflow = sum(max(0.0, -value) + max(0.0, value - 1.0) for value in corrected)
+    return display, corrected, overflow
 
 
 def _module_hint(zone: int, before_lab: Vector3, ideal_lab: Vector3) -> str:
@@ -222,10 +234,16 @@ def _build_patch_results(
     dataset: ImatestDataset,
     correction: Matrix3,
     config: OptimizationConfig,
+    *,
+    prediction_domain: str = "linear",
 ) -> list[PatchResult]:
     results: list[PatchResult] = []
     for patch in dataset.patches:
-        after_srgb, _, _ = _predict(patch.measured_srgb, correction)
+        after_srgb, _, _ = _predict(
+            patch.measured_srgb,
+            correction,
+            prediction_domain=prediction_domain,
+        )
         before_lab = srgb_to_lab(patch.measured_srgb)
         after_lab = srgb_to_lab(after_srgb)
         ideal_lab = srgb_to_lab(patch.ideal_srgb)
@@ -442,12 +460,18 @@ def _evaluate_candidate(
     *,
     enforce_bounds: bool = True,
     search_method: str = "regularized-grid",
+    prediction_domain: str = "linear",
 ) -> _Candidate:
     if enforce_bounds:
         correction, optimized = _bounded_candidate(correction, original, composition, config)
     else:
         optimized = _compose(correction, original, composition)
-    patches = _build_patch_results(dataset, correction, config)
+    patches = _build_patch_results(
+        dataset,
+        correction,
+        config,
+        prediction_domain=prediction_domain,
+    )
     health = evaluate_matrix_health(original, optimized, correction, dataset, config)
     loss = _loss_breakdown(patches, correction, original, optimized, health, config)
     return _Candidate(correction, optimized, patches, health, loss, regularization, blend, search_method)
@@ -906,6 +930,129 @@ def optimize_ccm(
         loss_after=best.loss,
         diagnostics=diagnostics,
         rejected_candidates=dict(rejected),
+        explainability=explainability,
+        warnings=warnings,
+    )
+
+
+def evaluate_ccm_correction(
+    dataset: ImatestDataset,
+    original_matrix: Matrix3,
+    correction_matrix: Matrix3,
+    *,
+    composition: str = "pre",
+    config: Optional[OptimizationConfig] = None,
+    search_method: str = "calibrated-correction",
+    blend: float = 1.0,
+    prediction_domain: str = "linear",
+    extra_warnings: Iterable[str] = (),
+) -> OptimizationResult:
+    """Evaluate a validated Delta CCM without re-optimizing its direction.
+
+    Image-domain least squares is deliberately conservative and cannot model
+    the complete RAW-to-JPEG ISP response.  A tuning workflow may therefore
+    provide a Delta CCM that has already been validated on hardware.  This
+    function keeps all reporting, patch diagnostics, fixed-point simulation and
+    Matrix Health checks while avoiding a second optimizer pass that would
+    dilute or reject the validated correction.
+    """
+
+    if composition not in {"pre", "post_transposed"}:
+        raise OptimizationError(f"未知矩阵组合方式: {composition}")
+    resolved_config = _strategy_config(config or OptimizationConfig())
+    resolved_config.validate()
+    baseline = _evaluate_candidate(
+        dataset,
+        original_matrix,
+        identity_matrix(),
+        composition,
+        resolved_config,
+        0.0,
+        0.0,
+        enforce_bounds=False,
+        search_method="baseline",
+        prediction_domain=prediction_domain,
+    )
+    candidate = _evaluate_candidate(
+        dataset,
+        original_matrix,
+        correction_matrix,
+        composition,
+        resolved_config,
+        0.0,
+        blend,
+        enforce_bounds=False,
+        search_method=search_method,
+        prediction_domain=prediction_domain,
+    )
+    patch_results = candidate.patch_results
+    color_results = [patch for patch in patch_results if patch.category != "Neutral"]
+    before_errors = [patch.delta_e_before for patch in color_results]
+    after_errors = [patch.delta_e_after for patch in color_results]
+    before_ratio = _saturation_ratio(patch_results, after=False)
+    after_ratio = _saturation_ratio(patch_results, after=True)
+    diagnostics = build_module_diagnostics(
+        patch_results,
+        before_ratio,
+        after_ratio,
+        candidate.health,
+        resolved_config.saturation_factor,
+    )
+    warnings = [*dataset.warnings, *extra_warnings]
+    warnings.extend(
+        check.message + f" [{check.value}]"
+        for check in candidate.health.checks
+        if check.status != "PASS"
+    )
+    row_sums = candidate.health.row_sums
+    neutral_scale = sum(row_sums) / 3.0
+    neutral_spread = max(row_sums) - min(row_sums)
+    explainability = (
+        f"Method={search_method}; 使用已验证 Delta CCM，不重新改变其色彩还原方向。",
+        f"重点 Patch={','.join(map(str, resolved_config.focus_patches))}；Patch 预测域={prediction_domain}，指标仅用于近似预览与风险提示。",
+        f"Chroma ratio {before_ratio:.3f}->{after_ratio:.3f}；强度={blend:.2f}。",
+        f"中性公共尺度={neutral_scale:.7f}，三行和 spread={neutral_spread:.7g}。",
+        "Delta correction 严格满足 "
+        + ("M_new=A×M_old。" if composition == "pre" else "M_new=M_old×Aᵀ。"),
+        f"Matrix {candidate.health.status}: coeff=[{candidate.health.coefficient_min:.3f},{candidate.health.coefficient_max:.3f}], "
+        f"cond={candidate.health.condition_number:.3f}, det={candidate.health.determinant:.4f}。",
+    )
+    return OptimizationResult(
+        correction_matrix=_correction_for_final(
+            original_matrix,
+            candidate.optimized,
+            composition,
+        ),
+        original_matrix=original_matrix,
+        optimized_matrix=candidate.optimized,
+        composition=composition,
+        regularization=0.0,
+        blend=blend,
+        strategy=resolved_config.strategy,
+        search_method=search_method,
+        saturation_factor=resolved_config.saturation_factor,
+        patch_results=patch_results,
+        mean_before=mean(before_errors),
+        mean_after=mean(after_errors),
+        max_before=max(before_errors),
+        max_after=max(after_errors),
+        improved_count=sum(
+            patch.delta_e_after < patch.delta_e_before - 1e-9
+            for patch in color_results
+        ),
+        regressed_count=sum(
+            patch.regression > resolved_config.regression_epsilon
+            for patch in color_results
+        ),
+        pass_rates=_pass_rates(patch_results),
+        category_statistics=_category_statistics(patch_results),
+        saturation_ratio_before=before_ratio,
+        saturation_ratio_after=after_ratio,
+        matrix_health=candidate.health,
+        loss_before=baseline.loss,
+        loss_after=candidate.loss,
+        diagnostics=diagnostics,
+        rejected_candidates={},
         explainability=explainability,
         warnings=warnings,
     )

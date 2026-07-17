@@ -714,6 +714,7 @@ class TuneLabApp:
         self._history_sort_reverse = True
         self.gamma_workspace = None
         self.image_inspector_workspace = None
+        self.colorchecker_workspace = None
 
         root.title(APP_TITLE)
         self.window_placement = fit_window_to_screen(root)
@@ -810,6 +811,7 @@ class TuneLabApp:
         tools_menu = tk.Menu(menu, tearoff=False)
         tools_menu.add_command(label="首页", command=self.show_home_workspace)
         tools_menu.add_command(label="Gamma 优化", command=self.open_gamma_optimizer)
+        tools_menu.add_command(label="ColorChecker 图像校正...", command=self.open_colorchecker_optimizer)
         tools_menu.add_command(label="图像分析器...", command=self.open_image_inspector)
         self.tools_menu = tools_menu
         menu.add_cascade(label="工具", menu=tools_menu)
@@ -833,6 +835,7 @@ class TuneLabApp:
         tools_menu = tk.Menu(menu, tearoff=False)
         tools_menu.add_command(label="CC 校正", command=self.show_cc_workspace)
         tools_menu.add_command(label="Gamma 优化", command=self.open_gamma_optimizer)
+        tools_menu.add_command(label="ColorChecker 图像校正...", command=self.open_colorchecker_optimizer)
         tools_menu.add_command(label="图像分析器...", command=self.open_image_inspector)
         menu.add_cascade(label="工具", menu=tools_menu)
         help_menu = tk.Menu(menu, tearoff=False)
@@ -854,6 +857,7 @@ class TuneLabApp:
         ttk.Button(sidebar, text="⌂   首页", command=self.show_home_workspace, style="ActiveNav.TButton").pack(fill="x", pady=(0, 8))
         ttk.Button(sidebar, text="◈   CC 校正", command=self.show_cc_workspace, style="Nav.TButton").pack(fill="x", pady=4)
         ttk.Button(sidebar, text="⌁   Gamma 优化", command=self.open_gamma_optimizer, style="Nav.TButton").pack(fill="x", pady=4)
+        ttk.Button(sidebar, text="▦   ColorChecker 图像校正", command=self.open_colorchecker_optimizer, style="Nav.TButton").pack(fill="x", pady=4)
         ttk.Button(sidebar, text="▧   图像分析器", command=self.open_image_inspector, style="Nav.TButton").pack(fill="x", pady=4)
         ttk.Label(sidebar, text="●  本地工作区", foreground=GREEN, background=PANEL, font=FONT_SMALL).pack(anchor="w", side="bottom", pady=(0, 4))
 
@@ -876,18 +880,22 @@ class TuneLabApp:
         tools.grid(row=2, column=0, sticky="nsew")
         tools.columnconfigure(0, weight=1, uniform="home-tools")
         tools.columnconfigure(1, weight=1, uniform="home-tools")
-        tools.columnconfigure(2, weight=1, uniform="home-tools")
-        tools.rowconfigure(0, minsize=280)
+        tools.rowconfigure(0, weight=1, minsize=210, uniform="home-tools")
+        tools.rowconfigure(1, weight=1, minsize=210, uniform="home-tools")
         self._build_home_tool_card(
-            tools, 0, "▣", "CC 校正", "CCM / CC13",
+            tools, 0, 0, "▣", "CC 校正", "CCM / CC13",
             "色彩矩阵与色彩校正优化\n快速调整色彩表现与准确性", self.show_cc_workspace, "#2E90FA",
         )
         self._build_home_tool_card(
-            tools, 1, "⌁", "Gamma 优化", "灰阶 / LUT",
+            tools, 0, 1, "⌁", "Gamma 优化", "灰阶 / LUT",
             "灰阶曲线与 LUT 优化\n提升层次与对比度表现", self.open_gamma_optimizer, "#12B76A",
         )
         self._build_home_tool_card(
-            tools, 2, "▧", "图像分析器", "普通图片 / ROI",
+            tools, 1, 0, "▦", "ColorChecker 图像校正", "图片 / CC XML",
+            "自动识别 24 色块并拟合 Delta CCM\n对比原图、仿真图与目标图", self.open_colorchecker_optimizer, "#F79009",
+        )
+        self._build_home_tool_card(
+            tools, 1, 1, "▧", "图像分析器", "普通图片 / ROI",
             "浏览文件夹并选择 1–4 张图片\n检查像素、ROI 和颜色变化", self.open_image_inspector, "#7F56D9",
         )
 
@@ -897,13 +905,14 @@ class TuneLabApp:
     def show_help(self) -> None:
         show_workbench_help(self.root)
 
-    def _build_home_tool_card(self, parent: tk.Misc, column: int, glyph: str, title: str, subtitle: str, description: str, command: Callable[[], object], colour: str) -> None:
+    def _build_home_tool_card(self, parent: tk.Misc, row: int, column: int, glyph: str, title: str, subtitle: str, description: str, command: Callable[[], object], colour: str) -> None:
         card = ttk.Frame(parent, padding=22, style="HomeCard.TFrame")
         card.grid(
-            row=0,
+            row=row,
             column=column,
             sticky="nsew",
-            padx=(0, 8) if column == 0 else (8, 8) if column == 1 else (8, 0),
+            padx=(0, 8) if column == 0 else (8, 0),
+            pady=(0, 8) if row == 0 else (8, 0),
         )
         ttk.Label(card, text=glyph, foreground=colour, background=PANEL, font=FONT_TITLE).pack(anchor="w")
         ttk.Label(card, text=title, style="HomeToolTitle.TLabel").pack(anchor="w", pady=(10, 0))
@@ -1395,11 +1404,20 @@ class TuneLabApp:
         self.home_view.pack_forget()
         if self.image_inspector_workspace is not None and self.image_inspector_workspace.is_alive():
             self.image_inspector_workspace.hide()
+        if self.colorchecker_workspace is not None and self.colorchecker_workspace.is_alive():
+            self.colorchecker_workspace.hide()
         if self.gamma_workspace is None or not self.gamma_workspace.is_alive():
             from .gamma.ui import GammaWorkspace
 
             self.cc_view.pack_forget()
-            self.gamma_workspace = GammaWorkspace(self.root, on_close=self.show_cc_workspace, on_home=self.show_home_workspace, on_about=self.show_about)
+            self.gamma_workspace = GammaWorkspace(
+                self.root,
+                on_close=self.show_cc_workspace,
+                on_home=self.show_home_workspace,
+                on_colorchecker=self.open_colorchecker_optimizer,
+                on_image_inspector=self.open_image_inspector,
+                on_about=self.show_about,
+            )
         else:
             self.cc_view.pack_forget()
             # show() performs a Tcl-level existence check.  Recreate the tool
@@ -1407,8 +1425,52 @@ class TuneLabApp:
             if not self.gamma_workspace.show():
                 from .gamma.ui import GammaWorkspace
 
-                self.gamma_workspace = GammaWorkspace(self.root, on_close=self.show_cc_workspace, on_home=self.show_home_workspace, on_about=self.show_about)
+                self.gamma_workspace = GammaWorkspace(
+                    self.root,
+                    on_close=self.show_cc_workspace,
+                    on_home=self.show_home_workspace,
+                    on_colorchecker=self.open_colorchecker_optimizer,
+                    on_image_inspector=self.open_image_inspector,
+                    on_about=self.show_about,
+                )
         return self.gamma_workspace
+
+    def open_colorchecker_optimizer(self):
+        try:
+            from .colorchecker.ui import ColorCheckerWorkspace
+        except ImportError as exc:
+            messagebox.showerror(
+                "ColorChecker 图像校正依赖缺失",
+                "TuneLab 默认图像依赖未完整安装。\n源码工程请运行：python3 run_tunelab.py\n"
+                "或在工程虚拟环境中执行：python -m pip install -e .\n\n" + str(exc),
+                parent=self.root,
+            )
+            return None
+        self.home_view.pack_forget()
+        self.cc_view.pack_forget()
+        if self.gamma_workspace is not None and self.gamma_workspace.is_alive():
+            self.gamma_workspace.hide()
+        if self.image_inspector_workspace is not None and self.image_inspector_workspace.is_alive():
+            self.image_inspector_workspace.hide()
+        if self.colorchecker_workspace is None or not self.colorchecker_workspace.is_alive():
+            self.colorchecker_workspace = ColorCheckerWorkspace(
+                self.root,
+                on_close=self.show_cc_workspace,
+                on_home=self.show_home_workspace,
+                on_gamma=self.open_gamma_optimizer,
+                on_image_inspector=self.open_image_inspector,
+                on_about=self.show_about,
+            )
+        elif not self.colorchecker_workspace.show():
+            self.colorchecker_workspace = ColorCheckerWorkspace(
+                self.root,
+                on_close=self.show_cc_workspace,
+                on_home=self.show_home_workspace,
+                on_gamma=self.open_gamma_optimizer,
+                on_image_inspector=self.open_image_inspector,
+                on_about=self.show_about,
+            )
+        return self.colorchecker_workspace
 
     def open_image_inspector(self):
         try:
@@ -1425,6 +1487,8 @@ class TuneLabApp:
         self.cc_view.pack_forget()
         if self.gamma_workspace is not None and self.gamma_workspace.is_alive():
             self.gamma_workspace.hide()
+        if self.colorchecker_workspace is not None and self.colorchecker_workspace.is_alive():
+            self.colorchecker_workspace.hide()
         try:
             if self.image_inspector_workspace is None or not self.image_inspector_workspace.is_alive():
                 self.image_inspector_workspace = ImageInspectorWorkspace(
@@ -1432,6 +1496,7 @@ class TuneLabApp:
                     on_close=self.show_cc_workspace,
                     on_home=self.show_home_workspace,
                     on_gamma=self.open_gamma_optimizer,
+                    on_colorchecker=self.open_colorchecker_optimizer,
                     on_about=self.show_about,
                 )
             elif not self.image_inspector_workspace.show():
@@ -1440,6 +1505,7 @@ class TuneLabApp:
                     on_close=self.show_cc_workspace,
                     on_home=self.show_home_workspace,
                     on_gamma=self.open_gamma_optimizer,
+                    on_colorchecker=self.open_colorchecker_optimizer,
                     on_about=self.show_about,
                 )
         except RuntimeError as exc:
@@ -1457,6 +1523,8 @@ class TuneLabApp:
                 self.gamma_workspace = None
         if self.image_inspector_workspace is not None and self.image_inspector_workspace.is_alive():
             self.image_inspector_workspace.hide()
+        if self.colorchecker_workspace is not None and self.colorchecker_workspace.is_alive():
+            self.colorchecker_workspace.hide()
         self.root.title(CCM_WORKSPACE_TITLE)
         self._configure_styles()
         self._build_menu()
@@ -1468,6 +1536,8 @@ class TuneLabApp:
             self.gamma_workspace.hide()
         if self.image_inspector_workspace is not None and self.image_inspector_workspace.is_alive():
             self.image_inspector_workspace.hide()
+        if self.colorchecker_workspace is not None and self.colorchecker_workspace.is_alive():
+            self.colorchecker_workspace.hide()
         self.root.title(APP_TITLE)
         self._configure_styles()
         self._build_home_menu()
@@ -1486,6 +1556,8 @@ class TuneLabApp:
             pass
         if self.image_inspector_workspace is not None:
             self.image_inspector_workspace.shutdown()
+        if self.colorchecker_workspace is not None:
+            self.colorchecker_workspace.shutdown()
         self.root.destroy()
 
     def _on_show_motion_changed(self) -> None:

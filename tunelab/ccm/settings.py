@@ -43,6 +43,7 @@ _OPTIMIZATION_DESCRIPTION_SPEC: dict[str, tuple[str, str, str]] = {
     "condition_fail": ("设置矩阵条件数的 FAIL 阈值。", "20-50，且大于 condition_warning", "降低会更严格拒绝病态矩阵。"),
     "determinant_warning": ("设置行列式绝对值的 WARNING 下限。", "0.03-0.15", "提高会更早提示接近奇异的矩阵。"),
     "determinant_fail": ("设置行列式绝对值的 FAIL 下限。", "0.005-0.05，且小于 determinant_warning", "提高会更严格拒绝接近奇异的矩阵。"),
+    "allow_common_neutral_scale": ("允许三行和相等但不强制等于 1。", "false；仅实拍验证的 ISP Profile 使用 true", "开启后仍要求中性轴不染色，但允许公共亮度尺度变化。"),
     "fixed_point_fraction_bits": ("设置 ISP 定点矩阵模拟的小数位数。", "8-16；CC13 常用验证值为 12", "位数越少，量化误差越明显。"),
     "loss_delta_e": ("设置平均 ΔE00 在多目标 Loss 中的权重。", "0.5-3.0", "提高会更强调总体感知色差。"),
     "loss_delta_c": ("设置 ΔC 在多目标 Loss 中的权重。", "0.0-1.0", "提高会更强调彩度准确性。"),
