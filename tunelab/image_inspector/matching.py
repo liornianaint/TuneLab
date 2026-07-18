@@ -179,14 +179,14 @@ def match_roi(
     before_values = np.asarray(before_rgb)
     after_values = np.asarray(after_rgb)
     if before_values.ndim != 3 or after_values.ndim != 3:
-        raise MatchingError("参考图或对比图的图片数组维度无效。")
+        raise MatchingError("图像 1 或当前图像的数组维度无效。")
     before_height, before_width = before_values.shape[:2]
     after_height, after_width = after_values.shape[:2]
     roi = before_roi.normalized()
     if roi.width <= 0 or roi.height <= 0:
-        raise MatchingError("参考图 ROI 为空。")
+        raise MatchingError("图像 1 ROI 为空。")
     if roi != roi.clipped(before_width, before_height):
-        raise MatchingError("参考图 ROI 超出图片边界。")
+        raise MatchingError("图像 1 ROI 超出图片边界。")
 
     expected, scale_x, scale_y = _expected_after_roi(
         (before_height, before_width),
@@ -200,7 +200,7 @@ def match_roi(
     candidate_right = min(after_width - expected.width, expected.x + radius_x)
     candidate_bottom = min(after_height - expected.height, expected.y + radius_y)
     if candidate_right < candidate_left or candidate_bottom < candidate_top:
-        raise MatchingError("对比图搜索区域小于映射后的模板 ROI。")
+        raise MatchingError("当前图像搜索区域小于映射后的模板 ROI。")
     search_bounds = ROI(
         candidate_left,
         candidate_top,
@@ -239,7 +239,7 @@ def match_roi(
             expected,
             search_bounds,
             method,
-            "参考图 ROI 缺少可辨识纹理，无法可靠自动匹配；请手动确认对比图 ROI。",
+            "图像 1 ROI 缺少可辨识纹理，无法可靠自动匹配；请手动确认当前图像 ROI。",
         )
 
     if cv2 is not None:
@@ -283,7 +283,7 @@ def match_roi(
     if not reliable:
         warning = (
             "当前 ROI 匹配置信度较低，两个区域可能不是同一物体位置。"
-            "以下颜色变化仅供参考，请手动确认对比图 ROI。"
+            "以下颜色变化仅供参考，请手动确认当前图像 ROI。"
         )
     return MatchResult(
         before_roi=roi,

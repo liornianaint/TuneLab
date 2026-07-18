@@ -764,6 +764,9 @@ class TuneLabApp:
         self.reference_is_standard = False
         self.simulation: Optional[SimulationResult] = None
         self.restoration_plan: Optional[RestorationPlan] = None
+        # Full-strength real-shot response is a preview-only aid.  The
+        # separately validated restoration_plan remains the sole XML result.
+        self.restoration_preview_plan: Optional[RestorationPlan] = None
         self.document: Optional[QualcommCCDocument] = None
         self.selected_region: Optional[CCRegion] = None
         self.result: Optional[OptimizationResult] = None
@@ -1255,6 +1258,13 @@ class TuneLabApp:
             variable=self.show_checker_overlay_var,
             command=self._redraw_image_previews,
         ).grid(row=0, column=1, padx=(12, 8))
+        self.full_restoration_preview_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            image_header,
+            text="完整实拍还原（仅预览）",
+            variable=self.full_restoration_preview_var,
+            command=self._render_image_simulation,
+        ).grid(row=0, column=2, padx=(0, 8))
         self.export_simulation_button = ttk.Button(
             image_header,
             text="导出模拟图...",
@@ -1262,10 +1272,10 @@ class TuneLabApp:
             state="disabled",
             style="Quiet.TButton",
         )
-        self.export_simulation_button.grid(row=0, column=2)
+        self.export_simulation_button.grid(row=0, column=3)
 
         self.image_input_controls = ttk.Frame(image_header, style="Root.TFrame")
-        self.image_input_controls.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(5, 0))
+        self.image_input_controls.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(5, 0))
         self.image_input_controls.columnconfigure(3, weight=1)
         ttk.Label(self.image_input_controls, text="ColorChecker 目标", style="Subtitle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 5))
         ttk.Button(
@@ -1297,7 +1307,7 @@ class TuneLabApp:
                 row=1,
                 column=column,
                 sticky="nsew",
-                padx=(0, 5) if column == 0 else ((5, 5) if column == 1 else (5, 0)),
+                padx=5,
             )
 
         summary_row = ttk.Frame(overview, style="Root.TFrame")
@@ -2131,7 +2141,7 @@ class TuneLabApp:
             pane.redraw()
 
     def _render_image_simulation(self) -> None:
-        """Render the accepted image correction over the loaded ColorChecker."""
+        """Render either the XML-safe result or the explicit preview-only response."""
 
         self.simulation = None
         self.export_simulation_button.configure(state="disabled")
@@ -2142,10 +2152,18 @@ class TuneLabApp:
             )
             return
         try:
-            if self.restoration_plan is not None:
+            preview_plan = self.restoration_plan
+            using_full_preview = False
+            if (
+                self.full_restoration_preview_var.get()
+                and self.restoration_preview_plan is not None
+            ):
+                preview_plan = self.restoration_preview_plan
+                using_full_preview = True
+            if preview_plan is not None:
                 simulation = simulate_restoration_response(
                     self.test_detection.image,
-                    self.restoration_plan,
+                    preview_plan,
                 )
             else:
                 simulation = simulate_correction(
@@ -2161,21 +2179,36 @@ class TuneLabApp:
             return
 
         self.simulation = simulation
+        if simulation.domain == "real-shot-response":
+            assert preview_plan is not None
+            if using_full_preview and self.restoration_plan is None:
+                response_label = "实拍响应仿真 100%（仅预览；未用于 XML）"
+                response_meta = "实拍 Before→After 响应 100%（仅预览；未用于 XML）"
+            elif (
+                using_full_preview
+                and self.restoration_plan is not None
+                and self.restoration_plan.strength < 1.0 - 1e-12
+            ):
+                safe_strength = self.restoration_plan.strength
+                response_label = f"实拍响应仿真 100%（仅预览；XML {safe_strength:.0%}）"
+                response_meta = f"实拍 Before→After 响应 100%（仅预览；XML {safe_strength:.0%}）"
+            else:
+                response_label = f"实拍响应仿真 {preview_plan.strength:.0%}（与 XML 一致）"
+                response_meta = f"实拍 Before→After 响应 {preview_plan.strength:.0%}（与 XML 一致）"
+        else:
+            response_label = "线性 CCM 仿真"
+            response_meta = "linear sRGB 近似"
         self.simulation_preview.set_image(
             self.test_detection.image,
             rgb=simulation.rgb,
             polygons=[patch.polygon for patch in self.test_detection.patches],
-            meta_suffix=(
-                "实拍 Before→After 响应"
-                if simulation.domain == "real-shot-response"
-                else "linear sRGB 近似"
-            )
-            + f" · clip {simulation.clipped_pixel_ratio:.2%}",
+            meta_suffix=response_meta + f" · clip {simulation.clipped_pixel_ratio:.2%}",
         )
         self.export_simulation_button.configure(state="normal")
         if self.reference_detection is None:
             self.image_metrics_var.set(
-                f"改后模拟完成 · clip {simulation.clipped_pixel_ratio:.2%}；未加载目标，无法计算预览 ΔE00。"
+                f"{response_label}预览完成 · clip {simulation.clipped_pixel_ratio:.2%}；"
+                "未加载目标，无法计算预览 ΔE00。"
             )
             return
 
@@ -2192,9 +2225,8 @@ class TuneLabApp:
         mean_after = sum(after_errors) / len(after_errors)
         improved = sum(after < before - 1e-9 for before, after in zip(before_errors, after_errors))
         regressed = sum(after > before + 0.05 for before, after in zip(before_errors, after_errors))
-        preview_model = "实拍响应仿真" if simulation.domain == "real-shot-response" else "线性 CCM 仿真"
         self.image_metrics_var.set(
-            f"{preview_model}预览 ΔE00 {mean_before:.2f} → {mean_after:.2f} · 改善/回退 {improved}/{regressed} · "
+            f"{response_label}预览 ΔE00 {mean_before:.2f} → {mean_after:.2f} · 改善/回退 {improved}/{regressed} · "
             f"clip {simulation.clipped_pixel_ratio:.2%}；写回仍以色块优化与工程门禁为准。"
         )
 
@@ -2373,6 +2405,7 @@ class TuneLabApp:
         self.root.update_idletasks()
         try:
             self.restoration_plan = None
+            self.restoration_preview_plan = None
             profile_rejection = ""
             if self.dataset_source == "image":
                 try:
@@ -2382,6 +2415,15 @@ class TuneLabApp:
                         cct,
                         strength=solve_config.max_blend,
                     )
+                    source_compatible = requested_plan.exact_profile and not any(
+                        "起始矩阵不同" in warning for warning in requested_plan.warnings
+                    )
+                    if source_compatible:
+                        self.restoration_preview_plan = build_calibrated_restoration_plan(
+                            self.selected_region.matrix,
+                            cct,
+                            strength=1.0,
+                        )
                     profile_config = restoration_evaluation_config(
                         self.selected_region.matrix,
                         requested_plan.optimized_matrix,
@@ -2434,6 +2476,15 @@ class TuneLabApp:
                     self.result.warnings.append(
                         f"实拍 Profile 未通过或不适用，已自动改用统一优化：{profile_rejection}"
                     )
+            if self.restoration_preview_plan is not None:
+                if self.restoration_plan is None:
+                    self.result.warnings.append(
+                        "完整 Before→After 实拍响应仅用于模拟图预览，未绕过安全门禁，也未写入 XML。"
+                    )
+                elif self.restoration_plan.strength < 1.0 - 1e-12:
+                    self.result.warnings.append(
+                        f"模拟图默认显示 100% 实拍响应；XML 仍只采用门禁接受的 {self.restoration_plan.strength:.0%} 强度。"
+                    )
             self.xml_diff = self.document.diff_with_matrix(
                 self.selected_region.index,
                 self.result.optimized_matrix,
@@ -2462,6 +2513,7 @@ class TuneLabApp:
     def _clear_result(self) -> None:
         self.simulation = None
         self.restoration_plan = None
+        self.restoration_preview_plan = None
         if hasattr(self, "simulation_preview"):
             self.simulation_preview.clear()
         if hasattr(self, "export_simulation_button"):
@@ -2631,10 +2683,21 @@ class TuneLabApp:
         else:
             lines.append("· 无额外警告。")
         if self.dataset_source == "image":
-            if self.restoration_plan is not None:
+            if self.restoration_preview_plan is not None and self.restoration_plan is not None:
                 model_boundary = (
-                    "· 图片输入由自动识别的 24 色块构造；目标逐块匹配测试亮度。当前安全接受实拍 Profile，"
-                    "整图使用 Before→After 响应仿真；预览不参与求解或门禁。"
+                    "· 图片输入由自动识别的 24 色块构造；目标逐块匹配测试亮度。"
+                    f"整图可在 100% Before→After 完整预览与 XML 接受的 {self.restoration_plan.strength:.0%} "
+                    "安全响应之间切换；完整预览不参与求解、门禁或写回。"
+                )
+            elif self.restoration_preview_plan is not None:
+                model_boundary = (
+                    "· 图片输入由自动识别的 24 色块构造；当前 100% Before→After 响应只用于完整预览，"
+                    "实拍 Profile 未用于 XML；写回仍来自统一优化及其安全门禁。"
+                )
+            elif self.restoration_plan is not None:
+                model_boundary = (
+                    "· 图片输入由自动识别的 24 色块构造；当前整图使用与 XML 安全强度一致的 "
+                    "Before→After 响应仿真；预览不参与求解或门禁。"
                 )
             else:
                 model_boundary = (
