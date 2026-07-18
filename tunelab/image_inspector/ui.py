@@ -7,7 +7,6 @@ import math
 import queue
 import re
 import tkinter as tk
-from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -39,7 +38,7 @@ from ..ui_foundation import (
     elide_canvas_text,
     fit_window_to_screen,
 )
-from .browser import THUMBNAIL_PREFETCH_ROWS, ImageFolderError, discover_images, load_thumbnail, selected_paths_in_folder_order
+from .browser import ImageFolderError, discover_images
 from .cache import ImageDataCache
 from .constants import (
     MATCH_SEARCH_RANGES,
@@ -78,7 +77,6 @@ BORDER = SEPARATOR
 CANVAS_BG = "#1C1C1E"
 IMAGE_ROLES = ("before", "after", "compare3", "compare4")
 COMPARISON_ROLES = IMAGE_ROLES[1:]
-THUMBNAIL_CACHE_ITEMS = 128
 IMAGE_FILE_TYPES = [
     ("图片", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.heic *.heif"),
     ("所有文件", "*.*"),
@@ -90,7 +88,7 @@ def _role_label(role: str) -> str:
         index = IMAGE_ROLES.index(role)
     except ValueError:
         return role
-    return "参考图 1" if index == 0 else f"对比图 {index + 1}"
+    return f"图像 {index + 1}"
 
 
 def _ratio(value: Optional[float]) -> str:
@@ -296,7 +294,7 @@ class ImageCanvas(ttk.Frame):
     def _schedule_render(self, *, immediate: bool = False) -> None:
         if not self.winfo_exists():
             return
-        if self._render_after_id is not None:
+        if immediate and self._render_after_id is not None:
             try:
                 self.after_cancel(self._render_after_id)
             except tk.TclError:
@@ -304,7 +302,7 @@ class ImageCanvas(ttk.Frame):
             self._render_after_id = None
         if immediate:
             self._render()
-        else:
+        elif self._render_after_id is None:
             self._render_after_id = self.after(RENDER_THROTTLE_MS, self._render)
 
     def _render(self) -> None:
@@ -663,9 +661,19 @@ class ImageCanvas(ttk.Frame):
     def _on_pan_drag(self, event: tk.Event) -> str:
         if self._pan_start is None:
             return "break"
+        previous_pan_x = self.pan_x
+        previous_pan_y = self.pan_y
         self.pan_x = self._pan_start[2] + event.x - self._pan_start[0]
         self.pan_y = self._pan_start[3] + event.y - self._pan_start[1]
         self._clamp_pan()
+        delta_x = self.pan_x - previous_pan_x
+        delta_y = self.pan_y - previous_pan_y
+        if delta_x or delta_y:
+            # Move the existing tile immediately so the pointer never outruns
+            # the image.  The coalesced 60 Hz render then refreshes exposed
+            # edges and the exact high-quality crop in the background.
+            self.canvas.move("rendered-image", delta_x, delta_y)
+            self.canvas.move("analysis-overlay", delta_x, delta_y)
         self._schedule_render()
         return "break"
 
@@ -683,6 +691,14 @@ class ImageCanvas(ttk.Frame):
                     self.after_cancel(after_id)
                 except tk.TclError:
                     pass
+        self._render_after_id = None
+        self._motion_after_id = None
+        # ImageTk objects must be released by the Tk/main thread.  Keeping a
+        # dead PhotoImage on a workspace cycle lets a later worker-thread GC
+        # trigger Tcl_AsyncDelete on macOS during rapid close/reopen.
+        self._photo = None
+        self._pil_image = None
+        self._photo_key = None
 
 
 class HistogramCanvas(ttk.Frame):
@@ -768,20 +784,15 @@ class ImageInspectorWorkspace:
         self.comparison: Optional[ComparisonResult] = None
         self.dual_mode = False
         self.folder_paths: list[Path] = []
-        self._folder_items: Dict[str, Path] = {}
-        self._folder_token = 0
-        self._thumbnail_photos: Dict[str, Any] = {}
-        self._thumbnail_cache: "OrderedDict[Path, Any]" = OrderedDict()
-        self._thumbnail_requested: set[str] = set()
-        self._visible_thumbnail_items: set[str] = set()
-        self._selection_guard = False
+        self.current_paths: list[Path] = []
+        self.folder_group_start = 0
+        self.folder_group_size = len(IMAGE_ROLES)
+        self.folder_group_mode = False
         self._closed = False
         self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="TuneLabImage")
         self._load_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="TuneLabDecode")
-        self._thumbnail_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="TuneLabThumb")
         self._result_queue: "queue.Queue[Tuple[str, int, str, Future[Any], Dict[str, Any]]]" = queue.Queue()
         self._futures = set()
-        self._thumbnail_futures = set()
         self._pending = 0
         self._load_tokens = {role: 0 for role in IMAGE_ROLES}
         self._analysis_tokens = {role: 0 for role in IMAGE_ROLES}
@@ -830,8 +841,6 @@ class ImageInspectorWorkspace:
         style.configure("InspectorMatchHigh.TLabel", background=PANEL, foreground=GREEN, font=FONT_BODY_BOLD)
         style.configure("InspectorMatchMedium.TLabel", background=PANEL, foreground=AMBER, font=FONT_BODY_BOLD)
         style.configure("InspectorMatchLow.TLabel", background=PANEL, foreground=RED, font=FONT_BODY_BOLD)
-        style.configure("ImageBrowser.Treeview", rowheight=88, font=FONT_SMALL)
-        style.configure("ImageBrowser.Treeview.Heading", font=FONT_SMALL)
         style.configure("InspectorComparison.Treeview", rowheight=28, font=FONT_BODY)
         style.configure("InspectorComparison.Treeview.Heading", font=FONT_BODY_BOLD)
         style.configure(
@@ -868,7 +877,7 @@ class ImageInspectorWorkspace:
             command=self.open_folder,
             accelerator="⇧⌘O" if aqua else "Ctrl+Shift+O",
         )
-        self.file_menu.add_command(label="载入文件夹所选", command=self.load_selected_images)
+        self.file_menu.add_command(label="重新载入当前组", command=self.load_selected_images)
         self.file_menu.add_separator()
         self.file_menu.add_command(label="导出 CSV...", command=self.export_current)
         self.file_menu.add_separator()
@@ -881,6 +890,9 @@ class ImageInspectorWorkspace:
         self.view_menu.add_separator()
         self.view_menu.add_command(label="放大", command=self.zoom_in)
         self.view_menu.add_command(label="缩小", command=self.zoom_out)
+        self.view_menu.add_separator()
+        self.view_menu.add_command(label="上一组图片", command=self.show_previous_group)
+        self.view_menu.add_command(label="下一组图片", command=self.show_next_group)
         self.view_menu.add_separator()
         self.view_menu.add_checkbutton(
             label="实时显示鼠标像素",
@@ -946,6 +958,8 @@ class ImageInspectorWorkspace:
 
         self.root.bind(f"<{modifier}-o>", invoke(self.open_images), add="+")
         self.root.bind(f"<{modifier}-Shift-O>", invoke(self.open_folder), add="+")
+        self.root.bind("<Alt-Left>", invoke(self.show_previous_group), add="+")
+        self.root.bind("<Alt-Right>", invoke(self.show_next_group), add="+")
 
     def _build_ui(self) -> None:
         self.outer = ttk.Frame(self.root, padding=(16, 10), style="InspectorRoot.TFrame")
@@ -955,7 +969,7 @@ class ImageInspectorWorkspace:
         ttk.Label(header, text="图像分析器", style="InspectorTitle.TLabel").pack(side="left")
         ttk.Label(
             header,
-            text="文件夹预览 · 1–4 图并排检查 · 像素、ROI、直方图与匹配置信度",
+            text="地址栏分组浏览 · 1–4 图并排检查 · 像素、ROI、直方图与匹配置信度",
             style="InspectorSubtitle.TLabel",
         ).pack(side="left", padx=(14, 0), pady=(5, 0))
         if self.on_home is not None:
@@ -1007,59 +1021,50 @@ class ImageInspectorWorkspace:
         self.progress = ttk.Progressbar(toolbar, mode="indeterminate", length=80)
         self.progress.grid(row=1, column=9, sticky="e", pady=(4, 0))
 
+        location_bar = ttk.Frame(self.outer, padding=(9, 7), style="InspectorCard.TFrame")
+        self.location_bar = location_bar
+        location_bar.pack(fill="x", pady=(0, 8))
+        ttk.Label(location_bar, text="位置", style="InspectorCard.TLabel").grid(row=0, column=0, padx=(0, 6))
+        self.folder_path_var = tk.StringVar(value=self.last_directory or "尚未打开图片文件夹")
+        self.folder_address_entry = ttk.Entry(location_bar, textvariable=self.folder_path_var)
+        self.folder_address_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        self.folder_address_entry.bind("<Return>", self._open_folder_from_address)
+        self.previous_group_button = ttk.Button(
+            location_bar,
+            text="‹ 上一组",
+            command=self.show_previous_group,
+            state="disabled",
+            style="Quiet.TButton",
+        )
+        self.previous_group_button.grid(row=0, column=2, padx=(0, 4))
+        self.group_status_var = tk.StringVar(value="尚未载入图片")
+        ttk.Label(
+            location_bar,
+            textvariable=self.group_status_var,
+            style="InspectorMutedCard.TLabel",
+            width=22,
+            anchor="center",
+        ).grid(row=0, column=3, padx=4)
+        self.next_group_button = ttk.Button(
+            location_bar,
+            text="下一组 ›",
+            command=self.show_next_group,
+            state="disabled",
+            style="Quiet.TButton",
+        )
+        self.next_group_button.grid(row=0, column=4, padx=(4, 4))
+        self.open_comparison_button = ttk.Button(
+            location_bar,
+            text="查看多图对比",
+            command=self.show_comparison,
+            state="disabled",
+        )
+        self.open_comparison_button.grid(row=0, column=5, padx=(4, 0))
+        location_bar.columnconfigure(1, weight=1)
+
         self.main_pane = ttk.Panedwindow(self.outer, orient="vertical")
         self.main_pane.pack(fill="both", expand=True)
         self.viewer_pane = ttk.Panedwindow(self.main_pane, orient="horizontal")
-        self.folder_panel = ttk.Frame(self.viewer_pane, padding=(7, 6), style="InspectorCard.TFrame")
-        ttk.Label(self.folder_panel, text="图片文件夹", style="InspectorCardTitle.TLabel").pack(anchor="w")
-        self.folder_path_var = tk.StringVar(value="尚未打开文件夹")
-        ttk.Label(
-            self.folder_panel,
-            textvariable=self.folder_path_var,
-            style="InspectorMutedCard.TLabel",
-            wraplength=235,
-        ).pack(fill="x", pady=(3, 6))
-        browser_frame = ttk.Frame(self.folder_panel, style="InspectorSurface.TFrame")
-        browser_frame.pack(fill="both", expand=True)
-        self.folder_tree = ttk.Treeview(
-            browser_frame,
-            columns=("size",),
-            show="tree headings",
-            selectmode="extended",
-            style="ImageBrowser.Treeview",
-        )
-        self.folder_tree.heading("#0", text="图片")
-        self.folder_tree.heading("size", text="尺寸")
-        self.folder_tree.column("#0", width=185, stretch=True)
-        self.folder_tree.column("size", width=74, anchor="center", stretch=False)
-        folder_scrollbar = ttk.Scrollbar(browser_frame, orient="vertical", command=self._folder_yview)
-        self.folder_tree.configure(yscrollcommand=folder_scrollbar.set)
-        self.folder_tree.pack(side="left", fill="both", expand=True)
-        folder_scrollbar.pack(side="right", fill="y")
-        self.folder_tree.bind("<<TreeviewSelect>>", self._on_folder_selection)
-        self.folder_tree.bind("<Double-1>", lambda _event: self.load_selected_images())
-        self.folder_tree.bind("<Configure>", lambda _event: self.root.after_idle(self._schedule_visible_thumbnails))
-        self.folder_tree.bind("<MouseWheel>", lambda _event: self.root.after_idle(self._schedule_visible_thumbnails), add="+")
-        self.folder_tree.bind("<Button-4>", lambda _event: self.root.after_idle(self._schedule_visible_thumbnails), add="+")
-        self.folder_tree.bind("<Button-5>", lambda _event: self.root.after_idle(self._schedule_visible_thumbnails), add="+")
-        self.folder_tree.bind("<Control-Button-1>", self._toggle_folder_item)
-        try:
-            self.folder_tree.bind("<Command-Button-1>", self._toggle_folder_item)
-        except tk.TclError:
-            pass
-        self.folder_selection_var = tk.StringVar(value="Ctrl/⌘ 多选，最多 4 张；列表首张作为参考图")
-        ttk.Label(
-            self.folder_panel,
-            textvariable=self.folder_selection_var,
-            style="InspectorMutedCard.TLabel",
-            wraplength=235,
-        ).pack(fill="x", pady=(6, 0))
-        ttk.Button(
-            self.folder_panel,
-            text="载入所选（1–4 张）",
-            command=self.load_selected_images,
-        ).pack(fill="x", pady=(6, 0))
-
         self.image_grid = ttk.Frame(self.viewer_pane, style="InspectorRoot.TFrame")
         self.views: Dict[str, ImageCanvas] = {}
         for role in IMAGE_ROLES:
@@ -1073,7 +1078,6 @@ class ImageInspectorWorkspace:
             )
         self.before_view = self.views["before"]
         self.after_view = self.views["after"]
-        self.viewer_pane.add(self.folder_panel, weight=0)
         self.viewer_pane.add(self.image_grid, weight=4)
         self.main_pane.add(self.viewer_pane, weight=3)
 
@@ -1122,13 +1126,13 @@ class ImageInspectorWorkspace:
         status = ttk.Frame(self.outer, style="InspectorRoot.TFrame")
         status.pack(fill="x")
         self.status_var = tk.StringVar(
-            value="请直接打开 1–4 张图片，或打开文件夹后载入所选。滚轮联动缩放全部图片；中键/右键或 Shift+左键平移。"
+            value="请直接打开 1–4 张图片，或打开文件夹后按组浏览。滚轮联动缩放全部图片；中键/右键或 Shift+左键平移。"
         )
         self.pixel_status_var = tk.StringVar(value="")
         ttk.Label(status, textvariable=self.status_var, style="InspectorStatus.TLabel").pack(side="left", fill="x", expand=True)
         ttk.Label(status, textvariable=self.pixel_status_var, style="InspectorStatus.TLabel", font=FONT_MONO).pack(side="right")
         self._set_text(self.pixel_text, "尚未选择像素或 ROI。")
-        self._set_text(self.compare_text, "选择 2–4 张图片后，在参考图中框选 ROI 即可显示对比。")
+        self._set_text(self.compare_text, "选择 2–4 张图片后，在图像 1 中框选 ROI 即可显示差异。")
         self._set_text(self.conclusion_text, "结论将受 ROI 匹配置信度门禁约束。")
 
     def _build_comparison_panel(self) -> None:
@@ -1192,8 +1196,8 @@ class ImageInspectorWorkspace:
         )
         headings = {
             "metric": "指标",
-            "reference": "参考图 1",
-            "target": "对比图",
+            "reference": "图像 1",
+            "target": "图像 2",
             "delta": "Delta",
             "change": "变化方向",
         }
@@ -1313,90 +1317,75 @@ class ImageInspectorWorkspace:
         except (AttributeError, tk.TclError):
             pass
 
-    def _folder_yview(self, *args: str) -> None:
-        self.folder_tree.yview(*args)
-        self.root.after_idle(self._schedule_visible_thumbnails)
+    def _open_folder_from_address(self, _event: Optional[tk.Event] = None) -> str:
+        """Open the directory typed into the viewer-style location bar."""
 
-    def _schedule_visible_thumbnails(self) -> None:
-        if self._closed or not self.folder_paths or not self.folder_tree.winfo_exists():
+        selected = self.folder_path_var.get().strip()
+        if selected:
+            self.open_folder(selected)
+        return "break"
+
+    def _update_group_navigation(self) -> None:
+        """Keep the address-bar navigation state in sync with loaded images."""
+
+        loaded = len(self.current_paths)
+        can_compare = loaded >= 2
+        self.open_comparison_button.configure(state="normal" if can_compare else "disabled")
+        if self.folder_group_mode and self.folder_paths:
+            total = len(self.folder_paths)
+            group_count = (total + self.folder_group_size - 1) // self.folder_group_size
+            group_index = self.folder_group_start // self.folder_group_size
+            first = self.folder_group_start + 1
+            last = min(total, self.folder_group_start + loaded)
+            self.group_status_var.set(
+                f"第 {group_index + 1}/{group_count} 组 · {first}–{last} / {total}"
+            )
+            self.previous_group_button.configure(
+                state="normal" if self.folder_group_start > 0 else "disabled"
+            )
+            self.next_group_button.configure(
+                state=(
+                    "normal"
+                    if self.folder_group_start + self.folder_group_size < total
+                    else "disabled"
+                )
+            )
             return
-        children = self.folder_tree.get_children()
-        if not children:
-            return
-        first_fraction, _last_fraction = self.folder_tree.yview()
-        first_index = min(len(children) - 1, max(0, int(first_fraction * len(children))))
-        visible_rows = max(1, self.folder_tree.winfo_height() // 88 + 2)
-        start = max(0, first_index - THUMBNAIL_PREFETCH_ROWS)
-        end = min(len(children), first_index + visible_rows + THUMBNAIL_PREFETCH_ROWS)
-        desired = set(children[start:end])
-        self._visible_thumbnail_items = desired
 
-        for item_id in tuple(self._thumbnail_photos):
-            if item_id in desired:
-                continue
-            if self.folder_tree.exists(item_id):
-                self.folder_tree.item(item_id, image="")
-            self._thumbnail_photos.pop(item_id, None)
-            self._thumbnail_requested.discard(item_id)
-        for item_id in children[start:end]:
-            if item_id in self._thumbnail_requested or item_id not in self._folder_items:
-                continue
-            source = self._folder_items[item_id].resolve()
-            cached = self._thumbnail_cache.get(source)
-            if cached is not None:
-                self._thumbnail_cache.move_to_end(source)
-                self._thumbnail_requested.add(item_id)
-                self._display_thumbnail(item_id, cached)
-                continue
-            self._thumbnail_requested.add(item_id)
-            self._submit("thumbnail", self._folder_token, item_id, load_thumbnail, self._folder_items[item_id])
+        self.previous_group_button.configure(state="disabled")
+        self.next_group_button.configure(state="disabled")
+        self.group_status_var.set(f"已载入 {loaded} 张图片" if loaded else "尚未载入图片")
 
-    def _populate_folder_browser(
-        self,
-        paths: Sequence[Path],
-        *,
-        label: str,
-        selected_paths: Sequence[Path] = (),
-    ) -> bool:
-        """Replace the browser contents while invalidating stale thumbnails."""
-
-        self.folder_paths = list(paths)
-        self.folder_path_var.set(label)
-        self._folder_token += 1
-        for future in tuple(self._thumbnail_futures):
-            future.cancel()
-        self._thumbnail_futures.clear()
-        self._thumbnail_requested.clear()
-        self._visible_thumbnail_items.clear()
-        self._folder_items.clear()
-        self._thumbnail_photos.clear()
-        self._thumbnail_cache.clear()
-        for item in self.folder_tree.get_children():
-            self.folder_tree.delete(item)
-        for index, image_path in enumerate(self.folder_paths):
-            item_id = f"image-{index}"
-            self._folder_items[item_id] = image_path
-            self.folder_tree.insert("", "end", iid=item_id, text=image_path.name, values=("…",))
+    def _load_folder_group(self, start: int) -> None:
         if not self.folder_paths:
-            return False
+            self.current_paths = []
+            self._update_group_navigation()
+            return
+        last_start = ((len(self.folder_paths) - 1) // self.folder_group_size) * self.folder_group_size
+        normalized = min(last_start, max(0, (int(start) // self.folder_group_size) * self.folder_group_size))
+        self.folder_group_start = normalized
+        paths = self.folder_paths[normalized : normalized + self.folder_group_size]
+        self.load_selected_images(paths)
 
-        wanted = {path.resolve() for path in selected_paths}
-        selected_items = [
-            item_id
-            for item_id, image_path in self._folder_items.items()
-            if image_path.resolve() in wanted
-        ][:4]
-        if not selected_items:
-            selected_items = ["image-0"]
-        self._selection_guard = True
-        self.folder_tree.selection_set(*selected_items)
-        self.folder_tree.focus(selected_items[0])
-        self._selection_guard = False
-        self.folder_selection_var.set(
-            f"共 {len(self.folder_paths)} 张 · 已选 {len(selected_items)} 张 · 第 1 张作为参考图"
-        )
-        self.root.after_idle(self._schedule_visible_thumbnails)
-        return True
+    def show_previous_group(self) -> None:
+        if self.folder_group_mode and self.folder_group_start > 0:
+            self._load_folder_group(self.folder_group_start - self.folder_group_size)
+
+    def show_next_group(self) -> None:
+        if (
+            self.folder_group_mode
+            and self.folder_group_start + self.folder_group_size < len(self.folder_paths)
+        ):
+            self._load_folder_group(self.folder_group_start + self.folder_group_size)
+
+    def show_comparison(self) -> None:
+        """Expose the comparison workspace regardless of how images were opened."""
+
+        if len(self.current_paths) < 2:
+            messagebox.showinfo("需要多张图片", "请先打开至少 2 张图片。", parent=self.root)
+            return
+        self.notebook.select(self.compare_tab)
+        self.status_var.set("已切换到多图对比；在图像 1 中框选 ROI 后会逐图匹配和比较。")
 
     def open_images(
         self,
@@ -1430,28 +1419,23 @@ class ImageInspectorWorkspace:
             )
             selected_paths = selected_paths[:4]
 
-        parents = {path.resolve().parent for path in selected_paths}
+        parents = {path.parent for path in selected_paths}
         if len(parents) == 1:
             parent = next(iter(parents))
-            try:
-                browser_paths = discover_images(parent)
-            except ImageFolderError:
-                browser_paths = selected_paths
-            ordered_paths = selected_paths_in_folder_order(browser_paths, selected_paths)
-            if ordered_paths:
-                selected_paths = ordered_paths
             self.last_directory = str(parent)
             label = str(parent)
         else:
-            browser_paths = selected_paths
-            self.last_directory = str(selected_paths[0].resolve().parent)
-            label = f"直接打开 · 来自 {len(parents)} 个文件夹"
-        self._populate_folder_browser(
-            browser_paths,
-            label=label,
-            selected_paths=selected_paths,
-        )
+            # Keep the editable location bar usable even when the native file
+            # dialog returns files from more than one directory.
+            self.last_directory = str(selected_paths[0].parent)
+            label = self.last_directory
+        self.folder_group_mode = False
+        self.folder_group_start = 0
+        self.folder_paths = list(selected_paths)
+        self.folder_path_var.set(label)
         self.load_selected_images(selected_paths)
+        if len(parents) > 1:
+            self.group_status_var.set(f"{len(selected_paths)} 张 · {len(parents)} 个位置")
 
     def open_folder(self, path: Optional[Union[str, Path]] = None) -> None:
         selected = str(path) if path is not None else filedialog.askdirectory(
@@ -1460,69 +1444,44 @@ class ImageInspectorWorkspace:
         )
         if not selected:
             return
+        directory = Path(selected).expanduser().resolve()
         try:
-            paths = discover_images(selected)
+            paths = [image_path.resolve() for image_path in discover_images(directory)]
         except ImageFolderError as exc:
             messagebox.showerror("无法打开图片文件夹", str(exc), parent=self.root)
             return
-        self.last_directory = str(Path(selected).expanduser())
-        if not self._populate_folder_browser(paths, label=self.last_directory):
+        self.last_directory = str(directory)
+        self.folder_path_var.set(str(directory))
+        self.folder_group_mode = True
+        self.folder_group_start = 0
+        self.folder_paths = list(paths)
+        if not paths:
+            self.current_paths = []
             for role in IMAGE_ROLES:
                 self._invalidate_role(role, clear_image=True, refresh=False)
             self._set_image_count(1)
             self._refresh_outputs()
-            self.folder_selection_var.set("该文件夹没有支持的 JPG、PNG、BMP 或 TIFF 图片")
+            self._update_group_navigation()
             self.status_var.set("所选文件夹中没有可预览图片。")
             return
-        self.folder_selection_var.set(f"共 {len(paths)} 张 · 已选 1 张 · 第 1 张作为参考图")
-        self.status_var.set(f"已打开文件夹，共发现 {len(paths)} 张图片。")
-        self.load_selected_images()
-
-    def _on_folder_selection(self, _event: Optional[tk.Event] = None) -> None:
-        if self._selection_guard:
-            return
-        selected = list(self.folder_tree.selection())
-        if len(selected) > 4:
-            self._selection_guard = True
-            self.folder_tree.selection_remove(*selected[4:])
-            self._selection_guard = False
-            selected = selected[:4]
-            self.status_var.set("最多同时查看 4 张图片，多余选择已取消。")
-        if selected:
-            self.folder_selection_var.set(f"已选 {len(selected)} 张 · 按列表顺序排列，第 1 张作为参考图")
-        else:
-            self.folder_selection_var.set("请选择 1–4 张图片；第 1 张作为参考图")
-
-    def _toggle_folder_item(self, event: tk.Event) -> str:
-        item = self.folder_tree.identify_row(event.y)
-        if not item:
-            return "break"
-        selected = set(self.folder_tree.selection())
-        if item in selected:
-            self.folder_tree.selection_remove(item)
-        elif len(selected) < 4:
-            self.folder_tree.selection_add(item)
-            self.folder_tree.focus(item)
-        else:
-            self.status_var.set("最多同时查看 4 张图片。")
-        self._on_folder_selection()
-        return "break"
+        self._load_folder_group(0)
+        self.status_var.set(
+            f"已打开文件夹，共发现 {len(paths)} 张图片；使用上一组/下一组连续查看。"
+        )
 
     def load_selected_images(
         self,
         paths: Optional[Sequence[Union[str, Path]]] = None,
     ) -> None:
-        if paths is None:
-            selected_items = self.folder_tree.selection()
-            selected_paths = selected_paths_in_folder_order(
-                self.folder_paths,
-                (self._folder_items[item] for item in selected_items if item in self._folder_items),
-            )
-        else:
-            selected_paths = [Path(item).expanduser() for item in paths]
+        selected_paths = (
+            list(self.current_paths)
+            if paths is None
+            else [Path(item).expanduser().resolve() for item in paths]
+        )
         if not 1 <= len(selected_paths) <= 4:
-            messagebox.showinfo("请选择图片", "请在文件夹预览中选择 1–4 张图片。", parent=self.root)
+            messagebox.showinfo("请选择图片", "请打开 1–4 张图片。", parent=self.root)
             return
+        self.current_paths = list(selected_paths)
         for role in IMAGE_ROLES:
             self._invalidate_role(role, clear_image=True, refresh=False)
         self._set_image_count(len(selected_paths))
@@ -1530,7 +1489,8 @@ class ImageInspectorWorkspace:
         for role, image_path in zip(self.active_roles, selected_paths):
             self.views[role].set_title(f"{_role_label(role)} · {image_path.name}")
             self._load_async(role, str(image_path), invalidate=False)
-        self.status_var.set(f"正在加载所选 {len(selected_paths)} 张图片…")
+        self._update_group_navigation()
+        self.status_var.set(f"正在加载当前 {len(selected_paths)} 张图片…")
 
     def _load_async(self, role: str, path: str, *, invalidate: bool = True) -> None:
         if invalidate:
@@ -1557,17 +1517,9 @@ class ImageInspectorWorkspace:
     ) -> None:
         if self._closed:
             return
-        executor = (
-            self._thumbnail_executor
-            if kind == "thumbnail"
-            else self._load_executor
-            if kind == "load"
-            else self._executor
-        )
+        executor = self._load_executor if kind == "load" else self._executor
         future = executor.submit(function, *args, **(kwargs or {}))
         self._futures.add(future)
-        if kind == "thumbnail":
-            self._thumbnail_futures.add(future)
         self._pending += 1
         if self._pending == 1:
             self.progress.start(12)
@@ -1586,14 +1538,10 @@ class ImageInspectorWorkspace:
             except queue.Empty:
                 break
             self._futures.discard(future)
-            if kind == "thumbnail":
-                self._thumbnail_futures.discard(future)
             self._pending = max(0, self._pending - 1)
             try:
                 if kind == "load":
                     self._finish_load(token, role, future, meta)
-                elif kind == "thumbnail":
-                    self._finish_thumbnail(token, role, future)
                 elif kind == "analysis":
                     self._finish_analysis(token, role, future)
                 elif kind == "match":
@@ -1603,37 +1551,6 @@ class ImageInspectorWorkspace:
         if self._pending == 0:
             self.progress.stop()
         self._poll_after_id = self.root.after(50, self._poll_background)
-
-    def _finish_thumbnail(self, token: int, item_id: str, future: Future[Any]) -> None:
-        if token != self._folder_token or item_id not in self._folder_items:
-            return
-        if item_id not in self._visible_thumbnail_items:
-            self._thumbnail_requested.discard(item_id)
-            return
-        try:
-            thumbnail = future.result()
-        except Exception:
-            LOGGER.debug("Thumbnail decode failed for %s", self._folder_items[item_id], exc_info=True)
-            if self.folder_tree.exists(item_id):
-                self.folder_tree.set(item_id, "size", "无法预览")
-            return
-        if not self.folder_tree.exists(item_id):
-            return
-        source = thumbnail.path.resolve()
-        self._thumbnail_cache[source] = thumbnail
-        self._thumbnail_cache.move_to_end(source)
-        while len(self._thumbnail_cache) > THUMBNAIL_CACHE_ITEMS:
-            self._thumbnail_cache.popitem(last=False)
-        self._display_thumbnail(item_id, thumbnail)
-
-    def _display_thumbnail(self, item_id: str, thumbnail: Any) -> None:
-        if not self.folder_tree.exists(item_id):
-            return
-        assert ImageTk is not None
-        photo = ImageTk.PhotoImage(thumbnail.image, master=self.root)
-        self._thumbnail_photos[item_id] = photo
-        self.folder_tree.item(item_id, image=photo)
-        self.folder_tree.set(item_id, "size", f"{thumbnail.source_size[0]}×{thumbnail.source_size[1]}")
 
     def _finish_load(self, token: int, role: str, future: Future[Any], meta: Dict[str, Any]) -> None:
         if token != self._load_tokens[role]:
@@ -1728,7 +1645,7 @@ class ImageInspectorWorkspace:
             return
         named = ROI(clipped.x, clipped.y, clipped.width, clipped.height, self.settings.default_roi_name)
         if role != "before" and self.rois["before"] is None:
-            messagebox.showinfo("需要参考 ROI", "请先在参考图 1 中框选 ROI。", parent=self.root)
+            messagebox.showinfo("需要图像 1 ROI", "请先在图像 1 中框选 ROI。", parent=self.root)
             return
         self.rois[role] = named
         view = self.views[role]
@@ -1875,7 +1792,7 @@ class ImageInspectorWorkspace:
     def accept_match(self) -> None:
         roles = [role for role in self.active_roles[1:] if self.match_results[role] is not None]
         if not roles:
-            messagebox.showinfo("尚无匹配", "请先在参考图中框选 ROI 并等待匹配完成。", parent=self.root)
+            messagebox.showinfo("尚无匹配", "请先在图像 1 中框选 ROI 并等待匹配完成。", parent=self.root)
             return
         for role in roles:
             result = self.match_results[role]
@@ -1885,7 +1802,7 @@ class ImageInspectorWorkspace:
             self.views[role].set_roi(confirmed.after_roi, colour="#30D158")
         self._sync_pair_aliases()
         self._refresh_match_status()
-        self.status_var.set(f"已接受 {len(roles)} 个对比 ROI；结论仍以各 ROI 属于同一物体区域为前提。")
+        self.status_var.set(f"已接受 {len(roles)} 个 ROI；结论仍以各 ROI 属于同一物体区域为前提。")
         self._refresh_outputs()
 
     def clear_roi(self) -> None:
@@ -1980,12 +1897,12 @@ class ImageInspectorWorkspace:
         if comparison_sections:
             self._set_text(self.compare_text, ("\n\n" + "─" * 72 + "\n\n").join(comparison_sections))
         else:
-            self._set_text(self.compare_text, "选择 2–4 张图片后，在参考图中框选 ROI 即可显示对比。")
+            self._set_text(self.compare_text, "选择 2–4 张图片后，在图像 1 中框选 ROI 即可显示差异。")
         self._set_text(
             self.conclusion_text,
             ("\n\n" + "─" * 72 + "\n\n").join(conclusion_sections)
             if conclusion_sections
-            else "结论将分别受每张对比图的 ROI 匹配置信度门禁约束。",
+            else "结论将分别受图像 2–4 的 ROI 匹配置信度门禁约束。",
         )
         self._refresh_comparison_table()
         self._refresh_histogram()
@@ -2014,7 +1931,7 @@ class ImageInspectorWorkspace:
             self.compare_tree.delete(item)
         selected_label = self.comparison_role_var.get()
         role = next((item for item in self.active_roles[1:] if _role_label(item) == selected_label), None)
-        self.compare_tree.heading("target", text=selected_label or "对比图")
+        self.compare_tree.heading("target", text=selected_label or "图像 2")
         if role is None:
             self.reference_swatch.configure(background=BORDER)
             self.target_swatch.configure(background=BORDER)
@@ -2144,7 +2061,7 @@ class ImageInspectorWorkspace:
         reference_name = self.images["before"].filename if self.images["before"] is not None else _role_label("before")
         target_name = self.images[role].filename if self.images[role] is not None else _role_label(role)
         return (
-            f"参考图 1 · {reference_name}\n"
+            f"{_role_label('before')} · {reference_name}\n"
             f"Mean RGB: {_triplet(result.before.mean_rgb)}    Median RGB: {_triplet(result.before.median_rgb)}\n"
             f"R/G={_ratio(result.before.r_over_g)}  B/G={_ratio(result.before.b_over_g)}\n"
             f"HSV={_triplet(result.before.hsv_mean, 4)}    Lab={_triplet(result.before.lab_mean, 3)}\n"
@@ -2306,8 +2223,8 @@ class ImageInspectorWorkspace:
         backend = "OpenCV 灰度 NCC" if opencv_available() else "NumPy FFT 灰度 NCC 后备路径（OpenCV 未安装）"
         messagebox.showinfo(
             "图像分析器边界",
-            "本工具通过文件夹浏览选择 1–4 张普通 JPG/JPEG/PNG/BMP/TIFF，检查最终 sRGB 像素。"
-            "多图时第 1 张是参考图，其余图片分别与参考图比较。\n\n"
+            "本工具可直接打开或按文件夹分组浏览 1–4 张普通 JPG/JPEG/PNG/BMP/TIFF，检查最终 sRGB 像素。"
+            "多图时会分别计算图像 1 与图像 2–4 的差异；文件名和角色不会被预设。\n\n"
             f"自动匹配：{backend}；支持轻微平移、很小裁切以及轻微曝光/颜色变化。"
             "旋转、透视、大幅缩放、物体移动、遮挡或景深变化可能导致失败。\n\n"
             "低于配置阈值时只显示原始变化数值，禁止输出确定性颜色改善结论。"
@@ -2358,14 +2275,12 @@ class ImageInspectorWorkspace:
         for future in tuple(self._futures):
             future.cancel()
         self._image_cache.clear()
-        self._thumbnail_cache.clear()
         # Future callbacks capture the workspace in order to enqueue results.
         # Let running workers release those callbacks before Tk widgets and
         # PhotoImages are destroyed; otherwise Tcl objects can be finalized by
         # a worker thread during rapid close/reopen or a test-suite teardown.
         self._executor.shutdown(wait=True, cancel_futures=True)
         self._load_executor.shutdown(wait=True, cancel_futures=True)
-        self._thumbnail_executor.shutdown(wait=True, cancel_futures=True)
 
     def close(self) -> None:
         if self.on_close is not None:

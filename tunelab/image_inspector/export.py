@@ -93,7 +93,7 @@ def _base_row(
     roi = stats.roi
     notes = [f"区域稳定性={stats.stability}（仅表示区域内部颜色一致性，不代表匹配准确度）"]
     if match is not None and not match.reliable:
-        notes.append(match.warning or "低置信度：请手动确认对比图 ROI。")
+        notes.append(match.warning or "低置信度：请手动确认当前图像 ROI。")
     notes.append("按 sRGB 最终输出像素分析；不等同于 RAW、AWB Gain 或 ISP 中间节点数据")
     return {
         "image_role": role,

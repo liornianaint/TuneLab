@@ -50,6 +50,7 @@ class PreviewPane(ttk.Frame):
         self.canvas = tk.Canvas(self, background=CANVAS_BG, highlightthickness=0, height=420)
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", self._schedule_redraw)
+        self.bind("<Destroy>", self._on_destroy)
         self._draw_placeholder()
 
     def _update_meta(self) -> None:
@@ -62,6 +63,12 @@ class PreviewPane(ttk.Frame):
         self.canvas.create_text(width / 2, height / 2, text="等待图片", fill=TERTIARY, font=FONT_BODY)
 
     def clear(self) -> None:
+        if self._redraw_after is not None:
+            try:
+                self.after_cancel(self._redraw_after)
+            except tk.TclError:
+                pass
+            self._redraw_after = None
         self.image_data = None
         self._rgb = None
         self._pil = None
@@ -70,6 +77,22 @@ class PreviewPane(ttk.Frame):
         self._meta_text = "尚未加载"
         self._update_meta()
         self._draw_placeholder()
+
+    def _on_destroy(self, event: tk.Event) -> None:
+        if event.widget is not self:
+            return
+        if self._redraw_after is not None:
+            try:
+                self.after_cancel(self._redraw_after)
+            except tk.TclError:
+                pass
+            self._redraw_after = None
+        # Release the Tcl-backed image while destruction still runs on the
+        # main thread; delayed cyclic GC may otherwise run from a decoder.
+        self._photo = None
+        self._pil = None
+        self._rgb = None
+        self.image_data = None
 
     def set_image(
         self,

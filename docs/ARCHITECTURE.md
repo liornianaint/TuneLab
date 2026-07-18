@@ -28,7 +28,7 @@ Qualcomm XML ───────> Trigger Tree ─> Selected CCT Region ─> O
 - `gamma/`：Gamma 数据模型、Imatest 解析、Qualcomm XML、优化、报告、配置、历史与页面
 - `colorchecker/engine.py`：图片输入适配器，包括 MCC24/几何后备检测、标准/自定义目标取样、统一 dataset 构造与改后整图近似模拟
 - `colorchecker/ui.py`：统一页面复用的原图/改后模拟图/目标图预览组件；不拥有独立工作区、优化状态或 XML 写回
-- `image_inspector/`：普通场景 1–4 图直接打开/文件夹浏览、画布内信息浮层、联动缩放、像素/ROI 分析、匹配与 CSV 导出
+- `image_inspector/`：普通场景 1–4 图直接打开、文件夹地址栏与连续分组、画布内信息浮层、联动缩放、像素/ROI 分析、匹配与 CSV 导出
 - `regression.py`：跨 CCM/Gamma 的 Golden Dataset 发现、验收和汇总
 
 ## 2. 为什么不直接用 CSV 求一个新绝对 CCM
@@ -55,7 +55,7 @@ M_new = A × M_old               # CC13 行主序/列向量
 
 CSV 固定调用统一的 ΔE/ΔC/Δh `optimize_ccm()` 路径。图片模式在 2800K–4500K 内先以 3000K/4000K 实拍 Profile 的 Delta CCM 作为候选方向，再通过 `evaluate_protected_ccm_correction()` 执行与通用优化一致的 Patch Regression、Neutral、Pass Rate 和 Matrix 门禁；候选可确定性回退强度，完全不适用或无安全点时才调用 `optimize_ccm()`。两条路径都固定使用 `M_new = A × M_old`。
 
-ColorChecker 页签只在图片输入时存在，并显示原图、改后仿真和目标图；CSV 输入只显示色差对比页签。接受实拍 Profile 时，整图预览使用由 3000K/4000K Before/After 样本拟合并按 mired 插值的响应模型；通用优化使用 linear-sRGB Delta CCM 近似。预览从不参与求解或安全门禁。
+ColorChecker 页签只在图片输入时存在，并等宽显示原图、改后仿真和目标图；CSV 输入只显示色差对比页签。当 Region 匹配 3000K/4000K 实拍起始矩阵时，预览层默认用 Before/After 响应模型显示 100% 完整实拍还原；独立的 `restoration_plan` 仍仅保存 Patch Regression、Neutral、Pass Rate 和 Matrix 门禁实际接受的安全强度，且是 XML 写回的唯一来源。关闭完整还原开关后，预览使用与 XML 一致的安全强度；Profile 不适用时使用 linear-sRGB Delta CCM 近似。任何预览都不参与求解、安全门禁或 XML 写回。
 
 ## 3. 约束与稳健性
 

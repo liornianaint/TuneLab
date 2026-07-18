@@ -483,9 +483,9 @@ def compare_statistics(
     conclusions = []
     if not reliable:
         conclusions.append("当前 ROI 匹配置信度较低，两个区域可能不是同一物体位置。")
-        conclusions.append("以下颜色变化数值仅供参考；请手动调整并确认对比图 ROI，暂不输出确定性颜色结论。")
+        conclusions.append("以下颜色变化数值仅供参考；请手动调整并确认当前图像 ROI，暂不输出确定性颜色结论。")
     else:
-        condition = "对比图 ROI 已由用户手动确认" if manually_confirmed else (
+        condition = "当前图像 ROI 已由用户手动确认" if manually_confirmed else (
             f"ROI 匹配分数为 {(match_score or 0.0) * 100.0:.1f}%"
         )
         conclusions.append(f"{condition}；如果两个 ROI 属于同一物体区域，可按以下最终输出像素变化解读。")

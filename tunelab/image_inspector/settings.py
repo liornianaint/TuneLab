@@ -70,9 +70,9 @@ def save_image_inspector_settings(
         "version": 1,
         "values": asdict(settings.validated()),
         "descriptions": {
-            "search_range": "参考图 ROI 映射中心附近的匹配搜索范围。",
+            "search_range": "图像 1 ROI 映射中心附近的匹配搜索范围。",
             "match_threshold": "低于该 NCC 分数时禁止输出确定性颜色结论。",
-            "panel_ratio": "文件夹预览栏与图片画布区域的宽度比例。",
+            "panel_ratio": "旧版文件夹侧栏宽度比例（保留用于配置兼容）。",
             "include_full_path": "CSV 是否包含完整本地路径；关闭时仅写文件名。",
         },
     }
