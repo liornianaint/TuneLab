@@ -17,7 +17,6 @@ class ImageInspectorSettings:
     show_histogram: bool = True
     live_pixel: bool = True
     default_roi_name: str = "ROI 1"
-    neutral_mode: bool = False
     window_geometry: str = ""
     panel_ratio: float = 0.24
     include_full_path: bool = False
@@ -34,7 +33,6 @@ class ImageInspectorSettings:
             show_histogram=bool(self.show_histogram),
             live_pixel=bool(self.live_pixel),
             default_roi_name=roi_name,
-            neutral_mode=bool(self.neutral_mode),
             window_geometry=str(self.window_geometry),
             panel_ratio=panel_ratio,
             include_full_path=bool(self.include_full_path),
@@ -70,9 +68,9 @@ def save_image_inspector_settings(
         "version": 1,
         "values": asdict(settings.validated()),
         "descriptions": {
-            "search_range": "图像 1 ROI 映射中心附近的匹配搜索范围。",
+            "search_range": "选区锚点映射中心附近的匹配搜索范围。",
             "match_threshold": "低于该 NCC 分数时禁止输出确定性颜色结论。",
-            "panel_ratio": "旧版文件夹侧栏宽度比例（保留用于配置兼容）。",
+            "panel_ratio": "右侧分析数据栏占主工作区宽度的比例。",
             "include_full_path": "CSV 是否包含完整本地路径；关闭时仅写文件名。",
         },
     }

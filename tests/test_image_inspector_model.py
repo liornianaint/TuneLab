@@ -10,7 +10,7 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise unittest.SkipTest(f"Image dependencies unavailable: {exc}")
 
-from tunelab.image_inspector.model import ROIError, analyse_roi, load_image, pixel_metrics
+from tunelab.image_inspector.model import ROIError, analyse_roi, compare_statistics, load_image, pixel_metrics
 from tunelab.image_inspector.types import ImageData, ROI
 
 
@@ -41,6 +41,9 @@ class ImageInspectorModelTests(unittest.TestCase):
         self.assertAlmostEqual(stats.r_over_g, 0.5)
         self.assertAlmostEqual(stats.b_over_g, 2.0)
         self.assertEqual(stats.stability, "高")
+        expected_luminance = round(0.2126 * 20 + 0.7152 * 40 + 0.0722 * 80)
+        self.assertEqual(int(stats.luminance_histogram[expected_luminance]), 30)
+        self.assertEqual(int(np.sum(stats.luminance_histogram)), 30)
 
     def test_grayscale_roi_keeps_equal_channels(self) -> None:
         gray = np.arange(25, dtype=np.float32).reshape(5, 5)
@@ -85,6 +88,25 @@ class ImageInspectorModelTests(unittest.TestCase):
         np.testing.assert_array_equal(stats.min_rgb, np.min(flat, axis=0))
         np.testing.assert_array_equal(stats.max_rgb, np.max(flat, axis=0))
         self.assertEqual(int(np.sum(stats.histogram[0])), flat.shape[0])
+        self.assertEqual(int(np.sum(stats.luminance_histogram)), flat.shape[0])
+
+    def test_darker_red_image_can_have_lower_mean_r_but_higher_redness_metrics(self) -> None:
+        bright_neutral = analyse_roi(
+            image_data(np.full((6, 7, 3), (180, 180, 180), dtype=np.float32)),
+            ROI(0, 0, 7, 6),
+        )
+        darker_red = analyse_roi(
+            image_data(np.full((6, 7, 3), (150, 50, 50), dtype=np.float32)),
+            ROI(0, 0, 7, 6),
+        )
+        comparison = compare_statistics(bright_neutral, darker_red, reliable=True, match_score=1.0)
+
+        self.assertLess(darker_red.mean_rgb[0], bright_neutral.mean_rgb[0])
+        self.assertGreater(darker_red.normalized_rgb[0], bright_neutral.normalized_rgb[0])
+        self.assertGreater(darker_red.r_over_g, bright_neutral.r_over_g)
+        self.assertGreater(darker_red.lab_mean[1], bright_neutral.lab_mean[1])
+        self.assertGreater(comparison.delta_normalized_rgb[0], 0.0)
+        self.assertTrue(any("R 通道在 RGB 总量中的占比增加" in item for item in comparison.conclusions))
 
     def test_boundary_roi_is_clipped(self) -> None:
         stats = analyse_roi(image_data(np.ones((4, 4, 3)) * 100), ROI(-2, -1, 4, 3))
@@ -137,6 +159,8 @@ class ImageInspectorModelTests(unittest.TestCase):
         self.assertTrue(np.all(gray.display_rgb[..., 0] == gray.display_rgb[..., 1]))
         self.assertIs(gray.rgb, gray.display_rgb)
         self.assertEqual(gray.rgb.dtype, np.uint8)
+        self.assertEqual(int(np.sum(gray.luminance_histogram)), gray.width * gray.height)
+        self.assertEqual(int(gray.luminance_histogram[77]), gray.width * gray.height)
         self.assertIsNotNone(rgba.alpha)
         self.assertEqual(rgba.alpha.dtype, np.uint8)
         self.assertEqual(float(rgba.alpha[0, 0]), 128.0)
@@ -164,6 +188,24 @@ class ImageInspectorModelTests(unittest.TestCase):
             loaded = load_image(path)
         self.assertEqual((loaded.width, loaded.height), (4, 6))
         self.assertTrue(loaded.orientation_applied)
+
+    def test_named_exif_metadata_is_retained_for_the_inspector(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "camera.jpg"
+            image = Image.new("RGB", (12, 8), (90, 100, 110))
+            exif = Image.Exif()
+            exif[271] = "TuneLab Camera"
+            exif[272] = "TL-1"
+            exif[36867] = "2026:07:18 10:20:30"
+            exif[33434] = (1, 125)
+            image.save(path, exif=exif)
+            loaded = load_image(path)
+
+        metadata = dict(loaded.exif)
+        self.assertEqual(metadata["Make"], "TuneLab Camera")
+        self.assertEqual(metadata["Model"], "TL-1")
+        self.assertEqual(metadata["DateTimeOriginal"], "2026:07:18 10:20:30")
+        self.assertIn("ExposureTime", metadata)
 
 
 if __name__ == "__main__":

@@ -74,6 +74,10 @@ class ImageInspectorExportTests(unittest.TestCase):
         self.assertAlmostEqual(rows[1]["delta_r"], 10.0)
         self.assertAlmostEqual(rows[1]["delta_g"], -2.0)
         self.assertAlmostEqual(rows[1]["delta_b_percent"], 100.0 / 14.0)
+        self.assertAlmostEqual(
+            rows[1]["delta_normalized_r"],
+            self.after_stats.normalized_rgb[0] - self.before_stats.normalized_rgb[0],
+        )
 
     def test_utf8_bom_and_chinese_roi_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

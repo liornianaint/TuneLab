@@ -28,6 +28,7 @@ from ..ui_foundation import (
     MUTED,
     PANEL_BG,
     SEPARATOR,
+    SIDEBAR_BG,
     SUBTLE_SEPARATOR,
     SUCCESS,
     TERTIARY,
@@ -38,7 +39,13 @@ from ..ui_foundation import (
     elide_canvas_text,
     fit_window_to_screen,
 )
-from .browser import ImageFolderError, discover_images
+from .browser import (
+    ImageFolderError,
+    ThumbnailData,
+    discover_images,
+    load_thumbnail,
+    selected_paths_in_folder_order,
+)
 from .cache import ImageDataCache
 from .constants import (
     MATCH_SEARCH_RANGES,
@@ -95,14 +102,6 @@ def _ratio(value: Optional[float]) -> str:
     return "N/A（分母为 0）" if value is None else f"{value:.4f}"
 
 
-def _triplet(values: Tuple[float, float, float], digits: int = 2) -> str:
-    return " / ".join(f"{value:.{digits}f}" for value in values)
-
-
-def _percent_triplet(values: Tuple[float, float, float]) -> str:
-    return " / ".join(f"{value * 100.0:.2f}%" for value in values)
-
-
 class ImageCanvas(ttk.Frame):
     """Viewport-tiled image renderer with exact original-coordinate mapping."""
 
@@ -130,8 +129,10 @@ class ImageCanvas(ttk.Frame):
         self._photo_key: Optional[Tuple[Any, ...]] = None
         self._render_after_id: Optional[str] = None
         self._motion_after_id: Optional[str] = None
+        self._initial_fit_after_id: Optional[str] = None
         self._motion_position: Optional[Tuple[int, int]] = None
         self._needs_initial_fit = False
+        self._fit_mode = True
         self.zoom = 1.0
         self.pan_x = 0.0
         self.pan_y = 0.0
@@ -203,23 +204,48 @@ class ImageCanvas(ttk.Frame):
         )
         self.roi = None
         self.sample_point = None
-        self._needs_initial_fit = True
+        self.request_initial_fit()
         self._update_zoom_label()
-        self.after_idle(self.fit)
 
     def clear_image(self) -> None:
+        self._cancel_initial_fit()
         self.image_data = None
         self._pil_image = None
         self._photo = None
         self._photo_key = None
         self.roi = None
         self.sample_point = None
+        self.zoom = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self._needs_initial_fit = False
+        self._fit_mode = True
         self.meta_var.set("尚未打开图片")
         self.zoom_var.set("缩放 —")
         self.canvas.delete("all")
         self._draw_overlays()
         self.horizontal.set(0.0, 1.0)
         self.vertical.set(0.0, 1.0)
+
+    def _cancel_initial_fit(self) -> None:
+        if self._initial_fit_after_id is not None:
+            try:
+                self.after_cancel(self._initial_fit_after_id)
+            except tk.TclError:
+                pass
+            self._initial_fit_after_id = None
+
+    def request_initial_fit(self) -> None:
+        """Fit after the canvas geometry has stopped changing briefly."""
+
+        self._needs_initial_fit = True
+        self._fit_mode = True
+        self._cancel_initial_fit()
+        self._initial_fit_after_id = self.after(80, self._finish_initial_fit)
+
+    def _finish_initial_fit(self) -> None:
+        self._initial_fit_after_id = None
+        self.fit()
 
     def set_roi(self, roi: Optional[ROI], *, colour: str = "#30D158") -> None:
         self.roi = roi
@@ -233,18 +259,28 @@ class ImageCanvas(ttk.Frame):
     def fit(self) -> None:
         if self.image_data is None:
             return
-        width = max(1, self.canvas.winfo_width())
-        height = max(1, self.canvas.winfo_height())
+        self._cancel_initial_fit()
+        width = self.canvas.winfo_width()
+        height = self.canvas.winfo_height()
+        if width <= 16 or height <= 16:
+            # A hidden/newly gridded canvas reports 1×1.  Treat that as a
+            # deferred fit instead of committing an arbitrary 0.01% zoom.
+            self._needs_initial_fit = True
+            return
         self.zoom = max(0.0001, min((width - 16) / self.image_data.width, (height - 16) / self.image_data.height))
         self.pan_x = (width - self.image_data.width * self.zoom) / 2.0
         self.pan_y = (height - self.image_data.height * self.zoom) / 2.0
         self._needs_initial_fit = False
+        self._fit_mode = True
         self._update_zoom_label()
         self._schedule_render(immediate=True)
 
     def one_to_one(self) -> None:
         if self.image_data is None:
             return
+        self._cancel_initial_fit()
+        self._needs_initial_fit = False
+        self._fit_mode = False
         width = max(1, self.canvas.winfo_width())
         height = max(1, self.canvas.winfo_height())
         self.zoom = 1.0
@@ -285,8 +321,8 @@ class ImageCanvas(ttk.Frame):
         return self.pan_x + image_x * self.zoom, self.pan_y + image_y * self.zoom
 
     def _on_configure(self, _event: tk.Event) -> None:
-        if self._needs_initial_fit:
-            self.fit()
+        if self._needs_initial_fit or self._fit_mode:
+            self.request_initial_fit()
         else:
             self._clamp_pan()
             self._schedule_render()
@@ -576,6 +612,9 @@ class ImageCanvas(ttk.Frame):
 
         if self.image_data is None:
             return
+        self._cancel_initial_fit()
+        self._needs_initial_fit = False
+        self._fit_mode = False
         canvas_x = viewport_x * max(1, self.canvas.winfo_width())
         canvas_y = viewport_y * max(1, self.canvas.winfo_height())
         image_x = normalized_x * self.image_data.width
@@ -651,6 +690,9 @@ class ImageCanvas(ttk.Frame):
         self.roi_callback(self.role, roi)
 
     def _on_pan_press(self, event: tk.Event) -> str:
+        self._cancel_initial_fit()
+        self._needs_initial_fit = False
+        self._fit_mode = False
         self._pan_start = (event.x, event.y, self.pan_x, self.pan_y)
         self.canvas.configure(cursor="fleur")
         self._selection_image_start = None
@@ -685,7 +727,7 @@ class ImageCanvas(ttk.Frame):
     def _on_destroy(self, event: tk.Event) -> None:
         if event.widget is not self.canvas:
             return
-        for after_id in (self._render_after_id, self._motion_after_id):
+        for after_id in (self._render_after_id, self._motion_after_id, self._initial_fit_after_id):
             if after_id is not None:
                 try:
                     self.after_cancel(after_id)
@@ -693,6 +735,7 @@ class ImageCanvas(ttk.Frame):
                     pass
         self._render_after_id = None
         self._motion_after_id = None
+        self._initial_fit_after_id = None
         # ImageTk objects must be released by the Tk/main thread.  Keeping a
         # dead PhotoImage on a workspace cycle lets a later worker-thread GC
         # trigger Tcl_AsyncDelete on macOS during rapid close/reopen.
@@ -701,9 +744,306 @@ class ImageCanvas(ttk.Frame):
         self._photo_key = None
 
 
+class FolderThumbnailStrip(ttk.Frame):
+    """macOS-style vertical file browser with lazy thumbnail requests."""
+
+    PREVIEW_SIZE = (78, 58)
+    CARD_WIDTH = 246
+    CARD_HEIGHT = 78
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        select_callback: Callable[[Path, bool, bool], None],
+        request_callback: Callable[[Sequence[Tuple[int, Path]]], None],
+        collapse_callback: Callable[[], None],
+    ) -> None:
+        super().__init__(master, padding=(8, 8), style="InspectorSidebar.TFrame")
+        self.select_callback = select_callback
+        self.request_callback = request_callback
+        self.collapse_callback = collapse_callback
+        self.paths: list[Path] = []
+        self.cards: list[tk.Canvas] = []
+        self._photos: Dict[int, Any] = {}
+        self._requested: set[int] = set()
+        self._request_after_id: Optional[str] = None
+
+        header = ttk.Frame(self, style="InspectorSidebar.TFrame")
+        header.pack(fill="x", pady=(1, 8))
+        ttk.Label(header, text="文件", style="InspectorSidebarTitle.TLabel").pack(side="left")
+        self.count_var = tk.StringVar(value="0 张")
+        ttk.Button(
+            header,
+            text="‹",
+            width=3,
+            command=self.collapse_callback,
+            style="Icon.TButton",
+        ).pack(side="right")
+        ttk.Label(header, textvariable=self.count_var, style="InspectorSidebarMuted.TLabel").pack(
+            side="right", padx=(0, 5)
+        )
+
+        body = ttk.Frame(self, style="InspectorSidebar.TFrame")
+        body.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(
+            body,
+            width=self.CARD_WIDTH + 14,
+            background=SIDEBAR_BG,
+            highlightthickness=0,
+        )
+        self.scrollbar = ttk.Scrollbar(
+            body,
+            orient="vertical",
+            command=self._yview,
+            style="InspectorSidebar.Vertical.TScrollbar",
+        )
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.scrollbar.grid(row=0, column=1, sticky="ns", padx=(3, 0))
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        self.inner = ttk.Frame(self.canvas, style="InspectorSidebar.TFrame")
+        self._window_item = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", self._on_inner_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind("<Button-4>", lambda _event: self._scroll_units(-2))
+        self.canvas.bind("<Button-5>", lambda _event: self._scroll_units(2))
+        ttk.Label(
+            self,
+            text="点按单选 · ⌘/Ctrl 多选",
+            style="InspectorSidebarMuted.TLabel",
+            anchor="center",
+        ).pack(fill="x", pady=(6, 0))
+
+    @staticmethod
+    def _rounded_rectangle(canvas: tk.Canvas, width: int, height: int) -> int:
+        radius = 11
+        points = (
+            5 + radius, 4,
+            width - 5 - radius, 4,
+            width - 5, 4,
+            width - 5, 4 + radius,
+            width - 5, height - 4 - radius,
+            width - 5, height - 4,
+            width - 5 - radius, height - 4,
+            5 + radius, height - 4,
+            5, height - 4,
+            5, height - 4 - radius,
+            5, 4 + radius,
+            5, 4,
+        )
+        return canvas.create_polygon(
+            points,
+            smooth=True,
+            splinesteps=24,
+            fill=SIDEBAR_BG,
+            outline="",
+            tags=("selection-background",),
+        )
+
+    def set_paths(self, paths: Sequence[Path]) -> None:
+        self.paths = [Path(path) for path in paths]
+        self._photos.clear()
+        self._requested.clear()
+        for child in self.inner.winfo_children():
+            child.destroy()
+        self.cards = []
+        self.count_var.set(f"{len(self.paths)} 张")
+        for index, path in enumerate(self.paths):
+            card = tk.Canvas(
+                self.inner,
+                width=self.CARD_WIDTH,
+                height=self.CARD_HEIGHT,
+                background=SIDEBAR_BG,
+                highlightthickness=0,
+                cursor="hand2",
+            )
+            card.grid(row=index, column=0, sticky="w", padx=1, pady=1)
+            self._rounded_rectangle(card, self.CARD_WIDTH, self.CARD_HEIGHT)
+            card.create_rectangle(
+                11,
+                10,
+                11 + self.PREVIEW_SIZE[0],
+                10 + self.PREVIEW_SIZE[1],
+                fill="#D8D8DC",
+                outline=SUBTLE_SEPARATOR,
+                tags=("thumbnail-placeholder",),
+            )
+            card.create_text(
+                11 + self.PREVIEW_SIZE[0] / 2,
+                10 + self.PREVIEW_SIZE[1] / 2,
+                text="载入中…",
+                fill=MUTED,
+                font=FONT_SMALL,
+                tags=("thumbnail-placeholder",),
+            )
+            card.create_text(
+                99,
+                19,
+                text=elide_canvas_text(card, path.name, FONT_BODY_BOLD, self.CARD_WIDTH - 108),
+                anchor="nw",
+                fill=INK,
+                font=FONT_BODY_BOLD,
+                tags=("thumbnail-filename",),
+            )
+            card.create_text(
+                99,
+                44,
+                text="读取尺寸中…",
+                anchor="nw",
+                fill=MUTED,
+                font=FONT_SMALL,
+                tags=("thumbnail-meta",),
+            )
+            card.bind(
+                "<Button-1>",
+                lambda event, selected=path: self._select_path(event, selected),
+            )
+            card.bind("<MouseWheel>", self._on_mousewheel)
+            self.cards.append(card)
+        self.canvas.yview_moveto(0.0)
+        self.after_idle(self._schedule_visible_request)
+
+    def _select_path(self, event: tk.Event, path: Path) -> str:
+        state = int(getattr(event, "state", 0))
+        shift = bool(state & 0x0001)
+        # Control is conventional on Windows/Linux; Aqua reports Command as
+        # Mod2. Supporting both keeps the macOS selection model cross-platform.
+        additive = bool(state & 0x0004 or state & 0x0010)
+        self.select_callback(path, additive, shift)
+        return "break"
+
+    def set_active_paths(self, paths: Sequence[Path]) -> None:
+        active = {Path(path) for path in paths}
+        first_active: Optional[int] = None
+        for index, card in enumerate(self.cards):
+            selected = self.paths[index] in active
+            card.itemconfigure("selection-background", fill=BLUE if selected else SIDEBAR_BG)
+            card.itemconfigure("thumbnail-filename", fill="white" if selected else INK)
+            card.itemconfigure("thumbnail-meta", fill="#E9F3FF" if selected else MUTED)
+            if selected and first_active is None:
+                first_active = index
+        if first_active is not None:
+            self.after_idle(lambda index=first_active: self._reveal_index(index))
+
+    def _reveal_index(self, index: int) -> None:
+        if not (0 <= index < len(self.cards)):
+            return
+        top = index * (self.CARD_HEIGHT + 2)
+        bottom = top + self.CARD_HEIGHT + 2
+        viewport_top = float(self.canvas.canvasy(0))
+        viewport_bottom = viewport_top + max(1, self.canvas.winfo_height())
+        total_height = max(1, self.inner.winfo_reqheight())
+        if top < viewport_top:
+            self.canvas.yview_moveto(top / total_height)
+        elif bottom > viewport_bottom:
+            self.canvas.yview_moveto(max(0.0, (bottom - self.canvas.winfo_height()) / total_height))
+        self._schedule_visible_request()
+
+    def apply_thumbnail(self, index: int, thumbnail: ThumbnailData) -> None:
+        if not (0 <= index < len(self.cards)) or self.paths[index] != thumbnail.path:
+            return
+        assert ImageTk is not None
+        photo = ImageTk.PhotoImage(thumbnail.image, master=self.cards[index])
+        self._photos[index] = photo
+        card = self.cards[index]
+        card.delete("thumbnail-placeholder")
+        card.delete("thumbnail-image")
+        card.create_image(
+            11 + self.PREVIEW_SIZE[0] / 2,
+            10 + self.PREVIEW_SIZE[1] / 2,
+            image=photo,
+            tags=("thumbnail-image",),
+        )
+        card.itemconfigure(
+            "thumbnail-meta",
+            text=f"{thumbnail.source_size[0]} × {thumbnail.source_size[1]}",
+        )
+        card.tag_raise("thumbnail-image", "selection-background")
+        card.tag_raise("thumbnail-filename")
+        card.tag_raise("thumbnail-meta")
+
+    def mark_thumbnail_failed(self, index: int) -> None:
+        if 0 <= index < len(self.cards):
+            card = self.cards[index]
+            card.delete("thumbnail-placeholder")
+            card.create_text(
+                11 + self.PREVIEW_SIZE[0] / 2,
+                10 + self.PREVIEW_SIZE[1] / 2,
+                text="无法预览",
+                fill=RED,
+                font=FONT_SMALL,
+                tags=("thumbnail-placeholder",),
+            )
+
+    def _on_inner_configure(self, _event: tk.Event) -> None:
+        bounds = self.canvas.bbox(self._window_item)
+        if bounds is not None:
+            self.canvas.configure(scrollregion=bounds)
+        self._schedule_visible_request()
+
+    def _on_canvas_configure(self, event: tk.Event) -> None:
+        self.canvas.itemconfigure(self._window_item, width=max(self.CARD_WIDTH + 4, event.width))
+        self._schedule_visible_request()
+
+    def _yview(self, *args: str) -> None:
+        self.canvas.yview(*args)
+        self._schedule_visible_request()
+
+    def _scroll_units(self, units: int) -> str:
+        self.canvas.yview_scroll(units, "units")
+        self._schedule_visible_request()
+        return "break"
+
+    def _on_mousewheel(self, event: tk.Event) -> str:
+        delta = getattr(event, "delta", 0)
+        if delta:
+            units = -2 if delta > 0 else 2
+            return self._scroll_units(units)
+        return "break"
+
+    def _schedule_visible_request(self) -> None:
+        if self._request_after_id is not None:
+            try:
+                self.after_cancel(self._request_after_id)
+            except tk.TclError:
+                pass
+        self._request_after_id = self.after_idle(self._request_visible)
+
+    def _request_visible(self) -> None:
+        self._request_after_id = None
+        if not self.paths:
+            return
+        top = max(0.0, float(self.canvas.canvasy(0)))
+        bottom = top + max(1, self.canvas.winfo_height())
+        first = max(0, int(top // (self.CARD_HEIGHT + 2)) - 3)
+        last = min(len(self.paths), int(math.ceil(bottom / (self.CARD_HEIGHT + 2))) + 4)
+        pending = [
+            (index, self.paths[index])
+            for index in range(first, last)
+            if index not in self._requested
+        ]
+        if pending:
+            self._requested.update(index for index, _path in pending)
+            self.request_callback(pending)
+
+    def shutdown(self) -> None:
+        if self._request_after_id is not None:
+            try:
+                self.after_cancel(self._request_after_id)
+            except tk.TclError:
+                pass
+            self._request_after_id = None
+        self._photos.clear()
+
+
 class HistogramCanvas(ttk.Frame):
-    def __init__(self, master: tk.Misc) -> None:
+    def __init__(self, master: tk.Misc, *, luminance: bool = False) -> None:
         super().__init__(master, style="InspectorCard.TFrame")
+        self.luminance = luminance
         self.histogram: Optional[Any] = None
         self.scope = "尚无数据"
         self._after_id: Optional[str] = None
@@ -726,7 +1066,8 @@ class HistogramCanvas(ttk.Frame):
         self.canvas.delete("all")
         width = max(20, self.canvas.winfo_width())
         height = max(20, self.canvas.winfo_height())
-        self.canvas.create_text(12, 10, text=f"RGB 直方图 · {self.scope}", anchor="nw", fill=INK, font=FONT_CARD_TITLE)
+        title = "亮度直方图" if self.luminance else "RGB 直方图"
+        self.canvas.create_text(12, 10, text=f"{title} · {self.scope}", anchor="nw", fill=INK, font=FONT_CARD_TITLE)
         left, top, right, bottom = 42, 42, width - 16, height - 28
         self.canvas.create_rectangle(left, top, right, bottom, outline=BORDER)
         if self.histogram is None or right <= left or bottom <= top:
@@ -736,11 +1077,15 @@ class HistogramCanvas(ttk.Frame):
         maximum = float(np.max(values))
         if maximum <= 0:
             return
-        for channel, colour in enumerate(("#FF453A", "#30D158", "#0A84FF")):
+        plots = ((values.reshape(-1), INK),) if self.luminance else tuple(
+            (values[channel], colour)
+            for channel, colour in enumerate(("#FF453A", "#30D158", "#0A84FF"))
+        )
+        for channel_values, colour in plots:
             points = []
             for index in range(256):
                 x = left + index / 255.0 * (right - left)
-                y = bottom - values[channel, index] / maximum * (bottom - top)
+                y = bottom - channel_values[index] / maximum * (bottom - top)
                 points.extend((x, y))
             self.canvas.create_line(*points, fill=colour, width=2)
         self.canvas.create_text(left, bottom + 7, text="0", anchor="nw", fill=MUTED, font=FONT_SMALL)
@@ -776,18 +1121,26 @@ class ImageInspectorWorkspace:
         self.rois: Dict[str, Optional[ROI]] = {role: None for role in IMAGE_ROLES}
         self.roi_statistics: Dict[str, Optional[ROIStatistics]] = {role: None for role in IMAGE_ROLES}
         self.fixed_pixels: Dict[str, Optional[PixelMetrics]] = {role: None for role in IMAGE_ROLES}
-        self.match_results: Dict[str, Optional[MatchResult]] = {role: None for role in COMPARISON_ROLES}
+        self.match_results: Dict[str, Optional[MatchResult]] = {role: None for role in IMAGE_ROLES}
         self.comparisons: Dict[str, Optional[ComparisonResult]] = {role: None for role in COMPARISON_ROLES}
+        self.roi_anchor_role: Optional[str] = None
         # Compatibility aliases for the first comparison while the public data
         # model remains pair-oriented.
         self.match_result: Optional[MatchResult] = None
         self.comparison: Optional[ComparisonResult] = None
         self.dual_mode = False
         self.folder_paths: list[Path] = []
+        self.folder_groups: list[list[Path]] = []
+        self.folder_group_index = 0
         self.current_paths: list[Path] = []
         self.folder_group_start = 0
         self.folder_group_size = len(IMAGE_ROLES)
         self.folder_group_mode = False
+        self.folder_groups_aligned = True
+        self.folder_selection_anchor: Optional[Path] = None
+        self._folder_browser_available = False
+        self._folder_thumbnail_generation = 0
+        self._metric_mode = "none"
         self._closed = False
         self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="TuneLabImage")
         self._load_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="TuneLabDecode")
@@ -796,9 +1149,10 @@ class ImageInspectorWorkspace:
         self._pending = 0
         self._load_tokens = {role: 0 for role in IMAGE_ROLES}
         self._analysis_tokens = {role: 0 for role in IMAGE_ROLES}
-        self._match_tokens = {role: 0 for role in COMPARISON_ROLES}
+        self._match_tokens = {role: 0 for role in IMAGE_ROLES}
         self._matching_roles: set[str] = set()
         self._poll_after_id: Optional[str] = None
+        self._fit_after_id: Optional[str] = None
         self._image_cache = ImageDataCache()
 
         self._configure_styles()
@@ -813,7 +1167,7 @@ class ImageInspectorWorkspace:
                 pass
         if not opencv_available():
             self.status_var.set(
-                "OpenCV 未能导入：像素与 ROI 分析仍可使用，自动匹配暂用较慢的 NumPy FFT 后备路径。"
+                "OpenCV 未能导入：像素与选区统计仍可使用，自动匹配暂用较慢的 NumPy FFT 后备路径。"
             )
         self._poll_after_id = self.root.after(50, self._poll_background)
 
@@ -830,10 +1184,38 @@ class ImageInspectorWorkspace:
             darkcolor=SUBTLE_SEPARATOR,
         )
         style.configure("InspectorSurface.TFrame", background=PANEL)
+        style.configure("InspectorSidebar.TFrame", background=SIDEBAR_BG, borderwidth=0)
+        style.configure(
+            "InspectorSidebarTitle.TLabel",
+            background=SIDEBAR_BG,
+            foreground=INK,
+            font=FONT_CARD_TITLE,
+        )
+        style.configure(
+            "InspectorSidebarMuted.TLabel",
+            background=SIDEBAR_BG,
+            foreground=MUTED,
+            font=FONT_SMALL,
+        )
+        style.configure(
+            "InspectorSidebar.Vertical.TScrollbar",
+            width=8,
+            arrowsize=0,
+            background="#C7C7CC",
+            troughcolor=SIDEBAR_BG,
+            borderwidth=0,
+        )
         style.configure("InspectorImage.TFrame", background=CANVAS_BG, borderwidth=0, relief="flat")
         style.configure("InspectorCard.TLabel", background=PANEL, foreground=INK, font=FONT_BODY)
         style.configure("InspectorMutedCard.TLabel", background=PANEL, foreground=MUTED, font=FONT_SMALL)
         style.configure("InspectorCardTitle.TLabel", background=PANEL, foreground=INK, font=FONT_CARD_TITLE)
+        style.configure(
+            "InspectorMetric.TLabel",
+            background=PANEL,
+            foreground=INK,
+            font=FONT_SMALL,
+            padding=(1, 0),
+        )
         style.configure("InspectorTitle.TLabel", background=BG, foreground=INK, font=FONT_TITLE)
         style.configure("InspectorSubtitle.TLabel", background=BG, foreground=MUTED, font=FONT_BODY)
         style.configure("InspectorEyebrow.TLabel", background=BG, foreground=TERTIARY, font=FONT_NAV_SECTION)
@@ -891,23 +1273,15 @@ class ImageInspectorWorkspace:
         self.view_menu.add_command(label="放大", command=self.zoom_in)
         self.view_menu.add_command(label="缩小", command=self.zoom_out)
         self.view_menu.add_separator()
+        self.view_menu.add_command(label="显示 / 隐藏图库", command=self.toggle_folder_sidebar)
+        self.view_menu.add_command(label="显示 / 隐藏信息栏", command=self.toggle_analysis_sidebar)
+        self.view_menu.add_separator()
         self.view_menu.add_command(label="上一组图片", command=self.show_previous_group)
         self.view_menu.add_command(label="下一组图片", command=self.show_next_group)
-        self.view_menu.add_separator()
-        self.view_menu.add_checkbutton(
-            label="实时显示鼠标像素",
-            variable=self.live_pixel_var,
-            command=self._settings_changed,
-        )
-        self.view_menu.add_checkbutton(
-            label="显示 RGB 直方图",
-            variable=self.show_histogram_var,
-            command=self._on_histogram_visibility_changed,
-        )
         menu.add_cascade(label="视图", menu=self.view_menu)
 
         self.analysis_menu = tk.Menu(menu, tearoff=False)
-        self.analysis_menu.add_command(label="清除 ROI", command=self.clear_roi)
+        self.analysis_menu.add_command(label="清除选区", command=self.clear_roi)
         self.analysis_menu.add_command(label="接受当前全部匹配", command=self.accept_match)
         menu.add_cascade(label="分析", menu=self.analysis_menu)
 
@@ -967,11 +1341,6 @@ class ImageInspectorWorkspace:
         header = ttk.Frame(self.outer, style="InspectorRoot.TFrame")
         header.pack(fill="x", pady=(0, 6))
         ttk.Label(header, text="图像分析器", style="InspectorTitle.TLabel").pack(side="left")
-        ttk.Label(
-            header,
-            text="地址栏分组浏览 · 1–4 图并排检查 · 像素、ROI、直方图与匹配置信度",
-            style="InspectorSubtitle.TLabel",
-        ).pack(side="left", padx=(14, 0), pady=(5, 0))
         if self.on_home is not None:
             ttk.Button(header, text="返回首页", command=self.on_home, style="Quiet.TButton").pack(side="right")
 
@@ -984,7 +1353,7 @@ class ImageInspectorWorkspace:
         ttk.Button(toolbar, text="+", command=self.zoom_in, width=3, style="Quiet.TButton").grid(row=0, column=3, padx=(0, 4))
         ttk.Button(toolbar, text="1:1", command=self.one_to_one, style="Quiet.TButton").grid(row=0, column=4, padx=(0, 4))
         ttk.Button(toolbar, text="适应窗口", command=self.fit_images, style="Quiet.TButton").grid(row=0, column=5, padx=(0, 4))
-        ttk.Button(toolbar, text="清除 ROI", command=self.clear_roi, style="Quiet.TButton").grid(row=0, column=6, padx=(0, 8))
+        ttk.Button(toolbar, text="清除选区", command=self.clear_roi, style="Quiet.TButton").grid(row=0, column=6, padx=(0, 8))
         ttk.Label(toolbar, text="搜索", style="InspectorCard.TLabel").grid(row=0, column=7, padx=(0, 4))
         self.search_range_var = tk.StringVar(value=f"±{self.settings.search_range}")
         self.search_combo = ttk.Combobox(
@@ -996,30 +1365,17 @@ class ImageInspectorWorkspace:
         )
         self.search_combo.grid(row=0, column=8, padx=(0, 8))
         self.search_combo.bind("<<ComboboxSelected>>", lambda _event: self._settings_changed())
-        self.neutral_mode_var = tk.BooleanVar(value=self.settings.neutral_mode)
-        ttk.Checkbutton(
-            toolbar,
-            text="将当前 ROI 视为中性区域",
-            variable=self.neutral_mode_var,
-            command=self._on_neutral_mode_changed,
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0), padx=(0, 8))
         self.live_pixel_var = tk.BooleanVar(value=self.settings.live_pixel)
         self.show_histogram_var = tk.BooleanVar(value=self.settings.show_histogram)
         self.include_full_path_var = tk.BooleanVar(value=self.settings.include_full_path)
         # Rebuild now that the Tk variable exists; Tk checkbutton menu variables
         # cannot be created safely before _build_ui.
         self._build_menu()
-        self.match_status_var = tk.StringVar(value="ROI Match Score: —")
-        self.match_status_label = ttk.Label(
-            toolbar,
-            textvariable=self.match_status_var,
-            style="InspectorMatchLow.TLabel",
-            wraplength=760,
-        )
-        self.match_status_label.grid(row=1, column=4, columnspan=5, sticky="w", pady=(4, 0), padx=(5, 5))
+        self.match_status_var = tk.StringVar(value="匹配：—")
         toolbar.columnconfigure(9, weight=1)
         self.progress = ttk.Progressbar(toolbar, mode="indeterminate", length=80)
-        self.progress.grid(row=1, column=9, sticky="e", pady=(4, 0))
+        self.progress.grid(row=0, column=9, sticky="e")
+        self.progress.grid_remove()
 
         location_bar = ttk.Frame(self.outer, padding=(9, 7), style="InspectorCard.TFrame")
         self.location_bar = location_bar
@@ -1029,6 +1385,14 @@ class ImageInspectorWorkspace:
         self.folder_address_entry = ttk.Entry(location_bar, textvariable=self.folder_path_var)
         self.folder_address_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8))
         self.folder_address_entry.bind("<Return>", self._open_folder_from_address)
+        self.folder_sidebar_toggle_button = ttk.Button(
+            location_bar,
+            text="图库",
+            command=self.toggle_folder_sidebar,
+            state="disabled",
+            style="Quiet.TButton",
+        )
+        self.folder_sidebar_toggle_button.grid(row=0, column=2, padx=(0, 4))
         self.previous_group_button = ttk.Button(
             location_bar,
             text="‹ 上一组",
@@ -1036,7 +1400,7 @@ class ImageInspectorWorkspace:
             state="disabled",
             style="Quiet.TButton",
         )
-        self.previous_group_button.grid(row=0, column=2, padx=(0, 4))
+        self.previous_group_button.grid(row=0, column=3, padx=(0, 4))
         self.group_status_var = tk.StringVar(value="尚未载入图片")
         ttk.Label(
             location_bar,
@@ -1044,7 +1408,7 @@ class ImageInspectorWorkspace:
             style="InspectorMutedCard.TLabel",
             width=22,
             anchor="center",
-        ).grid(row=0, column=3, padx=4)
+        ).grid(row=0, column=4, padx=4)
         self.next_group_button = ttk.Button(
             location_bar,
             text="下一组 ›",
@@ -1052,20 +1416,31 @@ class ImageInspectorWorkspace:
             state="disabled",
             style="Quiet.TButton",
         )
-        self.next_group_button.grid(row=0, column=4, padx=(4, 4))
-        self.open_comparison_button = ttk.Button(
+        self.next_group_button.grid(row=0, column=5, padx=(4, 4))
+        self.sidebar_toggle_button = ttk.Button(
             location_bar,
-            text="查看多图对比",
-            command=self.show_comparison,
-            state="disabled",
+            text="收起信息",
+            command=self.toggle_analysis_sidebar,
+            style="Quiet.TButton",
         )
-        self.open_comparison_button.grid(row=0, column=5, padx=(4, 0))
+        self.sidebar_toggle_button.grid(row=0, column=6, padx=(6, 0))
         location_bar.columnconfigure(1, weight=1)
 
-        self.main_pane = ttk.Panedwindow(self.outer, orient="vertical")
+        self.main_pane = ttk.Panedwindow(self.outer, orient="horizontal")
         self.main_pane.pack(fill="both", expand=True)
-        self.viewer_pane = ttk.Panedwindow(self.main_pane, orient="horizontal")
-        self.image_grid = ttk.Frame(self.viewer_pane, style="InspectorRoot.TFrame")
+        self.viewer_pane = self.main_pane
+        self.viewer_container = ttk.Frame(self.main_pane, style="InspectorRoot.TFrame")
+        self.image_grid = ttk.Frame(self.viewer_container, style="InspectorRoot.TFrame")
+        self.image_grid.grid(row=0, column=0, sticky="nsew")
+        self.metrics_grid = ttk.Frame(
+            self.viewer_container,
+            padding=(1, 0),
+            style="InspectorSurface.TFrame",
+        )
+        self.metrics_grid.grid(row=1, column=0, sticky="ew", pady=(1, 0))
+        self.viewer_container.columnconfigure(0, weight=1)
+        self.viewer_container.rowconfigure(0, weight=1)
+        self.viewer_container.rowconfigure(1, weight=0)
         self.views: Dict[str, ImageCanvas] = {}
         for role in IMAGE_ROLES:
             self.views[role] = ImageCanvas(
@@ -1078,92 +1453,269 @@ class ImageInspectorWorkspace:
             )
         self.before_view = self.views["before"]
         self.after_view = self.views["after"]
-        self.viewer_pane.add(self.image_grid, weight=4)
-        self.main_pane.add(self.viewer_pane, weight=3)
-
-        self.notebook = ttk.Notebook(self.main_pane)
-        self.pixel_tab = ttk.Frame(self.notebook, padding=6, style="InspectorRoot.TFrame")
-        self.compare_tab = ttk.Frame(self.notebook, padding=6, style="InspectorRoot.TFrame")
-        self.histogram_tab = ttk.Frame(self.notebook, padding=6, style="InspectorRoot.TFrame")
-        self.conclusion_tab = ttk.Frame(self.notebook, padding=6, style="InspectorRoot.TFrame")
-        self.notebook.add(self.pixel_tab, text="像素 / ROI 数据")
-        self.notebook.add(self.compare_tab, text="多图对比")
-        self.notebook.add(self.histogram_tab, text="RGB 直方图")
-        self.notebook.add(self.conclusion_tab, text="分析结论")
-        if not self.show_histogram_var.get():
-            self.notebook.hide(self.histogram_tab)
-        self.main_pane.add(self.notebook, weight=2)
-
-        self.pixel_text = self._make_text(self.pixel_tab)
-        self._build_comparison_panel()
-        histogram_controls = ttk.Frame(self.histogram_tab, style="InspectorRoot.TFrame")
-        histogram_controls.pack(fill="x", pady=(0, 4))
-        self.histogram_scope_var = tk.StringVar(value="当前 ROI")
-        self.histogram_role_var = tk.StringVar(value=_role_label("before"))
-        for label in ("当前 ROI", "整图"):
-            ttk.Radiobutton(
-                histogram_controls,
-                text=label,
-                value=label,
-                variable=self.histogram_scope_var,
-                command=self._refresh_histogram,
-            ).pack(side="left", padx=(0, 8))
-        self.histogram_role_combo = ttk.Combobox(
-            histogram_controls,
-            textvariable=self.histogram_role_var,
-            values=(_role_label("before"),),
-            state="readonly",
-            width=16,
+        self.metric_vars: Dict[str, tk.StringVar] = {}
+        self.metric_labels: Dict[str, ttk.Label] = {}
+        for role in IMAGE_ROLES:
+            variable = tk.StringVar(value=self._empty_metric_text(role))
+            label = ttk.Label(
+                self.metrics_grid,
+                textvariable=variable,
+                style="InspectorMetric.TLabel",
+                anchor="center",
+            )
+            self.metric_vars[role] = variable
+            self.metric_labels[role] = label
+        self.folder_thumbnail_strip = FolderThumbnailStrip(
+            self.main_pane,
+            select_callback=self._on_thumbnail_selected,
+            request_callback=self._request_folder_thumbnails,
+            collapse_callback=lambda: self._set_folder_sidebar_visible(False),
         )
-        self.histogram_role_combo.pack(side="left", padx=(8, 0))
-        self.histogram_role_var.trace_add("write", lambda *_args: self._refresh_histogram())
+        self.main_pane.add(self.viewer_container, weight=4)
+
+        self.sidebar_frame = ttk.Frame(self.main_pane, padding=(8, 0, 0, 0), style="InspectorSurface.TFrame")
+        sidebar_header = ttk.Frame(self.sidebar_frame, style="InspectorSurface.TFrame")
+        sidebar_header.pack(fill="x", pady=(0, 4))
+        ttk.Label(sidebar_header, text="检查器", style="InspectorCardTitle.TLabel").pack(side="left")
+        self.sidebar_header_toggle_button = ttk.Button(
+            sidebar_header,
+            text="›",
+            width=3,
+            command=self.toggle_analysis_sidebar,
+            style="Icon.TButton",
+        )
+        self.sidebar_header_toggle_button.pack(side="right")
+        self.notebook = ttk.Notebook(self.sidebar_frame)
+        self.notebook.pack(fill="both", expand=True)
+        self.info_tab = ttk.Frame(self.notebook, padding=6, style="InspectorSurface.TFrame")
+        self.compare_tab = ttk.Frame(self.notebook, padding=6, style="InspectorRoot.TFrame")
+        self.notebook.add(self.info_tab, text="直方图 / EXIF")
+        self.notebook.add(self.compare_tab, text="对比")
+        self.main_pane.add(self.sidebar_frame, weight=1)
+        self._sidebar_visible = True
+        self._folder_sidebar_requested = False
+        self._sidebar_ratio = self.settings.panel_ratio
+
+        self._build_information_panel()
+        self._build_comparison_panel()
         self._set_image_count(1)
         self.root.after_idle(self._restore_panel_ratio)
-        self.histogram_canvas = HistogramCanvas(self.histogram_tab)
-        self.histogram_canvas.pack(fill="both", expand=True)
-        self.conclusion_text = self._make_text(self.conclusion_tab)
-
-        status = ttk.Frame(self.outer, style="InspectorRoot.TFrame")
-        status.pack(fill="x")
         self.status_var = tk.StringVar(
-            value="请直接打开 1–4 张图片，或打开文件夹后按组浏览。滚轮联动缩放全部图片；中键/右键或 Shift+左键平移。"
+            value="请直接打开 1–4 张图片，或打开文件夹后按自然顺序与缩略图浏览。滚轮联动缩放全部图片。"
         )
-        self.pixel_status_var = tk.StringVar(value="")
-        ttk.Label(status, textvariable=self.status_var, style="InspectorStatus.TLabel").pack(side="left", fill="x", expand=True)
-        ttk.Label(status, textvariable=self.pixel_status_var, style="InspectorStatus.TLabel", font=FONT_MONO).pack(side="right")
-        self._set_text(self.pixel_text, "尚未选择像素或 ROI。")
-        self._set_text(self.compare_text, "选择 2–4 张图片后，在图像 1 中框选 ROI 即可显示差异。")
-        self._set_text(self.conclusion_text, "结论将受 ROI 匹配置信度门禁约束。")
+
+    def _build_information_panel(self) -> None:
+        controls = ttk.Frame(self.info_tab, padding=(9, 8), style="InspectorCard.TFrame")
+        controls.pack(fill="x", pady=(0, 6))
+        ttk.Label(controls, text="逐图显示", style="InspectorCardTitle.TLabel").grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 4)
+        )
+        controls.columnconfigure(0, weight=1)
+        self.histogram_visible_vars: Dict[str, tk.BooleanVar] = {}
+        self.luminance_histogram_visible_vars: Dict[str, tk.BooleanVar] = {}
+        self.exif_visible_vars: Dict[str, tk.BooleanVar] = {}
+        self.info_name_vars: Dict[str, tk.StringVar] = {}
+        self.info_control_rows: Dict[str, ttk.Frame] = {}
+        for index, role in enumerate(IMAGE_ROLES, start=1):
+            row = ttk.Frame(controls, style="InspectorSurface.TFrame")
+            row.grid(row=index, column=0, columnspan=4, sticky="ew", pady=1)
+            row.columnconfigure(0, weight=1)
+            name_var = tk.StringVar(value=_role_label(role))
+            ttk.Label(row, textvariable=name_var, style="InspectorCard.TLabel").grid(
+                row=0, column=0, sticky="w", padx=(0, 5)
+            )
+            histogram_var = tk.BooleanVar(value=self.settings.show_histogram)
+            luminance_histogram_var = tk.BooleanVar(value=False)
+            exif_var = tk.BooleanVar(value=True)
+            ttk.Checkbutton(
+                row,
+                text="RGB",
+                variable=histogram_var,
+                command=lambda selected=role: self._on_info_visibility_changed(selected),
+            ).grid(row=0, column=1, padx=(3, 2))
+            ttk.Checkbutton(
+                row,
+                text="亮度",
+                variable=luminance_histogram_var,
+                command=lambda selected=role: self._on_info_visibility_changed(selected),
+            ).grid(row=0, column=2, padx=2)
+            ttk.Checkbutton(
+                row,
+                text="EXIF",
+                variable=exif_var,
+                command=lambda selected=role: self._on_info_visibility_changed(selected),
+            ).grid(row=0, column=3, padx=(2, 0))
+            self.histogram_visible_vars[role] = histogram_var
+            self.luminance_histogram_visible_vars[role] = luminance_histogram_var
+            self.exif_visible_vars[role] = exif_var
+            self.info_name_vars[role] = name_var
+            self.info_control_rows[role] = row
+
+        body = ttk.Frame(self.info_tab, style="InspectorSurface.TFrame")
+        body.pack(fill="both", expand=True)
+        self.info_canvas = tk.Canvas(body, background=PANEL, highlightthickness=0)
+        info_scroll = ttk.Scrollbar(body, orient="vertical", command=self.info_canvas.yview)
+        self.info_canvas.configure(yscrollcommand=info_scroll.set)
+        self.info_canvas.grid(row=0, column=0, sticky="nsew")
+        info_scroll.grid(row=0, column=1, sticky="ns")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        self.info_inner = ttk.Frame(self.info_canvas, style="InspectorSurface.TFrame")
+        self._info_window_item = self.info_canvas.create_window((0, 0), window=self.info_inner, anchor="nw")
+        self.info_inner.bind("<Configure>", self._on_info_inner_configure)
+        self.info_canvas.bind("<Configure>", self._on_info_canvas_configure)
+
+        self.info_sections: Dict[str, ttk.Frame] = {}
+        self.histogram_canvases: Dict[str, HistogramCanvas] = {}
+        self.luminance_histogram_canvases: Dict[str, HistogramCanvas] = {}
+        self.exif_frames: Dict[str, ttk.Frame] = {}
+        self.exif_vars: Dict[str, tk.StringVar] = {}
+        for role in IMAGE_ROLES:
+            section = ttk.Frame(self.info_inner, padding=(9, 8), style="InspectorCard.TFrame")
+            title_var = self.info_name_vars[role]
+            ttk.Label(section, textvariable=title_var, style="InspectorCardTitle.TLabel").pack(
+                anchor="w", pady=(0, 5)
+            )
+            histogram = HistogramCanvas(section)
+            histogram.configure(height=154)
+            histogram.pack_propagate(False)
+            luminance_histogram = HistogramCanvas(section, luminance=True)
+            luminance_histogram.configure(height=154)
+            luminance_histogram.pack_propagate(False)
+            exif_frame = ttk.Frame(section, style="InspectorSurface.TFrame")
+            ttk.Label(exif_frame, text="EXIF", style="InspectorCardTitle.TLabel").pack(
+                anchor="w", pady=(7, 3)
+            )
+            exif_var = tk.StringVar(value="—")
+            exif_label = ttk.Label(
+                exif_frame,
+                textvariable=exif_var,
+                style="InspectorMutedCard.TLabel",
+                justify="left",
+                anchor="nw",
+                wraplength=330,
+            )
+            exif_label.pack(fill="x")
+            self.info_sections[role] = section
+            self.histogram_canvases[role] = histogram
+            self.luminance_histogram_canvases[role] = luminance_histogram
+            self.exif_frames[role] = exif_frame
+            self.exif_vars[role] = exif_var
+        self._bind_info_scrolling(self.info_tab)
+
+    def _on_info_inner_configure(self, _event: tk.Event) -> None:
+        bounds = self.info_canvas.bbox(self._info_window_item)
+        if bounds is not None:
+            self.info_canvas.configure(scrollregion=bounds)
+
+    def _on_info_canvas_configure(self, event: tk.Event) -> None:
+        self.info_canvas.itemconfigure(self._info_window_item, width=max(1, int(event.width)))
+
+    def _bind_info_scrolling(self, widget: tk.Misc) -> None:
+        """Make the entire information surface scroll like a native inspector."""
+
+        widget.bind("<MouseWheel>", self._on_info_mousewheel, add="+")
+        widget.bind("<Button-4>", lambda _event: self._scroll_info_by_pixels(-52.0), add="+")
+        widget.bind("<Button-5>", lambda _event: self._scroll_info_by_pixels(52.0), add="+")
+        if tk.TkVersion >= 9.0:
+            widget.bind("<TouchpadScroll>", self._on_info_touchpad_scroll, add="+")
+        for child in widget.winfo_children():
+            self._bind_info_scrolling(child)
+
+    def _scroll_info_by_pixels(self, pixels: float) -> str:
+        bounds = self.info_canvas.bbox("all")
+        if bounds is None:
+            return "break"
+        content_height = max(1.0, float(bounds[3] - bounds[1]))
+        viewport_height = max(1.0, float(self.info_canvas.winfo_height()))
+        if content_height <= viewport_height:
+            return "break"
+        top = float(self.info_canvas.yview()[0])
+        maximum_top = max(0.0, 1.0 - viewport_height / content_height)
+        target = min(maximum_top, max(0.0, top + float(pixels) / content_height))
+        self.info_canvas.yview_moveto(target)
+        return "break"
+
+    def _on_info_mousewheel(self, event: tk.Event) -> str:
+        delta = float(getattr(event, "delta", 0.0) or 0.0)
+        if abs(delta) < 1e-12:
+            return "break"
+        if abs(delta) >= 120.0:
+            pixels = -delta / 120.0 * 52.0
+        else:
+            pixels = -math.copysign(min(52.0, max(10.0, abs(delta) * 8.0)), delta)
+        return self._scroll_info_by_pixels(pixels)
+
+    def _on_info_touchpad_scroll(self, event: tk.Event) -> str:
+        raw_delta = getattr(event, "delta", 0)
+        try:
+            decoded = self.info_canvas.tk.call("tk::PreciseScrollDeltas", raw_delta)
+            values = tuple(float(value) for value in self.info_canvas.tk.splitlist(decoded))
+            delta_y = values[1] if len(values) >= 2 else values[0]
+        except (tk.TclError, TypeError, ValueError, IndexError):
+            delta_y = float(raw_delta or 0.0)
+        if abs(delta_y) < 1e-12:
+            return "break"
+        return self._scroll_info_by_pixels(-delta_y)
+
+    def _on_info_visibility_changed(self, _role: str) -> None:
+        self.show_histogram_var.set(any(variable.get() for variable in self.histogram_visible_vars.values()))
+        self._refresh_information_sidebar()
+        self._settings_changed()
 
     def _build_comparison_panel(self) -> None:
         controls = ttk.Frame(self.compare_tab, padding=(9, 7), style="InspectorCard.TFrame")
         controls.pack(fill="x", pady=(0, 6))
-        ttk.Label(controls, text="查看", style="InspectorCard.TLabel").pack(side="left")
+        controls.columnconfigure(5, weight=1)
+        ttk.Label(controls, text="图像 A", style="InspectorCard.TLabel").grid(row=0, column=0, sticky="w")
+        self.comparison_base_var = tk.StringVar(value="")
+        self.comparison_base_combo = ttk.Combobox(
+            controls,
+            textvariable=self.comparison_base_var,
+            state="readonly",
+            width=9,
+        )
+        self.comparison_base_combo.grid(row=0, column=1, sticky="w", padx=(5, 8))
+        self.comparison_base_combo.bind(
+            "<<ComboboxSelected>>", lambda _event: self._on_comparison_pair_changed("base")
+        )
+        ttk.Label(controls, text="图像 B", style="InspectorCard.TLabel").grid(row=0, column=2, sticky="w")
         self.comparison_role_var = tk.StringVar(value="")
         self.comparison_role_combo = ttk.Combobox(
             controls,
             textvariable=self.comparison_role_var,
             state="readonly",
-            width=14,
+            width=9,
         )
-        self.comparison_role_combo.pack(side="left", padx=(6, 12))
-        self.comparison_role_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_comparison_table())
-        self.comparison_files_var = tk.StringVar(value="请选择 2–4 张图片并完成 ROI 分析")
+        self.comparison_role_combo.grid(row=0, column=3, sticky="w", padx=(5, 6))
+        self.comparison_role_combo.bind(
+            "<<ComboboxSelected>>", lambda _event: self._on_comparison_pair_changed("target")
+        )
+        ttk.Button(
+            controls,
+            text="交换",
+            command=self._swap_comparison_pair,
+            style="Quiet.TButton",
+        ).grid(row=0, column=4, sticky="w")
+        self._comparison_pair_guard = False
+        self.comparison_files_var = tk.StringVar(value="请选择 2–4 张图片并框选区域")
         ttk.Label(
             controls,
             textvariable=self.comparison_files_var,
             style="InspectorMutedCard.TLabel",
-        ).pack(side="left", fill="x", expand=True)
+            wraplength=390,
+        ).grid(row=1, column=0, columnspan=6, sticky="ew", pady=(6, 3))
         self.comparison_gate_var = tk.StringVar(value="匹配置信度：—")
         self.comparison_gate_label = ttk.Label(
             controls,
             textvariable=self.comparison_gate_var,
             style="InspectorMatchLow.TLabel",
+            wraplength=390,
         )
-        self.comparison_gate_label.pack(side="right", padx=(10, 0))
+        self.comparison_gate_label.grid(row=3, column=0, columnspan=6, sticky="w", pady=(4, 0))
         swatches = ttk.Frame(controls, style="InspectorSurface.TFrame")
-        swatches.pack(side="right", padx=(8, 2))
-        ttk.Label(swatches, text="ROI 平均色", style="InspectorMutedCard.TLabel").pack(side="left", padx=(0, 4))
+        swatches.grid(row=2, column=0, columnspan=6, sticky="w")
+        ttk.Label(swatches, text="选区平均色", style="InspectorMutedCard.TLabel").pack(side="left", padx=(0, 4))
         self.reference_swatch = tk.Canvas(
             swatches,
             width=30,
@@ -1196,20 +1748,21 @@ class ImageInspectorWorkspace:
         )
         headings = {
             "metric": "指标",
-            "reference": "图像 1",
-            "target": "图像 2",
+            "reference": "图像 A",
+            "target": "图像 B",
             "delta": "Delta",
             "change": "变化方向",
         }
-        widths = {"metric": 130, "reference": 112, "target": 112, "delta": 105, "change": 125}
+        widths = {"metric": 126, "reference": 88, "target": 88, "delta": 88, "change": 112}
         for column in columns:
-            self.compare_tree.heading(column, text=headings[column])
+            alignment = "w" if column == "metric" else "e"
+            self.compare_tree.heading(column, text=headings[column], anchor=alignment)
             self.compare_tree.column(
                 column,
                 width=widths[column],
-                minwidth=82,
-                anchor="w" if column == "metric" else "e",
-                stretch=True,
+                minwidth=widths[column],
+                anchor=alignment,
+                stretch=False,
             )
         compare_y = ttk.Scrollbar(table_frame, orient="vertical", command=self.compare_tree.yview)
         compare_x = ttk.Scrollbar(table_frame, orient="horizontal", command=self.compare_tree.xview)
@@ -1219,38 +1772,6 @@ class ImageInspectorWorkspace:
         compare_x.grid(row=1, column=0, sticky="ew")
         table_frame.columnconfigure(0, weight=1)
         table_frame.rowconfigure(0, weight=1)
-
-        ttk.Label(self.compare_tab, text="详细数据", style="InspectorCardTitle.TLabel").pack(anchor="w", pady=(7, 3))
-        self.compare_text = self._make_text(self.compare_tab, expand=False, height=7)
-
-    def _make_text(self, parent: tk.Misc, *, expand: bool = True, height: Optional[int] = None) -> tk.Text:
-        frame = ttk.Frame(parent, style="InspectorCard.TFrame")
-        frame.pack(fill="both" if expand else "x", expand=expand)
-        options: Dict[str, Any] = {
-            "wrap": "word",
-            "relief": "flat",
-            "background": PANEL,
-            "foreground": INK,
-            "font": FONT_MONO,
-            "padx": 10,
-            "pady": 8,
-            "state": "disabled",
-        }
-        if height is not None:
-            options["height"] = height
-        text = tk.Text(frame, **options)
-        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
-        text.configure(yscrollcommand=scrollbar.set)
-        text.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        return text
-
-    @staticmethod
-    def _set_text(widget: tk.Text, value: str) -> None:
-        widget.configure(state="normal")
-        widget.delete("1.0", "end")
-        widget.insert("1.0", value)
-        widget.configure(state="disabled")
 
     def _apply_saved_window_size(self) -> None:
         match = re.match(r"^(\d+)x(\d+)", self.settings.window_geometry)
@@ -1264,14 +1785,46 @@ class ImageInspectorWorkspace:
             except tk.TclError:
                 pass
 
+    def _empty_metric_text(self, role: str) -> str:
+        index = IMAGE_ROLES.index(role) + 1
+        return f"图{index} · R:— G:— B:— · R/G:— R/B:—"
+
+    def _metric_text(self, role: str, rgb: Tuple[float, float, float]) -> str:
+        red, green, blue = rgb
+        r_over_g = None if abs(green) <= 1e-12 else red / green
+        r_over_b = None if abs(blue) <= 1e-12 else red / blue
+        ratio_rg = "—" if r_over_g is None else f"{r_over_g:.3f}"
+        ratio_rb = "—" if r_over_b is None else f"{r_over_b:.3f}"
+        index = IMAGE_ROLES.index(role) + 1
+        return (
+            f"图{index} · R:{red:.0f} G:{green:.0f} B:{blue:.0f} · "
+            f"R/G:{ratio_rg} R/B:{ratio_rb}"
+        )
+
+    def _refresh_metric_strip(self) -> None:
+        for role in IMAGE_ROLES:
+            text = self._empty_metric_text(role)
+            if role in self.active_roles:
+                if self._metric_mode == "roi" and self.roi_statistics[role] is not None:
+                    text = self._metric_text(role, self.roi_statistics[role].mean_rgb)
+                elif self._metric_mode == "pixel" and self.fixed_pixels[role] is not None:
+                    text = self._metric_text(role, self.fixed_pixels[role].rgb)
+            self.metric_vars[role].set(text)
+
     def _set_image_count(self, count: int) -> None:
         count = min(4, max(1, int(count)))
         self.active_roles = IMAGE_ROLES[:count]
         self.dual_mode = count > 1
         for view in self.views.values():
             view.grid_forget()
+        for index in range(3):
+            column_visible = count == 3 or index < 2
+            self.image_grid.columnconfigure(
+                index,
+                weight=1 if column_visible else 0,
+                uniform="image-columns" if column_visible else "",
+            )
         for index in range(2):
-            self.image_grid.columnconfigure(index, weight=1, uniform="image-columns")
             self.image_grid.rowconfigure(index, weight=1, uniform="image-rows")
         if count == 1:
             self.views["before"].grid(row=0, column=0, columnspan=2, rowspan=2, sticky="nsew")
@@ -1279,9 +1832,14 @@ class ImageInspectorWorkspace:
             self.views["before"].grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 1))
             self.views["after"].grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(1, 0))
         elif count == 3:
-            self.views["before"].grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 1))
-            self.views["after"].grid(row=0, column=1, sticky="nsew", padx=(1, 0), pady=(0, 1))
-            self.views["compare3"].grid(row=1, column=1, sticky="nsew", padx=(1, 0), pady=(1, 0))
+            for index, role in enumerate(self.active_roles):
+                self.views[role].grid(
+                    row=0,
+                    column=index,
+                    rowspan=2,
+                    sticky="nsew",
+                    padx=((0, 1) if index == 0 else ((1, 0) if index == 2 else (1, 1))),
+                )
         else:
             for index, role in enumerate(self.active_roles):
                 row, column = index // 2, index % 2
@@ -1294,28 +1852,274 @@ class ImageInspectorWorkspace:
                 )
         for role in self.active_roles:
             self.views[role].set_title(_role_label(role))
-        histogram_labels = tuple(_role_label(role) for role in self.active_roles)
-        self.histogram_role_combo.configure(values=histogram_labels)
-        if self.histogram_role_var.get() not in histogram_labels:
-            self.histogram_role_var.set(histogram_labels[0])
+        for label in self.metric_labels.values():
+            label.grid_forget()
+        for index in range(4):
+            self.metrics_grid.columnconfigure(
+                index,
+                weight=1 if index < count else 0,
+                uniform="metric-columns" if index < count else "",
+            )
+        for index, role in enumerate(self.active_roles):
+            self.metric_labels[role].grid(row=0, column=index, sticky="ew", padx=1)
+        self._refresh_metric_strip()
+        self._refresh_information_sidebar()
         if hasattr(self, "comparison_role_combo"):
-            comparison_labels = tuple(_role_label(role) for role in self.active_roles[1:])
+            comparison_labels = tuple(_role_label(role) for role in self.active_roles)
+            self.comparison_base_combo.configure(values=comparison_labels)
             self.comparison_role_combo.configure(values=comparison_labels)
-            if self.comparison_role_var.get() not in comparison_labels:
-                self.comparison_role_var.set(comparison_labels[0] if comparison_labels else "")
+            if self.comparison_base_var.get() not in comparison_labels:
+                self.comparison_base_var.set(comparison_labels[0] if comparison_labels else "")
+            if (
+                self.comparison_role_var.get() not in comparison_labels
+                or self.comparison_role_var.get() == self.comparison_base_var.get()
+            ):
+                self.comparison_role_var.set(comparison_labels[1] if len(comparison_labels) > 1 else "")
             self._refresh_comparison_table()
         if hasattr(self, "match_status_var"):
             self._refresh_match_status()
         self.root.after_idle(self.fit_images)
 
+    @staticmethod
+    def _format_exif_panel(image_data: Optional[ImageData]) -> str:
+        if image_data is None:
+            return "—"
+        lines = [
+            f"文件  {image_data.filename}",
+            f"尺寸  {image_data.width} × {image_data.height}",
+            f"位深  {image_data.bit_depth}-bit",
+            f"模式  {image_data.source_mode}",
+        ]
+        if image_data.exif:
+            lines.append("")
+            lines.extend(f"{name}  {value}" for name, value in image_data.exif)
+        else:
+            lines.extend(("", "无可用 EXIF 元数据"))
+        return "\n".join(lines)
+
+    def _refresh_information_sidebar(self) -> None:
+        if not hasattr(self, "info_sections"):
+            return
+        for role in IMAGE_ROLES:
+            self.info_control_rows[role].grid_remove()
+            self.info_sections[role].pack_forget()
+        for role in self.active_roles:
+            image_data = self.images.get(role)
+            name = _role_label(role) if image_data is None else f"{_role_label(role)} · {image_data.filename}"
+            self.info_name_vars[role].set(name)
+            self.info_control_rows[role].grid()
+            show_histogram = self.histogram_visible_vars[role].get()
+            show_luminance_histogram = self.luminance_histogram_visible_vars[role].get()
+            show_exif = self.exif_visible_vars[role].get()
+            if not (show_histogram or show_luminance_histogram or show_exif):
+                continue
+            section = self.info_sections[role]
+            section.pack(fill="x", pady=(0, 6))
+            histogram = self.histogram_canvases[role]
+            if show_histogram:
+                histogram.pack(fill="x", pady=(0, 2))
+                statistics = self.roi_statistics.get(role)
+                values = None
+                scope = name
+                if statistics is not None:
+                    values = statistics.histogram
+                    scope += " · 选区"
+                elif image_data is not None:
+                    values = image_data.histogram
+                    scope += " · 整图"
+                histogram.set_histogram(values, scope)
+            else:
+                histogram.pack_forget()
+            luminance_histogram = self.luminance_histogram_canvases[role]
+            if show_luminance_histogram:
+                luminance_histogram.pack(fill="x", pady=(0, 2))
+                statistics = self.roi_statistics.get(role)
+                values = None
+                scope = name
+                if statistics is not None:
+                    values = statistics.luminance_histogram
+                    scope += " · 选区"
+                elif image_data is not None:
+                    values = image_data.luminance_histogram
+                    scope += " · 整图"
+                luminance_histogram.set_histogram(values, scope)
+            else:
+                luminance_histogram.pack_forget()
+            exif_frame = self.exif_frames[role]
+            if show_exif:
+                self.exif_vars[role].set(self._format_exif_panel(image_data))
+                exif_frame.pack(fill="x")
+            else:
+                exif_frame.pack_forget()
+        self.root.after_idle(self._on_info_inner_configure, None)
+
     def _restore_panel_ratio(self) -> None:
         try:
-            width = self.viewer_pane.winfo_width()
-            if width > 10 and len(self.viewer_pane.panes()) > 1:
-                ratio = self.settings.panel_ratio if self.settings.panel_ratio <= 0.35 else 0.24
-                self.viewer_pane.sashpos(0, int(width * ratio))
+            width = self.main_pane.winfo_width()
+            panes = [str(pane) for pane in self.main_pane.panes()]
+            if width <= 10 or len(panes) <= 1:
+                return
+            left_visible = str(self.folder_thumbnail_strip) in panes
+            right_visible = str(self.sidebar_frame) in panes
+            if left_visible:
+                # Match the calm, narrow source list used by Photos/Finder.
+                left_width = min(286, max(256, int(width * 0.18)))
+                self.main_pane.sashpos(0, left_width)
+            if right_visible:
+                ratio = min(0.36, max(0.20, float(self._sidebar_ratio)))
+                right_width = int(width * ratio)
+                right_sash = len(panes) - 2
+                self.main_pane.sashpos(right_sash, width - right_width)
         except (AttributeError, tk.TclError):
             pass
+
+    def _analysis_sidebar_is_visible(self) -> bool:
+        try:
+            return str(self.sidebar_frame) in {str(pane) for pane in self.main_pane.panes()}
+        except (AttributeError, tk.TclError):
+            return False
+
+    def _folder_sidebar_is_visible(self) -> bool:
+        try:
+            return str(self.folder_thumbnail_strip) in {str(pane) for pane in self.main_pane.panes()}
+        except (AttributeError, tk.TclError):
+            return False
+
+    def _set_analysis_sidebar_visible(self, visible: bool) -> None:
+        visible = bool(visible)
+        current = self._analysis_sidebar_is_visible()
+        if visible and not current:
+            self.main_pane.add(self.sidebar_frame, weight=1)
+        elif not visible and current:
+            width = self.main_pane.winfo_width()
+            if width > 10 and len(self.main_pane.panes()) > 1:
+                try:
+                    sash_index = len(self.main_pane.panes()) - 2
+                    sash = self.main_pane.sashpos(sash_index)
+                    self._sidebar_ratio = min(0.42, max(0.20, (width - sash) / width))
+                except tk.TclError:
+                    pass
+            self.main_pane.forget(self.sidebar_frame)
+        self._sidebar_visible = visible
+        self.sidebar_toggle_button.configure(text="收起信息" if visible else "显示信息")
+        if visible:
+            try:
+                self.root.update_idletasks()
+            except tk.TclError:
+                pass
+            self._restore_panel_ratio()
+        self.root.after_idle(self._restore_panel_ratio)
+        self.root.after_idle(self.fit_images)
+
+    def toggle_analysis_sidebar(self) -> None:
+        self._set_analysis_sidebar_visible(not self._sidebar_visible)
+
+    def _set_folder_sidebar_visible(self, visible: bool) -> None:
+        if visible and not self._folder_browser_available:
+            return
+        visible = bool(visible)
+        self._folder_sidebar_requested = visible
+        current = self._folder_sidebar_is_visible()
+        if visible != current:
+            if visible:
+                self.main_pane.insert(0, self.folder_thumbnail_strip, weight=0)
+            else:
+                self.main_pane.forget(self.folder_thumbnail_strip)
+        if hasattr(self, "folder_sidebar_toggle_button"):
+            self.folder_sidebar_toggle_button.configure(
+                text="收起图库" if visible else "显示图库",
+                state="normal" if self._folder_browser_available else "disabled",
+            )
+        if visible:
+            try:
+                self.root.update_idletasks()
+            except tk.TclError:
+                pass
+            self._restore_panel_ratio()
+        self.root.after_idle(self._restore_panel_ratio)
+        self.root.after_idle(self.fit_images)
+
+    def toggle_folder_sidebar(self) -> None:
+        self._set_folder_sidebar_visible(not self._folder_sidebar_requested)
+
+    def _show_folder_thumbnails(self, paths: Sequence[Path]) -> None:
+        self._folder_thumbnail_generation += 1
+        self._folder_browser_available = True
+        self.folder_thumbnail_strip.set_paths(paths)
+        self.folder_thumbnail_strip.set_active_paths(self.current_paths)
+        self._set_folder_sidebar_visible(True)
+
+    def _hide_folder_thumbnails(self) -> None:
+        self._folder_thumbnail_generation += 1
+        if hasattr(self, "folder_thumbnail_strip"):
+            self._set_folder_sidebar_visible(False)
+            self._folder_browser_available = False
+            self.folder_selection_anchor = None
+            self.folder_thumbnail_strip.set_paths(())
+            self.folder_sidebar_toggle_button.configure(text="图库", state="disabled")
+
+    def _request_folder_thumbnails(self, items: Sequence[Tuple[int, Path]]) -> None:
+        generation = self._folder_thumbnail_generation
+        for index, path in items:
+            self._submit(
+                "thumbnail",
+                generation,
+                "thumbnail",
+                load_thumbnail,
+                path,
+                FolderThumbnailStrip.PREVIEW_SIZE,
+                meta={"generation": generation, "index": index, "path": path},
+            )
+
+    def _configure_folder_selection(self, selected_paths: Sequence[Path]) -> None:
+        selected = selected_paths_in_folder_order(self.folder_paths, selected_paths)
+        if not selected:
+            return
+        self.folder_group_size = len(selected)
+        selected_set = set(selected)
+        remaining = [path for path in self.folder_paths if path not in selected_set]
+        groups = [
+            remaining[index : index + self.folder_group_size]
+            for index in range(0, len(remaining), self.folder_group_size)
+        ]
+        groups.append(list(selected))
+        groups.sort(key=lambda group: min(self.folder_paths.index(path) for path in group))
+        self.folder_groups = groups
+        self.folder_group_index = groups.index(list(selected))
+        self.folder_group_mode = len(groups) > 1
+        self.folder_group_start = min(self.folder_paths.index(path) for path in selected)
+        self.folder_groups_aligned = len(selected) == 1
+        self.load_selected_images(selected)
+
+    def _on_thumbnail_selected(self, path: Path, additive: bool = False, shift: bool = False) -> None:
+        try:
+            index = self.folder_paths.index(path)
+        except ValueError:
+            return
+        selected: list[Path]
+        if shift and self.folder_selection_anchor in self.folder_paths:
+            anchor_index = self.folder_paths.index(self.folder_selection_anchor)
+            low, high = sorted((anchor_index, index))
+            selected = self.folder_paths[low : high + 1]
+            if len(selected) > len(IMAGE_ROLES):
+                selected = selected[: len(IMAGE_ROLES)]
+                messagebox.showinfo("最多选择 4 张", "连续选择已保留前 4 张图片。", parent=self.root)
+        elif additive:
+            selected = [item for item in self.current_paths if item in self.folder_paths]
+            if path in selected:
+                if len(selected) == 1:
+                    return
+                selected.remove(path)
+            else:
+                if len(selected) >= len(IMAGE_ROLES):
+                    messagebox.showinfo("最多选择 4 张", "请先取消一张，再加入新的图片。", parent=self.root)
+                    return
+                selected.append(path)
+            selected = selected_paths_in_folder_order(self.folder_paths, selected)
+        else:
+            selected = [path]
+        self.folder_selection_anchor = path
+        self._configure_folder_selection(selected)
 
     def _open_folder_from_address(self, _event: Optional[tk.Event] = None) -> str:
         """Open the directory typed into the viewer-style location bar."""
@@ -1329,26 +2133,25 @@ class ImageInspectorWorkspace:
         """Keep the address-bar navigation state in sync with loaded images."""
 
         loaded = len(self.current_paths)
-        can_compare = loaded >= 2
-        self.open_comparison_button.configure(state="normal" if can_compare else "disabled")
-        if self.folder_group_mode and self.folder_paths:
+        if self.folder_group_mode and self.folder_paths and self.folder_groups:
             total = len(self.folder_paths)
-            group_count = (total + self.folder_group_size - 1) // self.folder_group_size
-            group_index = self.folder_group_start // self.folder_group_size
-            first = self.folder_group_start + 1
-            last = min(total, self.folder_group_start + loaded)
-            self.group_status_var.set(
-                f"第 {group_index + 1}/{group_count} 组 · {first}–{last} / {total}"
-            )
+            group_count = len(self.folder_groups)
+            group_index = self.folder_group_index
+            indices = sorted(self.folder_paths.index(path) for path in self.current_paths)
+            first = indices[0] + 1
+            last = indices[-1] + 1
+            contiguous = indices == list(range(indices[0], indices[0] + len(indices)))
+            if contiguous:
+                self.group_status_var.set(
+                    f"第 {group_index + 1}/{group_count} 组 · {first}–{last} / {total}"
+                )
+            else:
+                self.group_status_var.set(f"第 {group_index + 1}/{group_count} 组 · {loaded} 张 / {total}")
             self.previous_group_button.configure(
-                state="normal" if self.folder_group_start > 0 else "disabled"
+                state="normal" if self.folder_group_index > 0 else "disabled"
             )
             self.next_group_button.configure(
-                state=(
-                    "normal"
-                    if self.folder_group_start + self.folder_group_size < total
-                    else "disabled"
-                )
+                state="normal" if self.folder_group_index + 1 < group_count else "disabled"
             )
             return
 
@@ -1356,27 +2159,39 @@ class ImageInspectorWorkspace:
         self.next_group_button.configure(state="disabled")
         self.group_status_var.set(f"已载入 {loaded} 张图片" if loaded else "尚未载入图片")
 
+    def _load_group_index(self, index: int) -> None:
+        if not self.folder_groups:
+            self.current_paths = []
+            self._update_group_navigation()
+            return
+        normalized = min(len(self.folder_groups) - 1, max(0, int(index)))
+        self.folder_group_index = normalized
+        paths = self.folder_groups[normalized]
+        self.folder_group_start = min(self.folder_paths.index(path) for path in paths)
+        self.load_selected_images(paths)
+
     def _load_folder_group(self, start: int) -> None:
+        """Load the natural folder group containing a folder-list index."""
+
         if not self.folder_paths:
             self.current_paths = []
             self._update_group_navigation()
             return
-        last_start = ((len(self.folder_paths) - 1) // self.folder_group_size) * self.folder_group_size
-        normalized = min(last_start, max(0, (int(start) // self.folder_group_size) * self.folder_group_size))
-        self.folder_group_start = normalized
-        paths = self.folder_paths[normalized : normalized + self.folder_group_size]
-        self.load_selected_images(paths)
+        normalized = min(len(self.folder_paths) - 1, max(0, int(start)))
+        selected_path = self.folder_paths[normalized]
+        group_index = next(
+            (index for index, group in enumerate(self.folder_groups) if selected_path in group),
+            0,
+        )
+        self._load_group_index(group_index)
 
     def show_previous_group(self) -> None:
-        if self.folder_group_mode and self.folder_group_start > 0:
-            self._load_folder_group(self.folder_group_start - self.folder_group_size)
+        if self.folder_group_mode and self.folder_group_index > 0:
+            self._load_group_index(self.folder_group_index - 1)
 
     def show_next_group(self) -> None:
-        if (
-            self.folder_group_mode
-            and self.folder_group_start + self.folder_group_size < len(self.folder_paths)
-        ):
-            self._load_folder_group(self.folder_group_start + self.folder_group_size)
+        if self.folder_group_mode and self.folder_group_index + 1 < len(self.folder_groups):
+            self._load_group_index(self.folder_group_index + 1)
 
     def show_comparison(self) -> None:
         """Expose the comparison workspace regardless of how images were opened."""
@@ -1384,8 +2199,8 @@ class ImageInspectorWorkspace:
         if len(self.current_paths) < 2:
             messagebox.showinfo("需要多张图片", "请先打开至少 2 张图片。", parent=self.root)
             return
+        self._set_analysis_sidebar_visible(True)
         self.notebook.select(self.compare_tab)
-        self.status_var.set("已切换到多图对比；在图像 1 中框选 ROI 后会逐图匹配和比较。")
 
     def open_images(
         self,
@@ -1402,6 +2217,7 @@ class ImageInspectorWorkspace:
         )
         if not chosen:
             return
+        self._hide_folder_thumbnails()
         selected_paths = [Path(item).expanduser().resolve() for item in chosen]
         unsupported = [path.name for path in selected_paths if path.suffix.casefold() not in SUPPORTED_EXTENSIONS]
         if unsupported:
@@ -1424,14 +2240,40 @@ class ImageInspectorWorkspace:
             parent = next(iter(parents))
             self.last_directory = str(parent)
             label = str(parent)
+            try:
+                discovered = [path.resolve() for path in discover_images(parent)]
+            except ImageFolderError:
+                discovered = list(selected_paths)
+            ordered_selected = selected_paths_in_folder_order(discovered, selected_paths)
+            if len(ordered_selected) == len(selected_paths):
+                selected_paths = ordered_selected
+            self.folder_group_size = len(selected_paths)
+            self.folder_paths = list(discovered)
+            selected_set = set(selected_paths)
+            remaining = [path for path in discovered if path not in selected_set]
+            groups = [
+                remaining[index : index + self.folder_group_size]
+                for index in range(0, len(remaining), self.folder_group_size)
+            ]
+            groups.append(list(selected_paths))
+            groups.sort(key=lambda group: min(discovered.index(path) for path in group))
+            self.folder_groups = groups
+            self.folder_group_index = groups.index(list(selected_paths))
+            self.folder_group_mode = len(groups) > 1
+            self.folder_group_start = min(discovered.index(path) for path in selected_paths)
+            self.folder_groups_aligned = False
         else:
             # Keep the editable location bar usable even when the native file
             # dialog returns files from more than one directory.
             self.last_directory = str(selected_paths[0].parent)
             label = self.last_directory
-        self.folder_group_mode = False
-        self.folder_group_start = 0
-        self.folder_paths = list(selected_paths)
+            self.folder_group_size = len(selected_paths)
+            self.folder_group_mode = False
+            self.folder_paths = list(selected_paths)
+            self.folder_groups = [list(selected_paths)]
+            self.folder_group_index = 0
+            self.folder_group_start = 0
+            self.folder_groups_aligned = True
         self.folder_path_var.set(label)
         self.load_selected_images(selected_paths)
         if len(parents) > 1:
@@ -1454,8 +2296,14 @@ class ImageInspectorWorkspace:
         self.folder_path_var.set(str(directory))
         self.folder_group_mode = True
         self.folder_group_start = 0
+        self.folder_group_size = 1
         self.folder_paths = list(paths)
+        self.folder_groups = [[image_path] for image_path in self.folder_paths]
+        self.folder_group_index = 0
+        self.folder_groups_aligned = True
+        self.folder_selection_anchor = self.folder_paths[0] if self.folder_paths else None
         if not paths:
+            self._show_folder_thumbnails(())
             self.current_paths = []
             for role in IMAGE_ROLES:
                 self._invalidate_role(role, clear_image=True, refresh=False)
@@ -1465,6 +2313,7 @@ class ImageInspectorWorkspace:
             self.status_var.set("所选文件夹中没有可预览图片。")
             return
         self._load_folder_group(0)
+        self._show_folder_thumbnails(paths)
         self.status_var.set(
             f"已打开文件夹，共发现 {len(paths)} 张图片；使用上一组/下一组连续查看。"
         )
@@ -1482,6 +2331,13 @@ class ImageInspectorWorkspace:
             messagebox.showinfo("请选择图片", "请打开 1–4 张图片。", parent=self.root)
             return
         self.current_paths = list(selected_paths)
+        self._metric_mode = "none"
+        if self._fit_after_id is not None:
+            try:
+                self.root.after_cancel(self._fit_after_id)
+            except tk.TclError:
+                pass
+            self._fit_after_id = None
         for role in IMAGE_ROLES:
             self._invalidate_role(role, clear_image=True, refresh=False)
         self._set_image_count(len(selected_paths))
@@ -1489,6 +2345,7 @@ class ImageInspectorWorkspace:
         for role, image_path in zip(self.active_roles, selected_paths):
             self.views[role].set_title(f"{_role_label(role)} · {image_path.name}")
             self._load_async(role, str(image_path), invalidate=False)
+        self.folder_thumbnail_strip.set_active_paths(selected_paths)
         self._update_group_navigation()
         self.status_var.set(f"正在加载当前 {len(selected_paths)} 张图片…")
 
@@ -1517,11 +2374,12 @@ class ImageInspectorWorkspace:
     ) -> None:
         if self._closed:
             return
-        executor = self._load_executor if kind == "load" else self._executor
+        executor = self._load_executor if kind in {"load", "thumbnail"} else self._executor
         future = executor.submit(function, *args, **(kwargs or {}))
         self._futures.add(future)
         self._pending += 1
         if self._pending == 1:
+            self.progress.grid()
             self.progress.start(12)
         details = meta or {}
         future.add_done_callback(
@@ -1542,6 +2400,8 @@ class ImageInspectorWorkspace:
             try:
                 if kind == "load":
                     self._finish_load(token, role, future, meta)
+                elif kind == "thumbnail":
+                    self._finish_thumbnail(token, future, meta)
                 elif kind == "analysis":
                     self._finish_analysis(token, role, future)
                 elif kind == "match":
@@ -1550,6 +2410,7 @@ class ImageInspectorWorkspace:
                 LOGGER.exception("Image Inspector background result handling failed")
         if self._pending == 0:
             self.progress.stop()
+            self.progress.grid_remove()
         self._poll_after_id = self.root.after(50, self._poll_background)
 
     def _finish_load(self, token: int, role: str, future: Future[Any], meta: Dict[str, Any]) -> None:
@@ -1565,6 +2426,19 @@ class ImageInspectorWorkspace:
         self._image_cache.put(image_data)
         self._apply_loaded_image(token, role, image_data, from_cache=False)
 
+    def _finish_thumbnail(self, token: int, future: Future[Any], meta: Dict[str, Any]) -> None:
+        generation = int(meta.get("generation", token))
+        if generation != self._folder_thumbnail_generation:
+            return
+        index = int(meta.get("index", -1))
+        try:
+            thumbnail = future.result()
+        except Exception:
+            LOGGER.debug("Folder thumbnail generation failed", exc_info=True)
+            self.folder_thumbnail_strip.mark_thumbnail_failed(index)
+            return
+        self.folder_thumbnail_strip.apply_thumbnail(index, thumbnail)
+
     def _apply_loaded_image(self, token: int, role: str, image_data: ImageData, *, from_cache: bool) -> None:
         if token != self._load_tokens[role] or self._closed:
             return
@@ -1578,58 +2452,100 @@ class ImageInspectorWorkspace:
             f"已打开{cache_note} {image_data.filename}：{image_data.width}×{image_data.height}，"
             f"原始位深 {image_data.bit_depth}-bit{precision_note}。"
         )
-        self._refresh_histogram()
-        if role in COMPARISON_ROLES and self.rois["before"] is not None:
+        self._refresh_information_sidebar()
+        if all(self.images[active_role] is not None for active_role in self.active_roles):
+            if self._fit_after_id is not None:
+                try:
+                    self.root.after_cancel(self._fit_after_id)
+                except tk.TclError:
+                    pass
+            self._fit_after_id = self.root.after_idle(self._fit_loaded_images)
+        anchor_role = self.roi_anchor_role
+        if (
+            anchor_role is not None
+            and role != anchor_role
+            and self.rois.get(anchor_role) is not None
+            and self.images.get(anchor_role) is not None
+        ):
             self._start_match(role)
 
+    def _fit_loaded_images(self) -> None:
+        self._fit_after_id = None
+        if self._closed:
+            return
+        if all(self.images[role] is not None for role in self.active_roles):
+            for role in self.active_roles:
+                self.views[role].request_initial_fit()
+
     def _invalidate_role(self, role: str, *, clear_image: bool, refresh: bool = True) -> None:
+        was_anchor = role == self.roi_anchor_role
         self._load_tokens[role] += 1
         self._analysis_tokens[role] += 1
+        self._match_tokens[role] += 1
+        self._matching_roles.discard(role)
         self.rois[role] = None
         self.roi_statistics[role] = None
         self.fixed_pixels[role] = None
+        self.match_results[role] = None
         view = self.views[role]
         view.set_roi(None)
         view.set_sample_point(None)
         if clear_image:
             self.images[role] = None
             view.clear_image()
-        if role == "before":
-            for target in COMPARISON_ROLES:
+        if was_anchor:
+            self.roi_anchor_role = None
+            for target in IMAGE_ROLES:
+                if target == role:
+                    continue
+                self._analysis_tokens[target] += 1
                 self._match_tokens[target] += 1
                 self._matching_roles.discard(target)
+                self.rois[target] = None
+                self.roi_statistics[target] = None
                 self.match_results[target] = None
+                self.views[target].set_roi(None)
+            for target in COMPARISON_ROLES:
                 self.comparisons[target] = None
         else:
-            self._match_tokens[role] += 1
-            self._matching_roles.discard(role)
-            self.match_results[role] = None
-            self.comparisons[role] = None
+            if role == "before":
+                for target in COMPARISON_ROLES:
+                    self.comparisons[target] = None
+            elif role in COMPARISON_ROLES:
+                self.comparisons[role] = None
         self._sync_pair_aliases()
         if refresh:
             self._refresh_outputs()
 
     def _sync_pair_aliases(self) -> None:
-        self.match_result = self.match_results["after"]
+        if self.roi_anchor_role == "before":
+            self.match_result = self.match_results["after"]
+        elif self.roi_anchor_role == "after":
+            self.match_result = self.match_results["before"]
+        else:
+            self.match_result = None
         self.comparison = self.comparisons["after"]
 
     def _on_pixel(self, role: str, x: int, y: int, fixed: bool) -> None:
         image_data = self.images.get(role)
-        if image_data is None:
+        if image_data is None or not fixed:
             return
-        try:
-            metrics = pixel_metrics(image_data, x, y)
-        except ImageInspectorError:
-            return
-        self.pixel_status_var.set(
-            f"{_role_label(role)}  X={x}  Y={y}   R={metrics.rgb[0]:.0f}  G={metrics.rgb[1]:.0f}  B={metrics.rgb[2]:.0f}   "
-            f"R/G={_ratio(metrics.r_over_g)}  B/G={_ratio(metrics.b_over_g)}  主导={metrics.maximum_channel}"
-        )
-        if fixed:
-            self.fixed_pixels[role] = metrics
-            view = self.views[role]
-            view.set_sample_point((x, y))
-            self._refresh_outputs()
+        normalized_x = x / max(1, image_data.width - 1)
+        normalized_y = y / max(1, image_data.height - 1)
+        for target in self.active_roles:
+            target_image = self.images.get(target)
+            if target_image is None:
+                continue
+            target_x = min(target_image.width - 1, max(0, int(round(normalized_x * (target_image.width - 1)))))
+            target_y = min(target_image.height - 1, max(0, int(round(normalized_y * (target_image.height - 1)))))
+            try:
+                metrics = pixel_metrics(target_image, target_x, target_y)
+            except ImageInspectorError:
+                continue
+            self.fixed_pixels[target] = metrics
+            self.views[target].set_sample_point((target_x, target_y))
+        self._metric_mode = "pixel"
+        self._refresh_outputs()
 
     def _on_roi(self, role: str, roi: ROI) -> None:
         image_data = self.images.get(role)
@@ -1644,32 +2560,44 @@ class ImageInspectorWorkspace:
             )
             return
         named = ROI(clipped.x, clipped.y, clipped.width, clipped.height, self.settings.default_roi_name)
-        if role != "before" and self.rois["before"] is None:
-            messagebox.showinfo("需要图像 1 ROI", "请先在图像 1 中框选 ROI。", parent=self.root)
-            return
-        self.rois[role] = named
-        view = self.views[role]
-        view.set_roi(named, colour="#30D158" if role == "before" else "#FF9F0A")
-        if role == "before":
-            for target in COMPARISON_ROLES:
-                self._analysis_tokens[target] += 1
+        anchor_role = self.roi_anchor_role
+        if anchor_role is None or self.rois.get(anchor_role) is None:
+            anchor_role = role
+            self.roi_anchor_role = role
+        self._metric_mode = "roi"
+        if role == anchor_role:
+            for target in IMAGE_ROLES:
                 self._match_tokens[target] += 1
                 self._matching_roles.discard(target)
+                self.match_results[target] = None
+                if target == anchor_role:
+                    continue
+                self._analysis_tokens[target] += 1
                 self.rois[target] = None
                 self.roi_statistics[target] = None
                 self.views[target].set_roi(None)
-                self.match_results[target] = None
+            for target in COMPARISON_ROLES:
                 self.comparisons[target] = None
+            self.rois[role] = named
+            self.roi_statistics[role] = None
+            self.views[role].set_roi(named, colour="#30D158")
         else:
-            assert self.rois["before"] is not None
+            anchor_roi = self.rois[anchor_role]
+            assert anchor_roi is not None
             self._match_tokens[role] += 1
             self._matching_roles.discard(role)
-            self.match_results[role] = manual_match(self.rois["before"], named)
+            self.rois[role] = named
+            self.roi_statistics[role] = None
+            self.views[role].set_roi(named, colour="#FF9F0A")
+            self.match_results[role] = manual_match(anchor_roi, named)
             self._refresh_match_status()
         self._sync_pair_aliases()
+        self._refresh_outputs()
         self._start_analysis(role, named)
-        if role == "before":
-            for target in self.active_roles[1:]:
+        if role == anchor_role:
+            for target in self.active_roles:
+                if target == anchor_role:
+                    continue
                 if self.images[target] is not None:
                     self._start_match(target)
 
@@ -1689,7 +2617,7 @@ class ImageInspectorWorkspace:
             statistics = future.result()
         except Exception as exc:
             LOGGER.exception("ROI analysis failed")
-            messagebox.showerror("ROI 分析失败", str(exc), parent=self.root)
+            messagebox.showerror("选区统计失败", str(exc), parent=self.root)
             return
         self.roi_statistics[role] = statistics
         self.status_var.set(
@@ -1705,27 +2633,29 @@ class ImageInspectorWorkspace:
             return self.settings.search_range
 
     def _start_match(self, role: str) -> None:
-        if role not in COMPARISON_ROLES:
+        anchor_role = self.roi_anchor_role
+        if anchor_role is None or role == anchor_role or role not in self.active_roles:
             return
-        before_image = self.images["before"]
-        after_image = self.images[role]
-        before_roi = self.rois["before"]
-        if before_image is None or after_image is None or before_roi is None:
+        anchor_image = self.images[anchor_role]
+        target_image = self.images[role]
+        anchor_roi = self.rois[anchor_role]
+        if anchor_image is None or target_image is None or anchor_roi is None:
             return
         self._match_tokens[role] += 1
         token = self._match_tokens[role]
         self._matching_roles.add(role)
         self._refresh_match_status()
-        self.match_status_label.configure(style="InspectorMatchMedium.TLabel")
-        self.status_var.set(f"正在后台搜索 {_role_label(role)} 邻近区域...")
+        self.status_var.set(
+            f"正在从 {_role_label(anchor_role)} 匹配 {_role_label(role)} 邻近区域..."
+        )
         self._submit(
             "match",
             token,
             role,
             match_roi,
-            before_image.rgb,
-            after_image.rgb,
-            before_roi,
+            anchor_image.rgb,
+            target_image.rgb,
+            anchor_roi,
             kwargs={
                 "search_range": self._search_range(),
                 "reliable_threshold": self.settings.match_threshold,
@@ -1754,22 +2684,18 @@ class ImageInspectorWorkspace:
             self.status_var.set(result.warning)
 
     def _refresh_match_status(self) -> None:
-        targets = self.active_roles[1:]
+        targets = tuple(role for role in self.active_roles if role != self.roi_anchor_role)
         if not targets:
-            self.match_status_var.set("ROI Match Score: —")
-            self.match_status_label.configure(style="InspectorMatchLow.TLabel")
+            self.match_status_var.set("匹配：—")
             return
         sections = []
-        worst = "high"
         for role in targets:
             if role in self._matching_roles:
                 sections.append(f"{_role_label(role)}: 匹配中")
-                worst = "medium" if worst == "high" else worst
                 continue
             result = self.match_results[role]
             if result is None:
                 sections.append(f"{_role_label(role)}: —")
-                worst = "low"
             elif result.manually_confirmed and result.method == "用户手动选择":
                 sections.append(f"{_role_label(role)}: 手动确认")
             elif result.manually_confirmed:
@@ -1777,22 +2703,16 @@ class ImageInspectorWorkspace:
             else:
                 gate = "" if result.reliable else " 未通过门禁"
                 sections.append(f"{_role_label(role)}: {result.score * 100.0:.1f}% {result.confidence}{gate}")
-                if not result.reliable:
-                    worst = "low"
-                elif result.confidence == "中" and worst == "high":
-                    worst = "medium"
-        self.match_status_var.set("ROI Match · " + " | ".join(sections))
-        style = {
-            "high": "InspectorMatchHigh.TLabel",
-            "medium": "InspectorMatchMedium.TLabel",
-            "low": "InspectorMatchLow.TLabel",
-        }[worst]
-        self.match_status_label.configure(style=style)
+        self.match_status_var.set("匹配 · " + " | ".join(sections))
 
     def accept_match(self) -> None:
-        roles = [role for role in self.active_roles[1:] if self.match_results[role] is not None]
+        roles = [
+            role
+            for role in self.active_roles
+            if role != self.roi_anchor_role and self.match_results[role] is not None
+        ]
         if not roles:
-            messagebox.showinfo("尚无匹配", "请先在图像 1 中框选 ROI 并等待匹配完成。", parent=self.root)
+            messagebox.showinfo("尚无匹配", "请先在任意图片中框选 ROI 并等待匹配完成。", parent=self.root)
             return
         for role in roles:
             result = self.match_results[role]
@@ -1802,120 +2722,122 @@ class ImageInspectorWorkspace:
             self.views[role].set_roi(confirmed.after_roi, colour="#30D158")
         self._sync_pair_aliases()
         self._refresh_match_status()
-        self.status_var.set(f"已接受 {len(roles)} 个 ROI；结论仍以各 ROI 属于同一物体区域为前提。")
+        self.status_var.set(f"已接受 {len(roles)} 个选区匹配。")
         self._refresh_outputs()
 
     def clear_roi(self) -> None:
-        for target in COMPARISON_ROLES:
-            self._match_tokens[target] += 1
-            self._matching_roles.discard(target)
         for role in IMAGE_ROLES:
             self._analysis_tokens[role] += 1
+            self._match_tokens[role] += 1
+            self._matching_roles.discard(role)
             self.rois[role] = None
             self.roi_statistics[role] = None
+            self.match_results[role] = None
             self.views[role].set_roi(None)
+        self.roi_anchor_role = None
         for target in COMPARISON_ROLES:
-            self.match_results[target] = None
             self.comparisons[target] = None
         self._sync_pair_aliases()
         self._refresh_match_status()
+        self._metric_mode = "pixel" if any(self.fixed_pixels.values()) else "none"
         self.status_var.set("ROI 已清除。")
         self._refresh_outputs()
 
-    def _format_pixel(self, role: str, metrics: PixelMetrics) -> str:
-        alpha = "" if metrics.alpha is None else f"\nAlpha: {metrics.alpha:.2f}"
-        return (
-            f"{_role_label(role)} 固定像素\n"
-            f"坐标: X={metrics.x}  Y={metrics.y}\n"
-            f"RGB: {_triplet(metrics.rgb)}\n"
-            f"归一化 RGB: {_percent_triplet(metrics.normalized_rgb)}\n"
-            f"R-G / R-B / G-B: {_triplet(metrics.channel_differences)}\n"
-            f"R/G: {_ratio(metrics.r_over_g)}    B/G: {_ratio(metrics.b_over_g)}\n"
-            f"HSV: H={metrics.hsv[0]:.2f}°  S={metrics.hsv[1]:.4f}  V={metrics.hsv[2]:.4f}\n"
-            f"CIE Lab (D65): L*={metrics.lab[0]:.3f}  a*={metrics.lab[1]:.3f}  b*={metrics.lab[2]:.3f}\n"
-            f"相对亮度: {metrics.relative_luminance:.6f}\n"
-            f"最大 / 最小通道: {metrics.maximum_channel} / {metrics.minimum_channel}\n"
-            f"最大通道差: {metrics.maximum_channel_difference:.3f}\n"
-            f"接近中性: {'是' if metrics.near_neutral else '否'}\n"
-            f"颜色倾向: {metrics.color_tendency}{alpha}"
-        )
-
-    def _format_roi(self, role: str, stats: ROIStatistics) -> str:
-        neutral = f"\n中性区域判断: {stats.neutral_assessment}" if self.neutral_mode_var.get() else ""
-        return (
-            f"{_role_label(role)} {stats.roi.name}\n"
-            f"坐标: x={stats.roi.x}, y={stats.roi.y}, width={stats.roi.width}, height={stats.roi.height}\n"
-            f"像素数量: {stats.pixel_count:,}\n"
-            f"Mean RGB: {_triplet(stats.mean_rgb)}\n"
-            f"Median RGB: {_triplet(stats.median_rgb)}\n"
-            f"Std RGB: {_triplet(stats.std_rgb)}\n"
-            f"Min RGB: {_triplet(stats.min_rgb)}\n"
-            f"Max RGB: {_triplet(stats.max_rgb)}\n"
-            f"R/G: {_ratio(stats.r_over_g)}    B/G: {_ratio(stats.b_over_g)}\n"
-            f"归一化 RGB: {_percent_triplet(stats.normalized_rgb)}\n"
-            f"Mean HSV: H={stats.hsv_mean[0]:.2f}°  S={stats.hsv_mean[1]:.4f}  V={stats.hsv_mean[2]:.4f}\n"
-            f"Mean Lab (D65): L*={stats.lab_mean[0]:.3f}  a*={stats.lab_mean[1]:.3f}  b*={stats.lab_mean[2]:.3f}\n"
-            f"相对亮度: {stats.relative_luminance:.6f}    饱和度: {stats.saturation:.4f}\n"
-            f"最大通道: {stats.maximum_channel}    最大通道差: {stats.maximum_channel_difference:.3f}\n"
-            f"接近高光剪切比例: {stats.clipped_ratio * 100.0:.3f}%\n"
-            f"暗部像素比例: {stats.dark_ratio * 100.0:.3f}%\n"
-            f"区域稳定性: {stats.stability}（仅表示内部颜色一致性，不代表匹配准确度）\n"
-            f"颜色倾向: {stats.color_tendency}{neutral}"
-        )
-
     def _refresh_outputs(self) -> None:
-        sections = []
-        for role in self.active_roles:
-            if self.fixed_pixels[role] is not None:
-                sections.append(self._format_pixel(role, self.fixed_pixels[role]))
-            if self.roi_statistics[role] is not None:
-                sections.append(self._format_roi(role, self.roi_statistics[role]))
-        self._set_text(self.pixel_text, "\n\n".join(sections) if sections else "尚未选择像素或 ROI。")
-
+        self._refresh_metric_strip()
         reference = self.roi_statistics["before"]
-        comparison_sections = []
-        conclusion_sections = []
-        for role in self.active_roles[1:]:
+        for role in COMPARISON_ROLES:
+            if role not in self.active_roles:
+                self.comparisons[role] = None
+                continue
             target = self.roi_statistics[role]
-            match = self.match_results[role]
             if reference is None or target is None:
                 self.comparisons[role] = None
-                if match is not None and not match.reliable and match.warning:
-                    conclusion_sections.append(f"{_role_label(role)}\n{match.warning}")
                 continue
-            result = compare_statistics(
+            reliable, score, manually_confirmed, _style = self._comparison_pair_gate("before", role)
+            self.comparisons[role] = compare_statistics(
                 reference,
                 target,
-                reliable=match is not None and match.reliable,
-                match_score=None if match is None else match.score,
-                manually_confirmed=False if match is None else match.manually_confirmed,
+                reliable=reliable,
+                match_score=score,
+                manually_confirmed=manually_confirmed,
             )
-            self.comparisons[role] = result
-            comparison_sections.append(self._format_comparison(role, result))
-            conclusion_sections.append(f"{_role_label(role)}\n" + "\n\n".join(result.conclusions))
         self._sync_pair_aliases()
-        if comparison_sections:
-            self._set_text(self.compare_text, ("\n\n" + "─" * 72 + "\n\n").join(comparison_sections))
-        else:
-            self._set_text(self.compare_text, "选择 2–4 张图片后，在图像 1 中框选 ROI 即可显示差异。")
-        self._set_text(
-            self.conclusion_text,
-            ("\n\n" + "─" * 72 + "\n\n").join(conclusion_sections)
-            if conclusion_sections
-            else "结论将分别受图像 2–4 的 ROI 匹配置信度门禁约束。",
-        )
         self._refresh_comparison_table()
-        self._refresh_histogram()
+        self._refresh_information_sidebar()
+
+    def _role_from_label(self, label: str) -> Optional[str]:
+        return next((role for role in self.active_roles if _role_label(role) == label), None)
+
+    def _on_comparison_pair_changed(self, changed: str) -> None:
+        if self._comparison_pair_guard:
+            return
+        labels = tuple(_role_label(role) for role in self.active_roles)
+        base_label = self.comparison_base_var.get()
+        target_label = self.comparison_role_var.get()
+        if base_label and base_label == target_label and len(labels) > 1:
+            replacement = next(label for label in labels if label != base_label)
+            self._comparison_pair_guard = True
+            if changed == "base":
+                self.comparison_role_var.set(replacement)
+            else:
+                self.comparison_base_var.set(replacement)
+            self._comparison_pair_guard = False
+        self._refresh_comparison_table()
+
+    def _swap_comparison_pair(self) -> None:
+        base_label = self.comparison_base_var.get()
+        target_label = self.comparison_role_var.get()
+        if not base_label or not target_label:
+            return
+        self._comparison_pair_guard = True
+        self.comparison_base_var.set(target_label)
+        self.comparison_role_var.set(base_label)
+        self._comparison_pair_guard = False
+        self._refresh_comparison_table()
+
+    def _comparison_pair_gate(
+        self,
+        base_role: str,
+        target_role: str,
+    ) -> Tuple[bool, Optional[float], bool, str]:
+        anchor_role = self.roi_anchor_role
+        if anchor_role is None:
+            return False, None, False, "low"
+        required_roles = tuple(role for role in (base_role, target_role) if role != anchor_role)
+        matches = [self.match_results[role] for role in required_roles]
+        if any(match is None for match in matches):
+            return False, None, False, "low"
+        resolved = [match for match in matches if match is not None]
+        reliable = bool(resolved) and all(match.reliable for match in resolved)
+        score = min((match.score for match in resolved), default=None)
+        manually_confirmed = bool(resolved) and all(match.manually_confirmed for match in resolved)
+        if manually_confirmed or (reliable and all(match.confidence == "高" for match in resolved)):
+            style = "high"
+        elif reliable:
+            style = "medium"
+        else:
+            style = "low"
+        return reliable, score, manually_confirmed, style
 
     @staticmethod
-    def _change_direction(delta: Optional[float], *, tolerance: float = 1e-9) -> str:
-        if delta is None:
+    def _percentage_change(
+        before: Optional[float],
+        delta: Optional[float],
+        *,
+        tolerance: float = 1e-9,
+    ) -> str:
+        if before is None or delta is None:
             return "—"
-        if delta > tolerance:
-            return "↑ 上升"
-        if delta < -tolerance:
-            return "↓ 下降"
-        return "≈ 基本不变"
+        if abs(delta) <= tolerance:
+            return "≈ 0.00%"
+        direction = "↑" if delta > 0.0 else "↓"
+        percentage = (
+            math.copysign(100.0, delta)
+            if abs(before) <= 1e-12
+            else delta / abs(before) * 100.0
+        )
+        return f"{direction} {percentage:+.2f}%"
 
     @staticmethod
     def _comparison_value(value: Optional[float], digits: int, *, signed: bool = False) -> str:
@@ -1927,49 +2849,61 @@ class ImageInspectorWorkspace:
     def _refresh_comparison_table(self) -> None:
         if not hasattr(self, "compare_tree"):
             return
+
         for item in self.compare_tree.get_children():
             self.compare_tree.delete(item)
-        selected_label = self.comparison_role_var.get()
-        role = next((item for item in self.active_roles[1:] if _role_label(item) == selected_label), None)
-        self.compare_tree.heading("target", text=selected_label or "图像 2")
-        if role is None:
+        base_label = self.comparison_base_var.get()
+        target_label = self.comparison_role_var.get()
+        base_role = self._role_from_label(base_label)
+        target_role = self._role_from_label(target_label)
+        self.compare_tree.heading("reference", text=base_label or "图像 A")
+        self.compare_tree.heading("target", text=target_label or "图像 B")
+        if base_role is None or target_role is None or base_role == target_role:
             self.reference_swatch.configure(background=BORDER)
             self.target_swatch.configure(background=BORDER)
-            self.comparison_files_var.set("请选择 2–4 张图片并完成 ROI 分析")
+            self.comparison_files_var.set("请选择 2–4 张图片并框选区域")
             self.comparison_gate_var.set("匹配置信度：—")
             self.comparison_gate_label.configure(style="InspectorMatchLow.TLabel")
             self.compare_tree.insert("", "end", values=("等待对比数据", "—", "—", "—", "—"))
             return
 
-        reference_image = self.images["before"]
-        target_image = self.images[role]
+        reference_image = self.images[base_role]
+        target_image = self.images[target_role]
         reference_name = "尚未加载" if reference_image is None else reference_image.filename
         target_name = "尚未加载" if target_image is None else target_image.filename
         self.comparison_files_var.set(f"{reference_name}  →  {target_name}")
-        result = self.comparisons[role]
-        match = self.match_results[role]
-        if match is None:
-            self.comparison_gate_var.set("匹配置信度：等待 ROI")
+        reliable, score, manually_confirmed, gate_style = self._comparison_pair_gate(base_role, target_role)
+        if score is None:
+            self.comparison_gate_var.set("匹配置信度：等待选区")
             self.comparison_gate_label.configure(style="InspectorMatchLow.TLabel")
-        elif match.manually_confirmed:
-            score = "" if match.method == "用户手动选择" else f" · {match.score * 100.0:.1f}%"
-            self.comparison_gate_var.set(f"匹配置信度：已手动确认{score}")
+        elif manually_confirmed:
+            self.comparison_gate_var.set(f"匹配置信度：已手动确认 · 组合最低 {score * 100.0:.1f}%")
             self.comparison_gate_label.configure(style="InspectorMatchHigh.TLabel")
         else:
-            gate = "允许保守解释" if match.reliable else "未通过门禁，仅显示数值"
-            self.comparison_gate_var.set(f"匹配置信度：{match.score * 100.0:.1f}% · {match.confidence} · {gate}")
-            style = (
-                "InspectorMatchHigh.TLabel"
-                if match.reliable and match.confidence == "高"
-                else "InspectorMatchMedium.TLabel"
-                if match.reliable
-                else "InspectorMatchLow.TLabel"
+            gate = "允许保守解释" if reliable else "未通过门禁，仅显示数值"
+            self.comparison_gate_var.set(f"匹配置信度：组合最低 {score * 100.0:.1f}% · {gate}")
+            self.comparison_gate_label.configure(
+                style={
+                    "high": "InspectorMatchHigh.TLabel",
+                    "medium": "InspectorMatchMedium.TLabel",
+                    "low": "InspectorMatchLow.TLabel",
+                }[gate_style]
             )
-            self.comparison_gate_label.configure(style=style)
+        base_stats = self.roi_statistics[base_role]
+        target_stats = self.roi_statistics[target_role]
+        result = None
+        if base_stats is not None and target_stats is not None:
+            result = compare_statistics(
+                base_stats,
+                target_stats,
+                reliable=reliable,
+                match_score=score,
+                manually_confirmed=manually_confirmed,
+            )
         if result is None:
             self.reference_swatch.configure(background=BORDER)
             self.target_swatch.configure(background=BORDER)
-            self.compare_tree.insert("", "end", values=("等待 ROI 统计", "—", "—", "—", "—"))
+            self.compare_tree.insert("", "end", values=("等待选区", "—", "—", "—", "—"))
             return
 
         def swatch_colour(values: Tuple[float, float, float]) -> str:
@@ -1978,7 +2912,6 @@ class ImageInspectorWorkspace:
 
         self.reference_swatch.configure(background=swatch_colour(result.before.mean_rgb))
         self.target_swatch.configure(background=swatch_colour(result.after.mean_rgb))
-
         rows: list[Tuple[str, str, str, str, str]] = []
 
         def add(
@@ -1988,7 +2921,6 @@ class ImageInspectorWorkspace:
             delta: Optional[float],
             *,
             digits: int = 3,
-            change: Optional[str] = None,
         ) -> None:
             rows.append(
                 (
@@ -1996,21 +2928,26 @@ class ImageInspectorWorkspace:
                     self._comparison_value(before, digits),
                     self._comparison_value(after, digits),
                     self._comparison_value(delta, digits, signed=True),
-                    change or self._change_direction(delta, tolerance=10 ** (-(digits + 1))),
+                    self._percentage_change(before, delta, tolerance=10 ** (-(digits + 1))),
                 )
             )
 
         for index, channel in enumerate("RGB"):
-            percentage = result.delta_rgb_percent[index]
-            direction = self._change_direction(result.delta_rgb[index], tolerance=0.005)
-            change = f"{direction} · " + ("N/A" if percentage is None else f"{percentage:+.2f}%")
             add(
-                f"Mean {channel}",
+                f"Mean {channel}（0–255）",
                 result.before.mean_rgb[index],
                 result.after.mean_rgb[index],
                 result.delta_rgb[index],
                 digits=2,
-                change=change,
+            )
+        for index, channel in enumerate("RGB"):
+            delta_share = result.delta_normalized_rgb[index] * 100.0
+            add(
+                f"{channel} 占比 %",
+                result.before.normalized_rgb[index] * 100.0,
+                result.after.normalized_rgb[index] * 100.0,
+                delta_share,
+                digits=3,
             )
         for index, channel in enumerate("RGB"):
             median_delta = result.after.median_rgb[index] - result.before.median_rgb[index]
@@ -2043,7 +2980,6 @@ class ImageInspectorWorkspace:
             result.after.clipped_ratio * 100.0,
             clipped_delta,
             digits=3,
-            change=self._change_direction(clipped_delta, tolerance=0.0005) + " · 百分点",
         )
         add(
             "暗部像素 %",
@@ -2051,48 +2987,9 @@ class ImageInspectorWorkspace:
             result.after.dark_ratio * 100.0,
             dark_delta,
             digits=3,
-            change=self._change_direction(dark_delta, tolerance=0.0005) + " · 百分点",
         )
         for row in rows:
             self.compare_tree.insert("", "end", values=row)
-
-    def _format_comparison(self, role: str, result: ComparisonResult) -> str:
-        percent = ["N/A" if value is None else f"{value:+.2f}%" for value in result.delta_rgb_percent]
-        reference_name = self.images["before"].filename if self.images["before"] is not None else _role_label("before")
-        target_name = self.images[role].filename if self.images[role] is not None else _role_label(role)
-        return (
-            f"{_role_label('before')} · {reference_name}\n"
-            f"Mean RGB: {_triplet(result.before.mean_rgb)}    Median RGB: {_triplet(result.before.median_rgb)}\n"
-            f"R/G={_ratio(result.before.r_over_g)}  B/G={_ratio(result.before.b_over_g)}\n"
-            f"HSV={_triplet(result.before.hsv_mean, 4)}    Lab={_triplet(result.before.lab_mean, 3)}\n"
-            f"亮度={result.before.relative_luminance:.6f}  饱和度={result.before.saturation:.4f}\n\n"
-            f"{_role_label(role)} · {target_name}\n"
-            f"Mean RGB: {_triplet(result.after.mean_rgb)}    Median RGB: {_triplet(result.after.median_rgb)}\n"
-            f"R/G={_ratio(result.after.r_over_g)}  B/G={_ratio(result.after.b_over_g)}\n"
-            f"HSV={_triplet(result.after.hsv_mean, 4)}    Lab={_triplet(result.after.lab_mean, 3)}\n"
-            f"亮度={result.after.relative_luminance:.6f}  饱和度={result.after.saturation:.4f}\n\n"
-            "Delta\n"
-            f"ΔR / ΔG / ΔB: {_triplet(result.delta_rgb)}\n"
-            f"ΔR% / ΔG% / ΔB%: {' / '.join(percent)}\n"
-            f"ΔR/G={_ratio(result.delta_r_over_g)}  ΔB/G={_ratio(result.delta_b_over_g)}\n"
-            f"ΔH / ΔS / ΔV: {_triplet(result.delta_hsv, 4)}\n"
-            f"ΔL* / Δa* / Δb*: {_triplet(result.delta_lab, 3)}\n"
-            f"Δ亮度={result.delta_luminance:+.6f}  Δ饱和度={result.delta_saturation:+.4f}\n"
-            f"结论门禁: {'允许保守解释' if result.reliable else '低置信度，仅显示原始数值'}"
-        )
-
-    def _refresh_histogram(self) -> None:
-        selected_label = self.histogram_role_var.get()
-        role = next((item for item in self.active_roles if _role_label(item) == selected_label), "before")
-        image_data = self.images.get(role)
-        stats = self.roi_statistics.get(role)
-        if self.histogram_scope_var.get() == "当前 ROI":
-            histogram = None if stats is None else stats.histogram
-            scope = f"{_role_label(role)} 当前 ROI" if stats is not None else f"{_role_label(role)} 尚无 ROI"
-        else:
-            histogram = None if image_data is None else image_data.histogram
-            scope = f"{_role_label(role)} 整图" if image_data is not None else f"{_role_label(role)} 尚无图片"
-        self.histogram_canvas.set_histogram(histogram, scope)
 
     def fit_images(self) -> None:
         for role in self.active_roles:
@@ -2134,16 +3031,10 @@ class ImageInspectorWorkspace:
     def zoom_out(self) -> None:
         self._zoom_active(1.0 / 1.25)
 
-    def _on_neutral_mode_changed(self) -> None:
-        self._settings_changed()
-        self._refresh_outputs()
-
     def _on_histogram_visibility_changed(self) -> None:
-        if self.show_histogram_var.get():
-            self.notebook.add(self.histogram_tab, text="RGB 直方图")
-            self.notebook.insert(2, self.histogram_tab)
-        else:
-            self.notebook.hide(self.histogram_tab)
+        for variable in self.histogram_visible_vars.values():
+            variable.set(self.show_histogram_var.get())
+        self._refresh_information_sidebar()
         self._settings_changed()
 
     def _settings_changed(self) -> None:
@@ -2152,10 +3043,13 @@ class ImageInspectorWorkspace:
     def _persist_settings(self) -> None:
         if self._closed:
             return
-        panel_ratio = self.settings.panel_ratio
+        panel_ratio = self._sidebar_ratio
         try:
-            if len(self.viewer_pane.panes()) > 1 and self.viewer_pane.winfo_width() > 0:
-                panel_ratio = self.viewer_pane.sashpos(0) / self.viewer_pane.winfo_width()
+            panes = [str(pane) for pane in self.main_pane.panes()]
+            if str(self.sidebar_frame) in panes and len(panes) > 1 and self.main_pane.winfo_width() > 0:
+                width = self.main_pane.winfo_width()
+                panel_ratio = (width - self.main_pane.sashpos(len(panes) - 2)) / width
+                self._sidebar_ratio = panel_ratio
         except (AttributeError, tk.TclError):
             pass
         try:
@@ -2169,7 +3063,6 @@ class ImageInspectorWorkspace:
             show_histogram=self.show_histogram_var.get(),
             live_pixel=self.live_pixel_var.get(),
             default_roi_name=self.settings.default_roi_name,
-            neutral_mode=self.neutral_mode_var.get(),
             window_geometry=geometry,
             panel_ratio=panel_ratio,
             include_full_path=self.include_full_path_var.get(),
@@ -2223,11 +3116,13 @@ class ImageInspectorWorkspace:
         backend = "OpenCV 灰度 NCC" if opencv_available() else "NumPy FFT 灰度 NCC 后备路径（OpenCV 未安装）"
         messagebox.showinfo(
             "图像分析器边界",
-            "本工具可直接打开或按文件夹分组浏览 1–4 张普通 JPG/JPEG/PNG/BMP/TIFF，检查最终 sRGB 像素。"
-            "多图时会分别计算图像 1 与图像 2–4 的差异；文件名和角色不会被预设。\n\n"
+            "本工具可直接打开或从左侧图库选择 1–4 张普通 JPG/JPEG/PNG/BMP/TIFF；"
+            "点按单选，⌘/Ctrl 点按多选。底部显示同步像素或选区的 R/G/B、R/G 与 R/B，"
+            "右侧检查器可逐图显示直方图和 EXIF。多图时可任意选择图像 A/B；"
+            "首次框选的图片作为选区锚点，其他图片仍可逐张手动调整，文件名和角色不会被预设。\n\n"
             f"自动匹配：{backend}；支持轻微平移、很小裁切以及轻微曝光/颜色变化。"
             "旋转、透视、大幅缩放、物体移动、遮挡或景深变化可能导致失败。\n\n"
-            "低于配置阈值时只显示原始变化数值，禁止输出确定性颜色改善结论。"
+            "低于配置阈值时对比表只显示原始变化数值。"
             "结果不能直接解释为 RAW、AWB Gain、CCM、CV、SCE 或其他 ISP 模块参数。",
             parent=self.root,
         )
@@ -2266,12 +3161,20 @@ class ImageInspectorWorkspace:
             return
         self._persist_settings()
         self._closed = True
+        self._folder_thumbnail_generation += 1
+        self.folder_thumbnail_strip.shutdown()
         if self._poll_after_id is not None:
             try:
                 self.root.after_cancel(self._poll_after_id)
             except tk.TclError:
                 pass
             self._poll_after_id = None
+        if self._fit_after_id is not None:
+            try:
+                self.root.after_cancel(self._fit_after_id)
+            except tk.TclError:
+                pass
+            self._fit_after_id = None
         for future in tuple(self._futures):
             future.cancel()
         self._image_cache.clear()

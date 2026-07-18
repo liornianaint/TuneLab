@@ -87,24 +87,42 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         self.assertNotIn("打开 Before...", menu_labels)
         self.assertNotIn("打开 After...", menu_labels)
         self.assertTrue(self.app.folder_address_entry.winfo_exists())
+        self.assertTrue(self.app.folder_thumbnail_strip.winfo_exists())
         self.assertFalse(hasattr(self.app, "folder_tree"))
+        self.assertFalse(hasattr(self.app, "open_comparison_button"))
+        self.assertEqual(str(self.app.sidebar_toggle_button.cget("text")), "收起信息")
+        self.assertEqual(str(self.app.sidebar_header_toggle_button.cget("text")), "›")
+        self.assertEqual(str(self.app.sidebar_header_toggle_button.cget("style")), "Icon.TButton")
+        self.assertEqual(self.app.toolbar_panel.grid_slaves(row=1), [])
+        self.assertFalse(self.app.progress.winfo_manager())
         label_texts = []
+        widget_texts = []
 
         def collect_labels(widget: tk.Misc) -> None:
             for child in widget.winfo_children():
+                if "text" in child.keys():
+                    widget_texts.append(str(child.cget("text")))
                 if child.winfo_class() == "TLabel" and "text" in child.keys():
                     label_texts.append(str(child.cget("text")))
                 collect_labels(child)
 
         collect_labels(self.app.outer)
         self.assertFalse(any("不等同于 Sensor RAW" in text for text in label_texts))
-        visible_copy = "\n".join(label_texts) + self.app.compare_text.get("1.0", "end")
+        visible_copy = "\n".join(label_texts)
         visible_copy += "\n".join(
             str(self.app.compare_tree.heading(column, "text"))
             for column in self.app.compare_tree.cget("columns")
         )
         self.assertNotIn("参考图", visible_copy)
         self.assertNotIn("对比图", visible_copy)
+        self.assertNotIn("详细数据", visible_copy)
+        self.assertNotIn("结论", visible_copy)
+        self.assertNotIn("macOS 式图库选择", visible_copy)
+        self.assertNotIn("Mean RGB 是 0–255", visible_copy)
+        self.assertNotIn("将当前选区视为中性区域", widget_texts)
+        self.assertFalse(hasattr(self.app, "pixel_tab"))
+        self.assertFalse(hasattr(self.app, "conclusion_tab"))
+        self.assertFalse(hasattr(self.app, "compare_text"))
 
     def test_one_to_four_image_layouts_without_toplevel(self) -> None:
         for count in range(1, 5):
@@ -113,7 +131,19 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
             visible = [role for role, view in self.app.views.items() if view.winfo_manager() == "grid"]
             self.assertEqual(visible, list(self.app.active_roles))
             self.assertEqual(len(visible), count)
-            self.assertEqual(len(self.app.histogram_role_combo.cget("values")), count)
+            visible_metrics = [
+                role for role, label in self.app.metric_labels.items() if label.winfo_manager() == "grid"
+            ]
+            visible_controls = [
+                role for role, row in self.app.info_control_rows.items() if row.winfo_manager() == "grid"
+            ]
+            self.assertEqual(visible_metrics, list(self.app.active_roles))
+            self.assertEqual(visible_controls, list(self.app.active_roles))
+            if count == 3:
+                layout = [self.app.views[role].grid_info() for role in self.app.active_roles]
+                self.assertEqual([int(item["row"]) for item in layout], [0, 0, 0])
+                self.assertEqual([int(item["column"]) for item in layout], [0, 1, 2])
+                self.assertEqual([int(item["rowspan"]) for item in layout], [2, 2, 2])
         self.assertEqual(int(self.app.views["before"].grid_info()["rowspan"]), 1)
         self.assertFalse(any(isinstance(child, tk.Toplevel) for child in self.root.winfo_children()))
 
@@ -130,46 +160,125 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
             self.wait_until(lambda: all(self.app.images[role] is not None for role in self.app.active_roles))
             self.assertEqual(len(self.app.folder_paths), 9)
             self.assertEqual(self.app.folder_path_var.get(), str(folder.resolve()))
+            self.assertEqual(self.app.current_paths, [paths[0].resolve()])
+            self.assertEqual(len(self.app.active_roles), 1)
+            self.assertEqual(self.app.images["before"].path.resolve(), paths[0].resolve())
+            self.assertIn("第 1/9 组", self.app.group_status_var.get())
+            self.assertEqual(str(self.app.previous_group_button.cget("state")), "disabled")
+            self.assertEqual(str(self.app.next_group_button.cget("state")), "normal")
+            panes = [str(pane) for pane in self.app.main_pane.panes()]
+            self.assertEqual(
+                panes,
+                [
+                    str(self.app.folder_thumbnail_strip),
+                    str(self.app.viewer_container),
+                    str(self.app.sidebar_frame),
+                ],
+            )
+            self.assertEqual(self.app.folder_thumbnail_strip.winfo_manager(), "panedwindow")
+            self.assertEqual(len(self.app.folder_thumbnail_strip.cards), 9)
+            self.wait_until(lambda: len(self.app.folder_thumbnail_strip._photos) >= 4)
+            self.assertEqual(
+                (
+                    self.app.folder_thumbnail_strip._photos[0].width(),
+                    self.app.folder_thumbnail_strip._photos[0].height(),
+                ),
+                self.app.folder_thumbnail_strip.PREVIEW_SIZE,
+            )
+            selected_colours = [
+                self.app.folder_thumbnail_strip.cards[index].itemcget("selection-background", "fill")
+                for index in range(4)
+            ]
+            self.assertEqual(selected_colours[0], "#007AFF")
+            self.assertNotIn("#007AFF", selected_colours[1:])
+            self.root.deiconify()
+            self.wait_until(lambda: self.app.main_pane.winfo_width() > 800)
+            self.app._restore_panel_ratio()
+            self.root.update_idletasks()
+            left_width = self.app.main_pane.sashpos(0)
+            middle_width = self.app.main_pane.sashpos(1) - left_width
+            self.assertLess(left_width, middle_width)
+
+            self.app.toggle_folder_sidebar()
+            self.root.update_idletasks()
+            self.assertFalse(self.app._folder_sidebar_is_visible())
+            self.assertEqual(str(self.app.folder_sidebar_toggle_button.cget("text")), "显示图库")
+            self.app.toggle_folder_sidebar()
+            self.root.update_idletasks()
+            self.assertTrue(self.app._folder_sidebar_is_visible())
+            self.assertEqual(str(self.app.folder_sidebar_toggle_button.cget("text")), "收起图库")
+
+            self.app.sidebar_header_toggle_button.invoke()
+            self.root.update_idletasks()
+            self.assertEqual(
+                [str(pane) for pane in self.app.main_pane.panes()],
+                [str(self.app.folder_thumbnail_strip), str(self.app.viewer_container)],
+            )
+            self.assertEqual(str(self.app.sidebar_toggle_button.cget("text")), "显示信息")
+
+            self.app.folder_sidebar_toggle_button.invoke()
+            self.root.update_idletasks()
+            self.assertEqual(
+                [str(pane) for pane in self.app.main_pane.panes()],
+                [str(self.app.viewer_container)],
+            )
+            self.assertEqual(str(self.app.sidebar_toggle_button.cget("text")), "显示信息")
+
+            self.app.folder_sidebar_toggle_button.invoke()
+            self.root.update_idletasks()
+            self.assertEqual(
+                [str(pane) for pane in self.app.main_pane.panes()],
+                [str(self.app.folder_thumbnail_strip), str(self.app.viewer_container)],
+            )
+            self.assertFalse(self.app._analysis_sidebar_is_visible())
+
+            self.app.sidebar_toggle_button.invoke()
+            self.root.update_idletasks()
+            self.assertEqual(
+                [str(pane) for pane in self.app.main_pane.panes()],
+                [
+                    str(self.app.folder_thumbnail_strip),
+                    str(self.app.viewer_container),
+                    str(self.app.sidebar_frame),
+                ],
+            )
+            self.assertGreater(self.app.sidebar_frame.winfo_width(), 100)
+
+            self.app.folder_sidebar_toggle_button.invoke()
+            self.root.update_idletasks()
+            self.assertEqual(
+                [str(pane) for pane in self.app.main_pane.panes()],
+                [str(self.app.viewer_container), str(self.app.sidebar_frame)],
+            )
+            self.assertTrue(self.app._analysis_sidebar_is_visible())
+            self.app.folder_sidebar_toggle_button.invoke()
+            self.root.update_idletasks()
+            self.app.show_next_group()
+            self.wait_until(lambda: self.app.images["before"] is not None and self.app.images["before"].path == paths[1].resolve())
+            self.assertEqual(self.app.current_paths, [paths[1].resolve()])
+            self.assertIn("第 2/9 组", self.app.group_status_var.get())
+
+            self.app.folder_thumbnail_strip.cards[0].event_generate("<Button-1>")
+            self.wait_until(lambda: self.app.current_paths == [paths[0].resolve()])
+            for index in range(1, 4):
+                self.app.folder_thumbnail_strip.cards[index].event_generate("<Button-1>", state=0x0010)
+                self.wait_until(lambda expected=index + 1: len(self.app.active_roles) == expected)
+            self.wait_until(lambda: all(self.app.images[role] is not None for role in self.app.active_roles))
             self.assertEqual(self.app.current_paths, [path.resolve() for path in paths[:4]])
             self.assertEqual(len(self.app.active_roles), 4)
             self.assertEqual(
-                [self.app.images[role].path.resolve() for role in self.app.active_roles],
-                [path.resolve() for path in paths[:4]],
+                [
+                    self.app.folder_thumbnail_strip.cards[index].itemcget("selection-background", "fill")
+                    for index in range(4)
+                ],
+                ["#007AFF"] * 4,
             )
-            self.assertIn("第 1/3 组", self.app.group_status_var.get())
-            self.assertEqual(str(self.app.previous_group_button.cget("state")), "disabled")
-            self.assertEqual(str(self.app.next_group_button.cget("state")), "normal")
-            self.assertEqual(str(self.app.open_comparison_button.cget("state")), "normal")
             self.app.show_comparison()
             self.assertEqual(str(self.app.notebook.select()), str(self.app.compare_tab))
 
-            self.app.show_next_group()
-            self.wait_until(lambda: all(
-                self.app.images[role] is not None
-                and self.app.images[role].path.resolve() == paths[index + 4].resolve()
-                for index, role in enumerate(self.app.active_roles)
-            ))
-            self.assertEqual(self.app.current_paths, [path.resolve() for path in paths[4:8]])
-            self.assertIn("第 2/3 组", self.app.group_status_var.get())
-
-            self.app.show_next_group()
-            self.wait_until(lambda: self.app.images["before"] is not None)
-            self.assertEqual(self.app.current_paths, [paths[8].resolve()])
+            self.app.folder_thumbnail_strip.cards[4].event_generate("<Button-1>")
+            self.wait_until(lambda: self.app.current_paths == [paths[4].resolve()])
             self.assertEqual(len(self.app.active_roles), 1)
-            self.assertIn("第 3/3 组", self.app.group_status_var.get())
-            self.assertEqual(str(self.app.next_group_button.cget("state")), "disabled")
-            self.assertEqual(str(self.app.open_comparison_button.cget("state")), "disabled")
-
-            self.app.show_previous_group()
-            self.wait_until(lambda: len(self.app.active_roles) == 4 and all(
-                self.app.images[role] is not None for role in self.app.active_roles
-            ))
-            self.assertEqual(self.app.current_paths, [path.resolve() for path in paths[4:8]])
-
-            cached_reference = self.app._image_cache.get(paths[4])
-            self.assertIsNotNone(cached_reference)
-            self.app.load_selected_images([paths[4]])
-            self.assertIs(self.app.images["before"], cached_reference)
 
     def test_direct_open_loads_up_to_four_images_without_folder_preview(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -191,11 +300,140 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         self.assertEqual(self.app.current_paths, [path.resolve() for path in paths])
         self.assertEqual(str(self.app.previous_group_button.cget("state")), "disabled")
         self.assertEqual(str(self.app.next_group_button.cget("state")), "disabled")
-        self.assertEqual(str(self.app.open_comparison_button.cget("state")), "normal")
+        self.assertFalse(self.app._folder_sidebar_is_visible())
         self.assertEqual(
             [self.app.images[role].path.name for role in self.app.active_roles],
             [path.name for path in paths],
         )
+        self.root.deiconify()
+        self.wait_until(lambda: all(self.app.views[role].winfo_width() > 100 for role in self.app.active_roles))
+        widths = [self.app.views[role].winfo_width() for role in self.app.active_roles]
+        self.assertLessEqual(max(widths) - min(widths), 3)
+
+    def test_direct_open_two_images_can_navigate_to_remaining_folder_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            paths = []
+            for index in range(4):
+                path = folder / f"pair{index + 1}.png"
+                Image.new("RGB", (90, 70), (50 + index * 25, 80, 120)).save(path)
+                paths.append(path)
+            self.app.open_images(paths[:2])
+            self.wait_until(lambda: all(self.app.images[role] is not None for role in self.app.active_roles))
+            self.assertTrue(self.app.folder_group_mode)
+            self.assertEqual(self.app.folder_group_size, 2)
+            self.assertEqual(self.app.folder_paths, [path.resolve() for path in paths])
+            self.assertEqual(str(self.app.next_group_button.cget("state")), "normal")
+
+            self.app.show_next_group()
+            self.wait_until(lambda: all(
+                self.app.images[role] is not None
+                and self.app.images[role].path.resolve() == paths[index + 2].resolve()
+                for index, role in enumerate(self.app.active_roles)
+            ))
+            self.assertEqual(self.app.current_paths, [path.resolve() for path in paths[2:]])
+            self.assertEqual(str(self.app.previous_group_button.cget("state")), "normal")
+            self.assertEqual(str(self.app.next_group_button.cget("state")), "disabled")
+
+            self.app.show_previous_group()
+            self.wait_until(lambda: all(
+                self.app.images[role] is not None
+                and self.app.images[role].path.resolve() == paths[index].resolve()
+                for index, role in enumerate(self.app.active_roles)
+            ))
+            self.assertEqual(self.app.current_paths, [path.resolve() for path in paths[:2]])
+
+    def test_direct_open_uses_natural_order_and_navigates_backward(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            paths = []
+            for index in range(1, 5):
+                path = folder / f"ordered{index}.png"
+                Image.new("RGB", (90, 70), (40 * index, 80, 120)).save(path)
+                paths.append(path)
+
+            self.app.open_images([paths[3], paths[2]])
+            self.wait_until(lambda: all(self.app.images[role] is not None for role in self.app.active_roles))
+            self.assertEqual(self.app.current_paths, [paths[2].resolve(), paths[3].resolve()])
+            self.assertEqual(self.app.folder_paths, [path.resolve() for path in paths])
+            self.assertEqual(str(self.app.previous_group_button.cget("state")), "normal")
+            self.assertEqual(str(self.app.next_group_button.cget("state")), "disabled")
+
+            self.app.show_previous_group()
+            self.wait_until(lambda: all(
+                self.app.images[role] is not None
+                and self.app.images[role].path.resolve() == paths[index].resolve()
+                for index, role in enumerate(self.app.active_roles)
+            ))
+            self.assertEqual(self.app.current_paths, [paths[0].resolve(), paths[1].resolve()])
+            self.assertEqual(str(self.app.next_group_button.cget("state")), "normal")
+
+            self.app.open_images([paths[2], paths[0]])
+            self.wait_until(lambda: all(
+                self.app.images[role] is not None
+                and self.app.images[role].path.resolve() == paths[index * 2].resolve()
+                for index, role in enumerate(self.app.active_roles)
+            ))
+            self.assertEqual(self.app.current_paths, [paths[0].resolve(), paths[2].resolve()])
+            self.assertEqual(str(self.app.next_group_button.cget("state")), "normal")
+            self.app.show_next_group()
+            self.wait_until(lambda: all(
+                self.app.images[role] is not None
+                and self.app.images[role].path.resolve() == paths[index * 2 + 1].resolve()
+                for index, role in enumerate(self.app.active_roles)
+            ))
+            self.assertEqual(self.app.current_paths, [paths[1].resolve(), paths[3].resolve()])
+
+    def test_analysis_data_is_a_narrow_collapsible_right_sidebar(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            paths = []
+            for index in range(2):
+                path = folder / f"sidebar{index + 1}.png"
+                Image.new("RGB", (640, 480), (60 + index * 30, 80, 120)).save(path)
+                paths.append(path)
+            self.app.open_images(paths)
+            self.wait_until(lambda: all(self.app.images[role] is not None for role in self.app.active_roles))
+            self.root.deiconify()
+            self.wait_until(lambda: self.app.main_pane.winfo_width() > 800)
+            self.app._restore_panel_ratio()
+            self.root.update_idletasks()
+
+            panes = [str(pane) for pane in self.app.main_pane.panes()]
+            self.assertEqual(str(self.app.main_pane.cget("orient")), "horizontal")
+            self.assertEqual(panes, [str(self.app.viewer_container), str(self.app.sidebar_frame)])
+            sash = self.app.main_pane.sashpos(0)
+            self.assertGreater(sash, self.app.main_pane.winfo_width() - sash)
+            self.assertLessEqual(
+                (self.app.main_pane.winfo_width() - sash) / self.app.main_pane.winfo_width(),
+                0.36,
+            )
+
+            self.app.sidebar_header_toggle_button.invoke()
+            self.root.update_idletasks()
+            self.assertFalse(self.app._analysis_sidebar_is_visible())
+            self.assertEqual(str(self.app.sidebar_toggle_button.cget("text")), "显示信息")
+            self.assertEqual([str(pane) for pane in self.app.main_pane.panes()], [str(self.app.viewer_container)])
+
+            self.app.sidebar_toggle_button.invoke()
+            self.root.update_idletasks()
+            self.assertTrue(self.app._analysis_sidebar_is_visible())
+            self.assertEqual(str(self.app.sidebar_toggle_button.cget("text")), "收起信息")
+            self.assertEqual(
+                [str(pane) for pane in self.app.main_pane.panes()],
+                [str(self.app.viewer_container), str(self.app.sidebar_frame)],
+            )
+            self.assertGreater(self.app.sidebar_frame.winfo_width(), 100)
+
+            self.app.sidebar_toggle_button.invoke()
+            self.root.update_idletasks()
+            self.assertFalse(self.app._analysis_sidebar_is_visible())
+
+            self.app.show_comparison()
+            self.root.update_idletasks()
+            self.assertTrue(self.app._analysis_sidebar_is_visible())
+            self.assertEqual(str(self.app.main_pane.panes()[-1]), str(self.app.sidebar_frame))
+            self.assertEqual(str(self.app.notebook.select()), str(self.app.compare_tab))
 
     def test_canvas_coordinate_mapping_is_independent_of_render_resize(self) -> None:
         rgb = np.zeros((50, 100, 3), dtype=np.float32)
@@ -269,6 +507,59 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
             self.assertTrue(view.canvas.find_withtag("viewer-chrome"))
             self.assertFalse(any(child.winfo_class() == "TLabel" for child in view.winfo_children()))
 
+    def test_bottom_metrics_follow_linked_click_and_roi_for_every_image(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            first_path = folder / "metrics1.png"
+            second_path = folder / "metrics2.png"
+            Image.new("RGB", (160, 120), (100, 50, 25)).save(first_path)
+            Image.new("RGB", (160, 120), (40, 80, 20)).save(second_path)
+            self.app.open_images([first_path, second_path])
+            self.wait_until(lambda: all(self.app.images[role] is not None for role in self.app.active_roles))
+
+            self.app._on_pixel("before", 40, 30, True)
+            self.assertEqual(self.app._metric_mode, "pixel")
+            self.assertIn("R:100", self.app.metric_vars["before"].get())
+            self.assertIn("G:50", self.app.metric_vars["before"].get())
+            self.assertIn("B:25", self.app.metric_vars["before"].get())
+            self.assertIn("R/G:2.000", self.app.metric_vars["before"].get())
+            self.assertIn("R/B:4.000", self.app.metric_vars["before"].get())
+            self.assertIn("R:40", self.app.metric_vars["after"].get())
+            self.assertIn("R/G:0.500", self.app.metric_vars["after"].get())
+            self.assertIn("R/B:2.000", self.app.metric_vars["after"].get())
+            self.assertIn(" · ", self.app.metric_vars["before"].get())
+            self.root.update_idletasks()
+            self.assertLessEqual(self.app.metrics_grid.winfo_reqheight(), 24)
+
+            self.app._on_roi("before", ROI(24, 24, 40, 32))
+            self.wait_until(
+                lambda: all(self.app.roi_statistics[role] is not None for role in self.app.active_roles),
+                timeout=5.0,
+            )
+            self.assertEqual(self.app._metric_mode, "roi")
+            self.assertIn("R:100", self.app.metric_vars["before"].get())
+            self.assertIn("R:40", self.app.metric_vars["after"].get())
+            self.assertNotIn("ROI", self.app.metric_vars["before"].get())
+            self.assertNotIn("分析", self.app.metric_vars["after"].get())
+
+    def test_right_inspector_displays_loaded_exif_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "exif.jpg"
+            image = Image.new("RGB", (80, 60), (70, 90, 110))
+            exif = Image.Exif()
+            exif[271] = "TuneLab Camera"
+            exif[272] = "TL-1"
+            image.save(path, exif=exif)
+            self.app.open_images([path])
+            self.wait_until(lambda: self.app.images["before"] is not None)
+
+        self.assertIn("TuneLab Camera", self.app.exif_vars["before"].get())
+        self.assertIn("TL-1", self.app.exif_vars["before"].get())
+        self.assertEqual(self.app.exif_frames["before"].winfo_manager(), "pack")
+        self.app.exif_visible_vars["before"].set(False)
+        self.app._on_info_visibility_changed("before")
+        self.assertFalse(self.app.exif_frames["before"].winfo_manager())
+
     def test_right_drag_moves_existing_render_immediately_and_coalesces_refresh(self) -> None:
         rgb = np.zeros((100, 100, 3), dtype=np.uint8)
         data = ImageData(
@@ -323,6 +614,100 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
             self.assertEqual(view.horizontal.winfo_manager(), "grid")
             self.assertEqual(view.vertical.winfo_manager(), "grid")
 
+    def test_opening_multiple_images_fits_every_visible_canvas(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            sizes = ((1200, 800), (600, 1400), (1600, 500), (720, 720))
+            paths = []
+            for index, size in enumerate(sizes, start=1):
+                path = folder / f"fit-{index}.png"
+                Image.new("RGB", size, (40 * index, 70, 110)).save(path)
+                paths.append(path)
+            self.app.open_images(paths)
+            self.wait_until(lambda: all(self.app.images[role] is not None for role in self.app.active_roles))
+            self.root.deiconify()
+            self.wait_until(lambda: all(
+                self.app.views[role].canvas.winfo_width() > 16
+                and self.app.views[role].canvas.winfo_height() > 16
+                and not self.app.views[role]._needs_initial_fit
+                for role in self.app.active_roles
+            ))
+
+            for role in self.app.active_roles:
+                view = self.app.views[role]
+                assert view.image_data is not None
+                expected = min(
+                    (view.canvas.winfo_width() - 16) / view.image_data.width,
+                    (view.canvas.winfo_height() - 16) / view.image_data.height,
+                )
+                self.assertAlmostEqual(view.zoom, expected, places=6)
+                self.assertAlmostEqual(
+                    view.pan_x,
+                    (view.canvas.winfo_width() - view.image_data.width * expected) / 2.0,
+                    places=5,
+                )
+                self.assertAlmostEqual(
+                    view.pan_y,
+                    (view.canvas.winfo_height() - view.image_data.height * expected) / 2.0,
+                    places=5,
+                )
+
+    def test_roi_can_start_on_any_image_and_other_rois_remain_individually_adjustable(self) -> None:
+        rng = np.random.default_rng(77)
+        base = rng.integers(20, 235, size=(96, 120, 3), dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            paths = []
+            for index, shift in enumerate((0, 4, 8), start=1):
+                path = folder / f"anchor-{index}.png"
+                Image.fromarray(np.roll(base, shift=(shift, shift), axis=(0, 1)), mode="RGB").save(path)
+                paths.append(path)
+            self.app.load_selected_images(paths)
+            self.wait_until(lambda: all(self.app.images[role] is not None for role in self.app.active_roles))
+
+            anchor_roi = ROI(34, 28, 30, 26, "ROI 1")
+            self.app._on_roi("compare3", anchor_roi)
+            self.wait_until(
+                lambda: all(
+                    self.app.roi_statistics[role] is not None
+                    for role in self.app.active_roles
+                )
+                and self.app.match_results["before"] is not None
+                and self.app.match_results["after"] is not None,
+                timeout=5.0,
+            )
+            self.wait_until(
+                lambda: self.app.comparisons["after"] is not None
+                and self.app.comparisons["compare3"] is not None
+            )
+
+            self.assertEqual(self.app.roi_anchor_role, "compare3")
+            self.assertEqual(self.app.rois["compare3"], anchor_roi)
+            self.assertGreater(self.app.match_results["before"].score, 0.9)
+            self.assertGreater(self.app.match_results["after"].score, 0.9)
+            automatically_matched_before = self.app.rois["before"]
+
+            adjusted_after = ROI(40, 34, 30, 26, "ROI 1")
+            self.app._on_roi("after", adjusted_after)
+            self.wait_until(
+                lambda: self.app.roi_statistics["after"] is not None
+                and self.app.roi_statistics["after"].roi == adjusted_after
+            )
+            self.assertEqual(self.app.roi_anchor_role, "compare3")
+            self.assertEqual(self.app.rois["compare3"], anchor_roi)
+            self.assertEqual(self.app.rois["before"], automatically_matched_before)
+            self.assertTrue(self.app.match_results["after"].manually_confirmed)
+
+            adjusted_before = ROI(26, 22, 30, 26, "ROI 1")
+            self.app._on_roi("before", adjusted_before)
+            self.wait_until(
+                lambda: self.app.roi_statistics["before"] is not None
+                and self.app.roi_statistics["before"].roi == adjusted_before
+            )
+            self.assertEqual(self.app.rois["after"], adjusted_after)
+            self.assertEqual(self.app.rois["compare3"], anchor_roi)
+            self.assertTrue(self.app.match_results["before"].manually_confirmed)
+
     def test_reference_roi_matches_three_comparison_images(self) -> None:
         rng = np.random.default_rng(2026)
         base = rng.integers(20, 235, size=(90, 110, 3), dtype=np.uint8)
@@ -344,29 +729,113 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
             self.wait_until(lambda: all(self.app.comparisons[role] is not None for role in self.app.active_roles[1:]))
         self.assertEqual(len(self.app.active_roles), 4)
         self.assertTrue(all(self.app.match_results[role].score > 0.9 for role in self.app.active_roles[1:]))
-        self.assertIn("图像 4", self.app.compare_text.get("1.0", "end"))
+        self.app.comparison_base_var.set("图像 2")
         self.app.comparison_role_var.set("图像 4")
         self.app._refresh_comparison_table()
         metrics = {
             self.app.compare_tree.set(item, "metric"): self.app.compare_tree.item(item, "values")
             for item in self.app.compare_tree.get_children()
         }
-        self.assertIn("Mean R", metrics)
+        self.assertIn("Mean R（0–255）", metrics)
+        self.assertIn("R 占比 %", metrics)
         self.assertIn("Lab b*", metrics)
         self.assertTrue(any(str(values[4]).startswith(("↑", "↓", "≈")) for values in metrics.values()))
-        self.assertIn("compare1.png", self.app.comparison_files_var.get())
+        change_values = [str(values[4]) for values in metrics.values()]
+        self.assertTrue(all(value == "—" or value.endswith("%") for value in change_values))
+        self.assertFalse(any("上升" in value or "下降" in value or "基本不变" in value for value in change_values))
+        self.assertFalse(any("百分" in value for value in change_values))
+        self.assertIn("compare2.png", self.app.comparison_files_var.get())
         self.assertIn("compare4.png", self.app.comparison_files_var.get())
+        self.assertEqual(self.app.compare_tree.heading("reference", "text"), "图像 2")
+        self.assertEqual(self.app.compare_tree.heading("target", "text"), "图像 4")
+        for column in self.app.compare_tree.cget("columns"):
+            self.assertEqual(
+                str(self.app.compare_tree.heading(column, "anchor")),
+                str(self.app.compare_tree.column(column, "anchor")),
+            )
         self.assertIn("匹配置信度", self.app.comparison_gate_var.get())
         self.assertNotEqual(self.app.reference_swatch.cget("background"), "#DDE3EC")
         self.assertNotEqual(self.app.target_swatch.cget("background"), "#DDE3EC")
 
-    def test_histogram_tab_can_be_hidden_and_restored(self) -> None:
+        before_delta = float(metrics["Mean R（0–255）"][3])
+        self.app._swap_comparison_pair()
+        swapped_metrics = {
+            self.app.compare_tree.set(item, "metric"): self.app.compare_tree.item(item, "values")
+            for item in self.app.compare_tree.get_children()
+        }
+        self.assertAlmostEqual(float(swapped_metrics["Mean R（0–255）"][3]), -before_delta, places=2)
+        self.assertIn("compare4.png", self.app.comparison_files_var.get().split("→")[0])
+
+        self.app.notebook.select(self.app.compare_tab)
+        self.root.deiconify()
+        self.wait_until(lambda: self.app.compare_tree.winfo_width() > 100)
+        total_column_width = sum(
+            int(self.app.compare_tree.column(column, "width"))
+            for column in self.app.compare_tree.cget("columns")
+        )
+        self.assertGreater(total_column_width, self.app.compare_tree.winfo_width())
+        self.app.compare_tree.xview_moveto(1.0)
+        self.root.update_idletasks()
+        self.assertGreater(self.app.compare_tree.xview()[0], 0.0)
+        self.assertAlmostEqual(self.app.compare_tree.xview()[1], 1.0, places=6)
+
+    def test_each_image_histogram_and_exif_can_be_hidden_and_restored(self) -> None:
+        self.app._set_image_count(2)
         self.app.show_histogram_var.set(False)
         self.app._on_histogram_visibility_changed()
+        self.assertTrue(all(not variable.get() for variable in self.app.histogram_visible_vars.values()))
+        self.assertFalse(self.app.histogram_canvases["before"].winfo_manager())
+        self.assertEqual(self.app.exif_frames["before"].winfo_manager(), "pack")
+
         self.app.show_histogram_var.set(True)
         self.app._on_histogram_visibility_changed()
-        self.assertIn(str(self.app.histogram_tab), [str(tab) for tab in self.app.notebook.tabs()])
-        self.assertEqual(self.app.notebook.tab(self.app.histogram_tab, "state"), "normal")
+        self.assertTrue(all(variable.get() for variable in self.app.histogram_visible_vars.values()))
+        self.assertEqual(self.app.histogram_canvases["before"].winfo_manager(), "pack")
+
+        self.app.luminance_histogram_visible_vars["before"].set(True)
+        self.app._on_info_visibility_changed("before")
+        self.assertEqual(self.app.luminance_histogram_canvases["before"].winfo_manager(), "pack")
+        self.assertTrue(self.app.luminance_histogram_canvases["before"].luminance)
+
+        self.app.histogram_visible_vars["after"].set(False)
+        self.app.luminance_histogram_visible_vars["after"].set(False)
+        self.app.exif_visible_vars["after"].set(False)
+        self.app._on_info_visibility_changed("after")
+        self.assertFalse(self.app.info_sections["after"].winfo_manager())
+        self.assertEqual(
+            [self.app.notebook.tab(tab, "text") for tab in self.app.notebook.tabs()],
+            ["直方图 / EXIF", "对比"],
+        )
+
+    def test_information_content_scrolls_from_controls_histograms_and_exif(self) -> None:
+        self.app._set_image_count(4)
+        for variable in self.app.luminance_histogram_visible_vars.values():
+            variable.set(True)
+        self.app._refresh_information_sidebar()
+        self.root.deiconify()
+        self.wait_until(
+            lambda: self.app.info_canvas.bbox("all") is not None
+            and self.app.info_canvas.bbox("all")[3] > self.app.info_canvas.winfo_height()
+        )
+
+        control = self.app.info_control_rows["before"].winfo_children()[1]
+        exif_label = self.app.exif_frames["before"].winfo_children()[-1]
+        self.assertTrue(control.bind("<MouseWheel>"))
+        self.assertTrue(self.app.histogram_canvases["before"].canvas.bind("<MouseWheel>"))
+        self.assertTrue(exif_label.bind("<MouseWheel>"))
+        if tk.TkVersion >= 9.0:
+            self.assertTrue(control.bind("<TouchpadScroll>"))
+
+        self.app.info_canvas.yview_moveto(0.0)
+        exif_label.event_generate("<MouseWheel>", delta=-120)
+        self.root.update_idletasks()
+        self.assertGreater(self.app.info_canvas.yview()[0], 0.0)
+        self.app.info_canvas.yview_moveto(0.0)
+        if tk.TkVersion >= 9.0:
+            self.app._on_info_touchpad_scroll(SimpleNamespace(delta=-120))
+        else:
+            self.app._on_info_mousewheel(SimpleNamespace(delta=-120))
+        self.assertGreater(self.app.info_canvas.yview()[0], 0.0)
 
 
 if __name__ == "__main__":

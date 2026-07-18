@@ -38,6 +38,76 @@ class ROIError(ImageInspectorError):
     pass
 
 
+def _format_exif_value(value: Any) -> str:
+    """Turn Pillow EXIF values into compact, safe inspector text."""
+
+    if isinstance(value, bytes):
+        try:
+            rendered = value.rstrip(b"\x00").decode("utf-8")
+        except (UnicodeDecodeError, ValueError):
+            rendered = f"{len(value)} bytes"
+    elif isinstance(value, (tuple, list)):
+        rendered = ", ".join(str(item) for item in value)
+    else:
+        rendered = str(value)
+    rendered = " ".join(rendered.replace("\x00", " ").split())
+    return rendered if len(rendered) <= 240 else rendered[:237] + "…"
+
+
+def _read_exif(image: Any) -> Tuple[Tuple[str, str], ...]:
+    """Read named EXIF fields without retaining Pillow-owned objects."""
+
+    try:
+        from PIL import ExifTags
+
+        raw = image.getexif()
+    except (AttributeError, OSError, TypeError, ValueError):
+        return ()
+    if not raw:
+        return ()
+
+    priority = (
+        "Make",
+        "Model",
+        "LensModel",
+        "DateTimeOriginal",
+        "ExposureTime",
+        "FNumber",
+        "ISOSpeedRatings",
+        "PhotographicSensitivity",
+        "FocalLength",
+        "ExposureBiasValue",
+        "MeteringMode",
+        "WhiteBalance",
+        "Flash",
+        "Software",
+        "Orientation",
+    )
+    values: dict[str, str] = {}
+
+    def collect(items: Any, names: Any) -> None:
+        for tag, value in items:
+            name = str(names.get(tag, f"Tag {tag}"))
+            rendered = _format_exif_value(value)
+            if rendered:
+                values[name] = rendered
+
+    collect(raw.items(), ExifTags.TAGS)
+    # Real cameras commonly keep exposure/lens fields and GPS in child IFDs.
+    # Pillow exposes those through get_ifd rather than the top-level iterator.
+    for ifd_tag, names in ((34665, ExifTags.TAGS), (34853, ExifTags.GPSTAGS)):
+        try:
+            child = raw.get_ifd(ifd_tag)
+        except (AttributeError, KeyError, OSError, TypeError, ValueError):
+            continue
+        collect(child.items(), names)
+    values.pop("ExifOffset", None)
+    values.pop("GPSInfo", None)
+    ordered_names = [name for name in priority if name in values]
+    ordered_names.extend(sorted(name for name in values if name not in priority))
+    return tuple((name, values[name]) for name in ordered_names)
+
+
 def _detect_bit_depth(image: Any) -> int:
     mode = str(getattr(image, "mode", ""))
     if mode.startswith("I;16"):
@@ -98,6 +168,15 @@ def histogram_rgb(display_rgb: np.ndarray) -> np.ndarray:
     ).astype(np.int64)
 
 
+def histogram_luminance(display_rgb: np.ndarray) -> np.ndarray:
+    """Return a display-luminance histogram using standard sRGB channel weights."""
+
+    pixels = np.asarray(display_rgb, dtype=np.uint8).reshape(-1, 3).astype(np.float64)
+    levels = np.rint(pixels @ np.array((0.2126, 0.7152, 0.0722), dtype=np.float64))
+    levels = np.clip(levels, 0.0, 255.0).astype(np.uint8)
+    return np.bincount(levels, minlength=256).astype(np.int64)
+
+
 def load_image(path: Union[str, Path]) -> ImageData:
     """Load a supported image, apply EXIF orientation, and retain useful precision."""
 
@@ -131,6 +210,7 @@ def load_image(path: Union[str, Path]) -> ImageData:
                     "请先生成较小副本后再分析。"
                 )
             source_mode = opened.mode
+            exif = _read_exif(opened)
             try:
                 orientation = int(opened.getexif().get(274, 1))
             except (AttributeError, TypeError, ValueError):
@@ -221,6 +301,8 @@ def load_image(path: Union[str, Path]) -> ImageData:
                 original_dtype=original_dtype,
                 precision_preserved=precision_preserved,
                 histogram=histogram_rgb(display),
+                luminance_histogram=histogram_luminance(display),
+                exif=exif,
             )
     except ImageLoadError:
         raise
@@ -413,6 +495,7 @@ def analyse_roi(image: ImageData, roi: ROI) -> ROIStatistics:
         maximum = np.max(flat, axis=0)
         display_roi = np.rint(np.clip(pixels, 0.0, 255.0)).astype(np.uint8)
         histogram = histogram_rgb(display_roi)
+    luminance_histogram = histogram_luminance(display_roi)
     lab_mean, hsv_mean, luminance = _mean_perceptual_metrics(pixels)
     maximum_channel, _minimum_channel, spread = _channel_extrema(mean)
     average_std = float(np.mean(standard_deviation))
@@ -449,6 +532,7 @@ def analyse_roi(image: ImageData, roi: ROI) -> ROIStatistics:
         color_tendency=color_tendency(mean, lab_mean, saturation),
         neutral_assessment=neutral_assessment(mean, lab_mean, hsv_mean),
         histogram=histogram,
+        luminance_histogram=luminance_histogram,
     )
 
 
@@ -474,6 +558,9 @@ def compare_statistics(
 ) -> ComparisonResult:
     delta_rgb = tuple(after.mean_rgb[index] - before.mean_rgb[index] for index in range(3))
     delta_percent = tuple(_percent_change(before.mean_rgb[index], after.mean_rgb[index]) for index in range(3))
+    delta_normalized_rgb = tuple(
+        after.normalized_rgb[index] - before.normalized_rgb[index] for index in range(3)
+    )
     hue_delta = (after.hsv_mean[0] - before.hsv_mean[0] + 180.0) % 360.0 - 180.0
     delta_hsv = (hue_delta, after.hsv_mean[1] - before.hsv_mean[1], after.hsv_mean[2] - before.hsv_mean[2])
     delta_lab = tuple(after.lab_mean[index] - before.lab_mean[index] for index in range(3))
@@ -495,6 +582,13 @@ def compare_statistics(
                 channel_parts.append(f"{name} 通道{'增加' if value > 0 else '降低'} {abs(value):.1f}%")
         if channel_parts:
             conclusions.append("，".join(channel_parts) + "。")
+        if abs(delta_normalized_rgb[0]) >= 0.002:
+            direction = "增加" if delta_normalized_rgb[0] > 0 else "降低"
+            conclusions.append(
+                f"R 通道在 RGB 总量中的占比{direction} "
+                f"{abs(delta_normalized_rgb[0]) * 100.0:.2f} 个百分点；"
+                "偏红程度应结合 R 占比、R/G 和 Lab a* 判断。"
+            )
         if abs(delta_lab[2]) >= 0.5:
             conclusions.append(
                 "Lab 中 b* 降低，区域的黄色方向分量减弱。"
@@ -517,6 +611,7 @@ def compare_statistics(
         after=after,
         delta_rgb=delta_rgb,  # type: ignore[arg-type]
         delta_rgb_percent=delta_percent,  # type: ignore[arg-type]
+        delta_normalized_rgb=delta_normalized_rgb,  # type: ignore[arg-type]
         delta_r_over_g=_optional_delta(before.r_over_g, after.r_over_g),
         delta_b_over_g=_optional_delta(before.b_over_g, after.b_over_g),
         delta_hsv=delta_hsv,
