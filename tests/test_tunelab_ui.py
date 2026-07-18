@@ -211,6 +211,25 @@ class DesktopUISmokeTests(unittest.TestCase):
             self.app.home_help_button.invoke()
         help_dialog.assert_called_once_with(self.root)
 
+    def test_startup_and_manual_update_checks_are_available_from_help(self) -> None:
+        self.assertTrue(self.app.update_controller._startup_scheduled)
+        labels = [
+            self.app.help_menu.entrycget(index, "label")
+            for index in range(self.app.help_menu.index("end") + 1)
+            if self.app.help_menu.type(index) != "separator"
+        ]
+        self.assertIn("检查更新...", labels)
+        controller = mock.Mock()
+        self.app.update_controller = controller
+        update_index = next(
+            index
+            for index in range(self.app.help_menu.index("end") + 1)
+            if self.app.help_menu.type(index) != "separator"
+            and self.app.help_menu.entrycget(index, "label") == "检查更新..."
+        )
+        self.app.help_menu.invoke(update_index)
+        controller.check.assert_called_once_with(manual=True)
+
     def test_native_file_dialogs_start_in_plural_sources(self) -> None:
         self.assertEqual(default_sources_directory().resolve(), (ROOT / "sources").resolve())
         with mock.patch("tunelab.app.filedialog.askopenfilename", return_value="") as chooser:
@@ -519,7 +538,7 @@ class DesktopUISmokeTests(unittest.TestCase):
         visit(dialog)
         self.assertIn("TuneLab", text)
         self.assertIn("版本", text)
-        self.assertIn("0.2.0", text)
+        self.assertIn("1.0.0", text)
         self.assertIn("联系", text)
         self.assertIn("kaiyi.jiang@thundersoft.com", text)
         self.assertIn("所有计算均在本地完成", text)

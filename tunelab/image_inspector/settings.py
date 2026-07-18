@@ -15,6 +15,8 @@ class ImageInspectorSettings:
     search_range: int = DEFAULT_MATCH_SEARCH_RANGE
     match_threshold: float = MATCH_CONFIDENCE_RELIABLE
     show_histogram: bool = True
+    show_luminance_histogram: bool = False
+    show_exif: bool = True
     live_pixel: bool = True
     default_roi_name: str = "ROI 1"
     window_geometry: str = ""
@@ -31,6 +33,8 @@ class ImageInspectorSettings:
             search_range=search_range,
             match_threshold=threshold,
             show_histogram=bool(self.show_histogram),
+            show_luminance_histogram=bool(self.show_luminance_histogram),
+            show_exif=bool(self.show_exif),
             live_pixel=bool(self.live_pixel),
             default_roi_name=roi_name,
             window_geometry=str(self.window_geometry),
@@ -65,11 +69,14 @@ def save_image_inspector_settings(
     destination = _settings_path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "version": 1,
+        "version": 2,
         "values": asdict(settings.validated()),
         "descriptions": {
             "search_range": "选区锚点映射中心附近的匹配搜索范围。",
             "match_threshold": "低于该 NCC 分数时禁止输出确定性颜色结论。",
+            "show_histogram": "是否默认显示全部图片的 RGB 直方图。",
+            "show_luminance_histogram": "是否默认显示全部图片的亮度直方图。",
+            "show_exif": "是否默认显示全部图片的 EXIF 信息。",
             "panel_ratio": "右侧分析数据栏占主工作区宽度的比例。",
             "include_full_path": "CSV 是否包含完整本地路径；关闭时仅写文件名。",
         },

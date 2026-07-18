@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterable, Optional, Tuple, Union
 
@@ -162,19 +163,145 @@ def _normalise_float_array(values: np.ndarray) -> np.ndarray:
 
 def histogram_rgb(display_rgb: np.ndarray) -> np.ndarray:
     pixels = np.asarray(display_rgb, dtype=np.uint8).reshape(-1, 3)
-    return np.stack(
-        [np.bincount(pixels[:, channel], minlength=256) for channel in range(3)],
-        axis=0,
-    ).astype(np.int64)
+    histogram = np.zeros((3, 256), dtype=np.int64)
+    # np.bincount internally promotes its input to platform integers.  Passing
+    # a whole 20 MP uint8 channel can therefore create a ~150 MB temporary;
+    # three channels leave a very large allocator high-water mark.  Chunking
+    # retains identical counts with bounded temporary memory.
+    for start in range(0, pixels.shape[0], COLOR_CONVERSION_CHUNK_PIXELS):
+        chunk = pixels[start : start + COLOR_CONVERSION_CHUNK_PIXELS]
+        for channel in range(3):
+            histogram[channel] += np.bincount(
+                chunk[:, channel], minlength=256
+            ).astype(np.int64)
+    return histogram
 
 
 def histogram_luminance(display_rgb: np.ndarray) -> np.ndarray:
     """Return a display-luminance histogram using standard sRGB channel weights."""
 
-    pixels = np.asarray(display_rgb, dtype=np.uint8).reshape(-1, 3).astype(np.float64)
-    levels = np.rint(pixels @ np.array((0.2126, 0.7152, 0.0722), dtype=np.float64))
-    levels = np.clip(levels, 0.0, 255.0).astype(np.uint8)
-    return np.bincount(levels, minlength=256).astype(np.int64)
+    pixels = np.asarray(display_rgb, dtype=np.uint8).reshape(-1, 3)
+    histogram = np.zeros(256, dtype=np.int64)
+    weights = np.array((0.2126, 0.7152, 0.0722), dtype=np.float64)
+    # Process large camera frames in bounded chunks.  The previous float64
+    # matrix multiply briefly allocated several full-frame buffers, which
+    # could add hundreds of megabytes for high-resolution images.
+    for start in range(0, pixels.shape[0], COLOR_CONVERSION_CHUNK_PIXELS):
+        chunk = pixels[start : start + COLOR_CONVERSION_CHUNK_PIXELS]
+        # Keep the established floating-point result exactly, but bound the
+        # temporary float64 conversion to one small chunk.
+        levels = np.rint(chunk.astype(np.float64) @ weights).astype(np.uint8)
+        histogram += np.bincount(levels, minlength=256).astype(np.int64)
+    return histogram
+
+
+IMAGE_ORIENTATION_OPERATIONS = frozenset(
+    {"rotate_left", "rotate_right", "flip_horizontal", "flip_vertical"}
+)
+
+
+def reorient_image(image: ImageData, operation: str) -> ImageData:
+    """Return a non-destructive rotated/mirrored view of ``image``.
+
+    NumPy's rotation and flip operations are views, so orientation changes do
+    not allocate another full-resolution RGB frame.  Histograms are reused
+    because pixel counts are invariant under these transformations.
+    """
+
+    if operation not in IMAGE_ORIENTATION_OPERATIONS:
+        raise ImageInspectorError(f"不支持的图片方向操作：{operation}")
+
+    def transformed(values: Any) -> Any:
+        if values is None:
+            return None
+        array = np.asarray(values)
+        if operation == "rotate_left":
+            return np.rot90(array, 1, axes=(0, 1))
+        if operation == "rotate_right":
+            return np.rot90(array, 3, axes=(0, 1))
+        if operation == "flip_horizontal":
+            return np.flip(array, axis=1)
+        return np.flip(array, axis=0)
+
+    rgb = transformed(image.rgb)
+    display_rgb = rgb if image.display_rgb is image.rgb else transformed(image.display_rgb)
+    alpha = transformed(image.alpha)
+    height, width = np.asarray(rgb).shape[:2]
+    return replace(
+        image,
+        width=int(width),
+        height=int(height),
+        rgb=rgb,
+        display_rgb=display_rgb,
+        alpha=alpha,
+    )
+
+
+def _apply_exif_orientation(values: Optional[np.ndarray], orientation: int) -> Optional[np.ndarray]:
+    """Apply one EXIF orientation as a zero-copy NumPy view."""
+
+    if values is None or orientation in (0, 1):
+        return values
+    if orientation == 2:
+        return np.flip(values, axis=1)
+    if orientation == 3:
+        return np.rot90(values, 2, axes=(0, 1))
+    if orientation == 4:
+        return np.flip(values, axis=0)
+    if orientation == 5:
+        return np.swapaxes(values, 0, 1)
+    if orientation == 6:
+        return np.rot90(values, 3, axes=(0, 1))
+    if orientation == 7:
+        return np.flip(np.swapaxes(values, 0, 1), axis=(0, 1))
+    if orientation == 8:
+        return np.rot90(values, 1, axes=(0, 1))
+    return values
+
+
+def _decode_common_8bit_image(
+    source_path: Path,
+    source_mode: str,
+    bit_depth: int,
+    orientation: int,
+) -> Optional[Tuple[np.ndarray, Optional[np.ndarray]]]:
+    """Decode common output formats directly into one NumPy allocation.
+
+    Pillow remains the metadata and uncommon/high-bit-depth decoder.  For the
+    overwhelmingly common RGB/RGBA/L camera outputs, OpenCV avoids Pillow's
+    decoded image + immutable bytes + ndarray triple residency.  Channel and
+    EXIF transforms remain zero-copy views.
+    """
+
+    if bit_depth > 8 or source_mode not in {"RGB", "RGBA", "L"}:
+        return None
+    if source_path.suffix.casefold() not in {".jpg", ".jpeg", ".png", ".bmp"}:
+        return None
+    try:
+        import cv2  # type: ignore
+
+        encoded = np.fromfile(source_path, dtype=np.uint8)
+        flags = cv2.IMREAD_UNCHANGED | getattr(cv2, "IMREAD_IGNORE_ORIENTATION", 0)
+        decoded = cv2.imdecode(encoded, flags)
+    except (ImportError, OSError, ValueError):
+        return None
+    if decoded is None:
+        return None
+    if decoded.ndim == 2:
+        rgb = np.repeat(decoded[..., np.newaxis], 3, axis=-1)
+        alpha = None
+    elif decoded.ndim == 3 and decoded.shape[-1] == 3:
+        rgb = decoded[..., ::-1]
+        alpha = None
+    elif decoded.ndim == 3 and decoded.shape[-1] == 4:
+        rgb = decoded[..., :3][..., ::-1]
+        alpha = decoded[..., 3]
+    else:
+        return None
+    return (
+        _apply_exif_orientation(rgb, orientation),
+        _apply_exif_orientation(alpha, orientation),
+    )
 
 
 def load_image(path: Union[str, Path]) -> ImageData:
@@ -215,15 +342,27 @@ def load_image(path: Union[str, Path]) -> ImageData:
                 orientation = int(opened.getexif().get(274, 1))
             except (AttributeError, TypeError, ValueError):
                 orientation = 1
-            oriented = ImageOps.exif_transpose(opened)
-            oriented.load()
-
-            raw = np.asarray(oriented)
-            alpha: Optional[np.ndarray] = None
+            common_decode = _decode_common_8bit_image(
+                source_path,
+                source_mode,
+                bit_depth,
+                orientation,
+            )
+            oriented = None
+            if common_decode is not None:
+                rgb, alpha = common_decode
+                raw = np.asarray(rgb)
+            else:
+                oriented = opened if orientation in (0, 1) else ImageOps.exif_transpose(opened)
+                oriented.load()
+                raw = np.asarray(oriented)
+                alpha = None
             precision_preserved = True
             original_dtype = str(raw.dtype)
 
-            if oriented.mode == "P" and "transparency" in oriented.info:
+            if common_decode is not None:
+                pass
+            elif oriented.mode == "P" and "transparency" in oriented.info:
                 rgba = np.asarray(oriented.convert("RGBA"), dtype=np.uint8)
                 rgb = rgba[..., :3]
                 alpha = rgba[..., 3]
@@ -271,9 +410,10 @@ def load_image(path: Union[str, Path]) -> ImageData:
                     precision_preserved = False
 
             if np.asarray(rgb).dtype == np.uint8 and (bit_depth <= 8 or not precision_preserved):
-                # Avoid a full-image float64 intermediate for ordinary output
-                # files. Analysis and display intentionally share this array.
-                display = np.ascontiguousarray(rgb, dtype=np.uint8)
+                # Analysis and display intentionally share this array.  It may
+                # be a channel/orientation view; Pillow and NumPy consumers can
+                # handle its strides without another resident full-frame copy.
+                display = np.asarray(rgb, dtype=np.uint8)
                 rgb = display
             else:
                 normalised = np.clip(rgb, 0.0, 255.0)
@@ -283,7 +423,7 @@ def load_image(path: Union[str, Path]) -> ImageData:
                 rgb = np.ascontiguousarray(normalised, dtype=np.float32)
             if alpha is not None:
                 alpha = (
-                    np.ascontiguousarray(alpha, dtype=np.uint8)
+                    np.asarray(alpha, dtype=np.uint8)
                     if np.asarray(alpha).dtype == np.uint8 and bit_depth <= 8
                     else np.ascontiguousarray(np.clip(alpha, 0.0, 255.0), dtype=np.float32)
                 )

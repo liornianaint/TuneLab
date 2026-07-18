@@ -11,7 +11,7 @@ from typing import Callable, Iterable, Optional
 
 from PIL import Image, ImageTk
 
-from .branding import application_icon_path, show_about_dialog, show_workbench_help
+from .branding import APP_VERSION, application_icon_path, show_about_dialog, show_workbench_help
 from .ccm.color_science import delta_e_2000, lab_to_srgb, srgb_to_lab
 from .ccm.history import load_history, record_from_result, save_history
 from .ccm.imatest import ImatestCSVError, infer_cct, parse_imatest_csv
@@ -84,6 +84,7 @@ from .ui_foundation import (
     elide_canvas_text,
     fit_window_to_screen,
 )
+from .updates import update_controller_for
 
 
 APP_NAME = "TuneLab"
@@ -161,8 +162,8 @@ def configure_macos_application_identity(name: str = APP_NAME) -> None:
         bundle_values = {
             "CFBundleName": name,
             "CFBundleDisplayName": name,
-            "CFBundleShortVersionString": "0.2.0",
-            "CFBundleVersion": "0.2.0",
+            "CFBundleShortVersionString": APP_VERSION,
+            "CFBundleVersion": APP_VERSION,
         }
         for key, value in bundle_values.items():
             message(
@@ -783,6 +784,7 @@ class TuneLabApp:
         self._history_sort_reverse = True
         self.gamma_workspace = None
         self.image_inspector_workspace = None
+        self.update_controller = update_controller_for(root)
 
         root.title(APP_TITLE)
         self.window_placement = fit_window_to_screen(root)
@@ -802,6 +804,7 @@ class TuneLabApp:
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after_idle(self._install_app_icon)
         root.after_idle(self._persist_settings)
+        self.update_controller.schedule_startup_check()
         self._set_status("请选择 CC CSV 或 ColorChecker 图片作为输入，再打开 Qualcomm CC XML。")
 
     def _configure_styles(self) -> None:
@@ -912,6 +915,8 @@ class TuneLabApp:
         help_menu.add_command(label="TuneLab 使用说明", command=self.show_help)
         help_menu.add_separator()
         help_menu.add_command(label="CCM / ColorChecker 算法边界", command=self.show_cc_assumptions)
+        help_menu.add_separator()
+        help_menu.add_command(label="检查更新...", command=self.check_for_updates)
         help_menu.add_command(label="关于 TuneLab", command=self.show_about)
         self.help_menu = help_menu
         menu.add_cascade(label="帮助", menu=help_menu)
@@ -936,6 +941,8 @@ class TuneLabApp:
         menu.add_cascade(label="工具", menu=tools_menu)
         help_menu = tk.Menu(menu, tearoff=False)
         help_menu.add_command(label="TuneLab 使用说明", command=self.show_help)
+        help_menu.add_separator()
+        help_menu.add_command(label="检查更新...", command=self.check_for_updates)
         help_menu.add_command(label="关于 TuneLab", command=self.show_about)
         self.help_menu = help_menu
         menu.add_cascade(label="帮助", menu=help_menu)
@@ -1034,6 +1041,9 @@ class TuneLabApp:
 
     def show_help(self) -> None:
         show_workbench_help(self.root)
+
+    def check_for_updates(self) -> None:
+        self.update_controller.check(manual=True)
 
     def _build_home_tool_card(
         self,
@@ -1764,6 +1774,7 @@ class TuneLabApp:
             pass
         if self.image_inspector_workspace is not None:
             self.image_inspector_workspace.shutdown()
+        self.update_controller.shutdown()
         self.root.destroy()
 
     def _on_show_motion_changed(self) -> None:

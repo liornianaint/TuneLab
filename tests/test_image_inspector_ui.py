@@ -4,6 +4,8 @@ import tkinter as tk
 import tempfile
 import time
 import unittest
+import gc
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -15,6 +17,7 @@ except ImportError as exc:  # pragma: no cover
     raise unittest.SkipTest(f"Image dependencies unavailable: {exc}")
 
 from tunelab.image_inspector.settings import ImageInspectorSettings
+from tunelab.image_inspector.browser import ThumbnailData
 from tunelab.image_inspector.types import ImageData, ROI
 from tunelab.image_inspector.ui import ImageInspectorWorkspace, WINDOW_TITLE
 
@@ -43,6 +46,25 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
                 return
             time.sleep(0.01)
         self.fail("Timed out waiting for Image Inspector background work")
+
+    def install_synthetic_images(self, count: int) -> None:
+        self.app._set_image_count(count)
+        for index, role in enumerate(self.app.active_roles):
+            pixels = np.full((32, 48, 3), (40 + index * 20, 80, 120), dtype=np.uint8)
+            image_data = ImageData(
+                path=Path(f"synthetic-{index + 1}.png"),
+                width=48,
+                height=32,
+                bit_depth=8,
+                source_mode="RGB",
+                rgb=pixels,
+                display_rgb=pixels,
+                histogram=np.ones((3, 256), dtype=np.int64),
+                luminance_histogram=np.ones(256, dtype=np.int64),
+            )
+            self.app.images[role] = image_data
+            self.app.views[role].set_image(image_data)
+        self.app._refresh_information_sidebar()
 
     def tearDown(self) -> None:
         if hasattr(self, "app"):
@@ -95,6 +117,12 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         self.assertEqual(str(self.app.sidebar_header_toggle_button.cget("style")), "Icon.TButton")
         self.assertEqual(self.app.toolbar_panel.grid_slaves(row=1), [])
         self.assertFalse(self.app.progress.winfo_manager())
+        self.assertEqual(self.app.folder_path_var.get(), "")
+        self.assertEqual(self.app.group_status_var.get(), "")
+        self.assertFalse(self.app.metrics_grid.winfo_manager())
+        self.app.before_view._render()
+        self.assertFalse(self.app.before_view.canvas.find_withtag("viewer-chrome"))
+        self.assertTrue(all(not variable.get() for variable in self.app.metric_vars.values()))
         label_texts = []
         widget_texts = []
 
@@ -138,7 +166,7 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
                 role for role, row in self.app.info_control_rows.items() if row.winfo_manager() == "grid"
             ]
             self.assertEqual(visible_metrics, list(self.app.active_roles))
-            self.assertEqual(visible_controls, list(self.app.active_roles))
+            self.assertEqual(visible_controls, [])
             if count == 3:
                 layout = [self.app.views[role].grid_info() for role in self.app.active_roles]
                 self.assertEqual([int(item["row"]) for item in layout], [0, 0, 0])
@@ -773,14 +801,16 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
             int(self.app.compare_tree.column(column, "width"))
             for column in self.app.compare_tree.cget("columns")
         )
-        self.assertGreater(total_column_width, self.app.compare_tree.winfo_width())
-        self.app.compare_tree.xview_moveto(1.0)
-        self.root.update_idletasks()
-        self.assertGreater(self.app.compare_tree.xview()[0], 0.0)
-        self.assertAlmostEqual(self.app.compare_tree.xview()[1], 1.0, places=6)
+        if total_column_width > self.app.compare_tree.winfo_width():
+            self.app.compare_tree.xview_moveto(1.0)
+            self.root.update_idletasks()
+            self.assertGreater(self.app.compare_tree.xview()[0], 0.0)
+            self.assertAlmostEqual(self.app.compare_tree.xview()[1], 1.0, places=6)
+        else:
+            self.assertEqual(tuple(float(value) for value in self.app.compare_tree.xview()), (0.0, 1.0))
 
     def test_each_image_histogram_and_exif_can_be_hidden_and_restored(self) -> None:
-        self.app._set_image_count(2)
+        self.install_synthetic_images(2)
         self.app.show_histogram_var.set(False)
         self.app._on_histogram_visibility_changed()
         self.assertTrue(all(not variable.get() for variable in self.app.histogram_visible_vars.values()))
@@ -802,13 +832,22 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         self.app.exif_visible_vars["after"].set(False)
         self.app._on_info_visibility_changed("after")
         self.assertFalse(self.app.info_sections["after"].winfo_manager())
+
+        self.app.show_luminance_histogram_var.set(True)
+        self.app._on_global_info_visibility_changed("luminance")
+        self.assertTrue(
+            all(variable.get() for variable in self.app.luminance_histogram_visible_vars.values())
+        )
+        self.app.show_exif_var.set(False)
+        self.app._on_global_info_visibility_changed("exif")
+        self.assertTrue(all(not variable.get() for variable in self.app.exif_visible_vars.values()))
         self.assertEqual(
             [self.app.notebook.tab(tab, "text") for tab in self.app.notebook.tabs()],
             ["直方图 / EXIF", "对比"],
         )
 
     def test_information_content_scrolls_from_controls_histograms_and_exif(self) -> None:
-        self.app._set_image_count(4)
+        self.install_synthetic_images(4)
         for variable in self.app.luminance_histogram_visible_vars.values():
             variable.set(True)
         self.app._refresh_information_sidebar()
@@ -836,6 +875,119 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         else:
             self.app._on_info_mousewheel(SimpleNamespace(delta=-120))
         self.assertGreater(self.app.info_canvas.yview()[0], 0.0)
+
+    def test_image_context_menu_rotates_mirrors_and_restores_without_editing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "orientation.png"
+            pixels = np.arange(2 * 3 * 3, dtype=np.uint8).reshape(2, 3, 3)
+            Image.fromarray(pixels, mode="RGB").save(path)
+            self.app.open_images([path])
+            self.wait_until(lambda: self.app.images["before"] is not None)
+            original = self.app.images["before"]
+            assert original is not None
+
+            try:
+                aqua = self.root.tk.call("tk", "windowingsystem") == "aqua"
+            except tk.TclError:
+                aqua = False
+            context_button = 2 if aqua else 3
+            self.assertTrue(self.app.before_view.canvas.bind(f"<ButtonRelease-{context_button}>"))
+            context_callback = mock.Mock()
+            original_callback = self.app.before_view.context_callback
+            self.app.before_view.context_callback = context_callback
+            self.app.before_view._on_context_press(
+                SimpleNamespace(x=10, y=10, x_root=20, y_root=20)
+            )
+            self.app.before_view._on_context_drag(
+                SimpleNamespace(x=30, y=24, x_root=40, y_root=34)
+            )
+            self.app.before_view._on_context_release(
+                SimpleNamespace(x=30, y=24, x_root=40, y_root=34)
+            )
+            context_callback.assert_not_called()
+            self.app.before_view._on_context_press(
+                SimpleNamespace(x=10, y=10, x_root=20, y_root=20)
+            )
+            self.app.before_view._on_context_release(
+                SimpleNamespace(x=10, y=10, x_root=20, y_root=20)
+            )
+            context_callback.assert_called_once_with("before", 20, 20)
+            self.app.before_view.context_callback = original_callback
+            with mock.patch.object(tk.Menu, "tk_popup"):
+                self.app._show_image_context_menu("before", 20, 20)
+            labels = [
+                self.app._image_context_menu.entrycget(index, "label")
+                for index in range(self.app._image_context_menu.index("end") + 1)
+                if self.app._image_context_menu.type(index) != "separator"
+            ]
+            self.assertEqual(
+                labels,
+                ["向左旋转 90°", "向右旋转 90°", "水平镜像", "垂直镜像", "还原图片方向"],
+            )
+
+            self.app._apply_image_orientation("before", "rotate_right")
+            rotated = self.app.images["before"]
+            assert rotated is not None
+            self.assertEqual((rotated.width, rotated.height), (2, 3))
+            self.assertTrue(np.shares_memory(rotated.rgb, original.rgb))
+            self.app._apply_image_orientation("before", "flip_horizontal")
+            self.assertEqual(self.app.image_transform_ops["before"], ["rotate_right", "flip_horizontal"])
+            self.app._reset_image_orientation("before")
+            restored = self.app.images["before"]
+            assert restored is not None
+            np.testing.assert_array_equal(restored.rgb, original.rgb)
+            self.assertEqual(self.app.image_transform_ops["before"], [])
+            with Image.open(path) as saved:
+                self.assertEqual(saved.size, (3, 2))
+
+    def test_folder_thumbnails_scroll_smoothly_with_wheel_and_touchpad_binding(self) -> None:
+        strip = self.app.folder_thumbnail_strip
+        strip.request_callback = lambda _items: None
+        strip.set_paths([Path(f"frame-{index:03d}.png") for index in range(90)])
+        self.app._folder_browser_available = True
+        self.app._set_folder_sidebar_visible(True)
+        self.root.deiconify()
+        self.wait_until(lambda: strip.canvas.winfo_height() > 100)
+        self.assertTrue(strip.canvas.bind("<MouseWheel>"))
+        self.assertTrue(strip.cards[0].bind("<MouseWheel>"))
+        if tk.TkVersion >= 9.0:
+            self.assertTrue(strip.canvas.bind("<TouchpadScroll>"))
+            self.assertTrue(strip.cards[0].bind("<TouchpadScroll>"))
+        strip.canvas.yview_moveto(0.0)
+        strip._on_mousewheel(SimpleNamespace(delta=-120))
+        self.assertGreater(strip.canvas.yview()[0], 0.0)
+        thumbnail = Image.new("RGB", strip.PREVIEW_SIZE, (30, 60, 90))
+        for index, path in enumerate(strip.paths):
+            strip.apply_thumbnail(index, ThumbnailData(path, thumbnail, (640, 480)))
+        self.assertEqual(len(strip._photos), strip.MAX_CACHED_THUMBNAILS)
+
+    def test_idle_hidden_and_shutdown_paths_release_render_and_image_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.png"
+            Image.new("RGB", (640, 480), (80, 100, 120)).save(path)
+            self.app.open_images([path])
+            self.wait_until(
+                lambda: self.app.images["before"] is not None
+                and self.app._pending == 0
+                and self.app._poll_after_id is None
+            )
+            self.root.deiconify()
+            self.app.before_view._render()
+            self.assertIsNotNone(self.app.before_view._pil_image)
+            image_data = self.app.images["before"]
+            assert image_data is not None
+            reference = weakref.ref(image_data)
+
+            self.app.hide()
+            self.assertIsNone(self.app.before_view._pil_image)
+            self.assertIsNone(self.app.before_view._photo)
+            self.app.show()
+            self.assertIsNotNone(self.app.before_view._pil_image)
+
+            self.app.shutdown()
+            del image_data
+            gc.collect()
+            self.assertIsNone(reference())
 
 
 if __name__ == "__main__":

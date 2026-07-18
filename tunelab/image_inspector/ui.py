@@ -7,6 +7,7 @@ import math
 import queue
 import re
 import tkinter as tk
+from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -39,6 +40,7 @@ from ..ui_foundation import (
     elide_canvas_text,
     fit_window_to_screen,
 )
+from ..updates import update_controller_for
 from .browser import (
     ImageFolderError,
     ThumbnailData,
@@ -66,7 +68,14 @@ try:
 
     from .export import export_multi_csv
     from .matching import MatchingError, confirm_match, manual_match, match_roi, opencv_available
-    from .model import ImageInspectorError, analyse_roi, compare_statistics, load_image, pixel_metrics
+    from .model import (
+        ImageInspectorError,
+        analyse_roi,
+        compare_statistics,
+        load_image,
+        pixel_metrics,
+        reorient_image,
+    )
 except ImportError as exc:  # Keep the main TuneLab app importable without image extras.
     CORE_DEPENDENCY_ERROR = exc
     np = None  # type: ignore[assignment]
@@ -88,6 +97,18 @@ IMAGE_FILE_TYPES = [
     ("图片", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.heic *.heif"),
     ("所有文件", "*.*"),
 ]
+ORIENTATION_LABELS = {
+    "rotate_left": "向左旋转 90°",
+    "rotate_right": "向右旋转 90°",
+    "flip_horizontal": "水平镜像",
+    "flip_vertical": "垂直镜像",
+}
+INVERSE_ORIENTATION = {
+    "rotate_left": "rotate_right",
+    "rotate_right": "rotate_left",
+    "flip_horizontal": "flip_horizontal",
+    "flip_vertical": "flip_vertical",
+}
 
 
 def _role_label(role: str) -> str:
@@ -116,6 +137,7 @@ class ImageCanvas(ttk.Frame):
         zoom_callback: Optional[
             Callable[[str, float, float, float, float, float], None]
         ] = None,
+        context_callback: Optional[Callable[[str, int, int], None]] = None,
     ) -> None:
         super().__init__(master, style="InspectorImage.TFrame")
         self.role = role
@@ -123,6 +145,7 @@ class ImageCanvas(ttk.Frame):
         self.roi_callback = roi_callback
         self.live_enabled = live_enabled
         self.zoom_callback = zoom_callback
+        self.context_callback = context_callback
         self.image_data: Optional[ImageData] = None
         self._pil_image: Optional[Any] = None
         self._photo: Optional[Any] = None
@@ -142,9 +165,11 @@ class ImageCanvas(ttk.Frame):
         self._selection_image_start: Optional[Tuple[float, float]] = None
         self._selection_canvas_start: Optional[Tuple[float, float]] = None
         self._pan_start: Optional[Tuple[float, float, float, float]] = None
+        self._context_press_position: Optional[Tuple[float, float]] = None
+        self._context_dragged = False
 
         self.title_var = tk.StringVar(value=_role_label(role))
-        self.meta_var = tk.StringVar(value="尚未打开图片")
+        self.meta_var = tk.StringVar(value="")
         self.zoom_var = tk.StringVar(value="缩放 —")
 
         self.canvas = tk.Canvas(self, background=CANVAS_BG, highlightthickness=0, cursor="crosshair")
@@ -177,10 +202,24 @@ class ImageCanvas(ttk.Frame):
         self.canvas.bind("<Shift-ButtonPress-1>", self._on_pan_press)
         self.canvas.bind("<Shift-B1-Motion>", self._on_pan_drag)
         self.canvas.bind("<Shift-ButtonRelease-1>", self._on_pan_release)
-        for button in (2, 3):
-            self.canvas.bind(f"<ButtonPress-{button}>", self._on_pan_press)
-            self.canvas.bind(f"<B{button}-Motion>", self._on_pan_drag)
-            self.canvas.bind(f"<ButtonRelease-{button}>", self._on_pan_release)
+        try:
+            aqua = self.canvas.tk.call("tk", "windowingsystem") == "aqua"
+        except tk.TclError:
+            aqua = False
+        # Aqua reports a secondary click as button 2; Windows/Linux use 3.
+        # A click opens the image menu while a drag keeps the established
+        # smooth pan interaction.
+        context_button = 2 if aqua else 3
+        pan_button = 3 if aqua else 2
+        self.canvas.bind(f"<ButtonPress-{context_button}>", self._on_context_press)
+        self.canvas.bind(f"<B{context_button}-Motion>", self._on_context_drag)
+        self.canvas.bind(f"<ButtonRelease-{context_button}>", self._on_context_release)
+        self.canvas.bind(f"<ButtonPress-{pan_button}>", self._on_pan_press)
+        self.canvas.bind(f"<B{pan_button}-Motion>", self._on_pan_drag)
+        self.canvas.bind(f"<ButtonRelease-{pan_button}>", self._on_pan_release)
+        self.canvas.bind("<Control-ButtonPress-1>", self._on_context_press)
+        self.canvas.bind("<Control-B1-Motion>", self._on_context_drag)
+        self.canvas.bind("<Control-ButtonRelease-1>", self._on_context_release)
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
         if tk.TkVersion >= 9.0:
             self.canvas.bind("<TouchpadScroll>", self._on_touchpad_scroll)
@@ -220,12 +259,36 @@ class ImageCanvas(ttk.Frame):
         self.pan_y = 0.0
         self._needs_initial_fit = False
         self._fit_mode = True
-        self.meta_var.set("尚未打开图片")
+        self.meta_var.set("")
         self.zoom_var.set("缩放 —")
         self.canvas.delete("all")
         self._draw_overlays()
         self.horizontal.set(0.0, 1.0)
         self.vertical.set(0.0, 1.0)
+
+    def suspend_rendering(self) -> None:
+        """Release display-only buffers while the workspace is hidden."""
+
+        if self._render_after_id is not None:
+            try:
+                self.after_cancel(self._render_after_id)
+            except tk.TclError:
+                pass
+            self._render_after_id = None
+        self._cancel_initial_fit()
+        self._photo = None
+        self._pil_image = None
+        self._photo_key = None
+        self.canvas.delete("rendered-image")
+
+    def resume_rendering(self) -> None:
+        """Recreate a render source from the retained analysis pixels."""
+
+        if self.image_data is None or self._pil_image is not None:
+            return
+        assert Image is not None
+        self._pil_image = Image.fromarray(self.image_data.display_rgb, mode="RGB")
+        self.request_initial_fit()
 
     def _cancel_initial_fit(self) -> None:
         if self._initial_fit_after_id is not None:
@@ -417,6 +480,9 @@ class ImageCanvas(ttk.Frame):
 
     def _draw_viewer_chrome(self) -> None:
         """Paint filename, image metadata and zoom as non-layout overlays."""
+
+        if self.image_data is None:
+            return
 
         width = max(1, self.canvas.winfo_width())
         reserved_zoom = 96
@@ -724,6 +790,32 @@ class ImageCanvas(ttk.Frame):
         self.canvas.configure(cursor="crosshair")
         return "break"
 
+    def _on_context_press(self, event: tk.Event) -> str:
+        self._context_press_position = (float(event.x), float(event.y))
+        self._context_dragged = False
+        return self._on_pan_press(event)
+
+    def _on_context_drag(self, event: tk.Event) -> str:
+        if self._context_press_position is None:
+            return "break"
+        distance = math.hypot(
+            float(event.x) - self._context_press_position[0],
+            float(event.y) - self._context_press_position[1],
+        )
+        if not self._context_dragged and distance < 4.0:
+            return "break"
+        self._context_dragged = True
+        return self._on_pan_drag(event)
+
+    def _on_context_release(self, event: tk.Event) -> str:
+        dragged = self._context_dragged
+        self._context_press_position = None
+        self._context_dragged = False
+        self._on_pan_release(event)
+        if not dragged and self.image_data is not None and self.context_callback is not None:
+            self.context_callback(self.role, int(event.x_root), int(event.y_root))
+        return "break"
+
     def _on_destroy(self, event: tk.Event) -> None:
         if event.widget is not self.canvas:
             return
@@ -750,6 +842,7 @@ class FolderThumbnailStrip(ttk.Frame):
     PREVIEW_SIZE = (78, 58)
     CARD_WIDTH = 246
     CARD_HEIGHT = 78
+    MAX_CACHED_THUMBNAILS = 72
 
     def __init__(
         self,
@@ -765,7 +858,7 @@ class FolderThumbnailStrip(ttk.Frame):
         self.collapse_callback = collapse_callback
         self.paths: list[Path] = []
         self.cards: list[tk.Canvas] = []
-        self._photos: Dict[int, Any] = {}
+        self._photos: "OrderedDict[int, Any]" = OrderedDict()
         self._requested: set[int] = set()
         self._request_after_id: Optional[str] = None
 
@@ -811,6 +904,8 @@ class FolderThumbnailStrip(ttk.Frame):
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
         self.canvas.bind("<Button-4>", lambda _event: self._scroll_units(-2))
         self.canvas.bind("<Button-5>", lambda _event: self._scroll_units(2))
+        if tk.TkVersion >= 9.0:
+            self.canvas.bind("<TouchpadScroll>", self._on_touchpad_scroll)
         ttk.Label(
             self,
             text="点按单选 · ⌘/Ctrl 多选",
@@ -903,6 +998,10 @@ class FolderThumbnailStrip(ttk.Frame):
                 lambda event, selected=path: self._select_path(event, selected),
             )
             card.bind("<MouseWheel>", self._on_mousewheel)
+            card.bind("<Button-4>", lambda _event: self._scroll_units(-2))
+            card.bind("<Button-5>", lambda _event: self._scroll_units(2))
+            if tk.TkVersion >= 9.0:
+                card.bind("<TouchpadScroll>", self._on_touchpad_scroll)
             self.cards.append(card)
         self.canvas.yview_moveto(0.0)
         self.after_idle(self._schedule_visible_request)
@@ -948,6 +1047,7 @@ class FolderThumbnailStrip(ttk.Frame):
             return
         assert ImageTk is not None
         photo = ImageTk.PhotoImage(thumbnail.image, master=self.cards[index])
+        self._photos.pop(index, None)
         self._photos[index] = photo
         card = self.cards[index]
         card.delete("thumbnail-placeholder")
@@ -965,6 +1065,30 @@ class FolderThumbnailStrip(ttk.Frame):
         card.tag_raise("thumbnail-image", "selection-background")
         card.tag_raise("thumbnail-filename")
         card.tag_raise("thumbnail-meta")
+        while len(self._photos) > self.MAX_CACHED_THUMBNAILS:
+            evicted, _photo = self._photos.popitem(last=False)
+            if 0 <= evicted < len(self.cards):
+                evicted_card = self.cards[evicted]
+                evicted_card.delete("thumbnail-image")
+                evicted_card.delete("thumbnail-placeholder")
+                evicted_card.create_rectangle(
+                    11,
+                    10,
+                    11 + self.PREVIEW_SIZE[0],
+                    10 + self.PREVIEW_SIZE[1],
+                    fill="#D8D8DC",
+                    outline=SUBTLE_SEPARATOR,
+                    tags=("thumbnail-placeholder",),
+                )
+                evicted_card.create_text(
+                    11 + self.PREVIEW_SIZE[0] / 2,
+                    10 + self.PREVIEW_SIZE[1] / 2,
+                    text="载入中…",
+                    fill=MUTED,
+                    font=FONT_SMALL,
+                    tags=("thumbnail-placeholder",),
+                )
+                self._requested.discard(evicted)
 
     def mark_thumbnail_failed(self, index: int) -> None:
         if 0 <= index < len(self.cards):
@@ -998,12 +1122,40 @@ class FolderThumbnailStrip(ttk.Frame):
         self._schedule_visible_request()
         return "break"
 
-    def _on_mousewheel(self, event: tk.Event) -> str:
-        delta = getattr(event, "delta", 0)
-        if delta:
-            units = -2 if delta > 0 else 2
-            return self._scroll_units(units)
+    def _scroll_by_pixels(self, pixels: float) -> str:
+        bounds = self.canvas.bbox("all")
+        if bounds is None:
+            return "break"
+        content_height = max(1.0, float(bounds[3] - bounds[1]))
+        viewport_height = max(1.0, float(self.canvas.winfo_height()))
+        if content_height <= viewport_height:
+            return "break"
+        current = float(self.canvas.yview()[0])
+        maximum = max(0.0, 1.0 - viewport_height / content_height)
+        target = min(maximum, max(0.0, current + float(pixels) / content_height))
+        self.canvas.yview_moveto(target)
+        self._schedule_visible_request()
         return "break"
+
+    def _on_mousewheel(self, event: tk.Event) -> str:
+        delta = float(getattr(event, "delta", 0.0) or 0.0)
+        if abs(delta) >= 120.0:
+            return self._scroll_by_pixels(-delta / 120.0 * 56.0)
+        if abs(delta) > 1e-12:
+            return self._scroll_by_pixels(-delta * 3.0)
+        return "break"
+
+    def _on_touchpad_scroll(self, event: tk.Event) -> str:
+        raw_delta = getattr(event, "delta", 0)
+        try:
+            decoded = self.canvas.tk.call("tk::PreciseScrollDeltas", raw_delta)
+            values = tuple(float(value) for value in self.canvas.tk.splitlist(decoded))
+            delta_y = values[1] if len(values) >= 2 else values[0]
+        except (tk.TclError, TypeError, ValueError, IndexError):
+            delta_y = float(raw_delta or 0.0)
+        if abs(delta_y) < 1e-12:
+            return "break"
+        return self._scroll_by_pixels(-delta_y)
 
     def _schedule_visible_request(self) -> None:
         if self._request_after_id is not None:
@@ -1021,6 +1173,9 @@ class FolderThumbnailStrip(ttk.Frame):
         bottom = top + max(1, self.canvas.winfo_height())
         first = max(0, int(top // (self.CARD_HEIGHT + 2)) - 3)
         last = min(len(self.paths), int(math.ceil(bottom / (self.CARD_HEIGHT + 2))) + 4)
+        for index in range(first, last):
+            if index in self._photos:
+                self._photos.move_to_end(index)
         pending = [
             (index, self.paths[index])
             for index in range(first, last)
@@ -1038,6 +1193,11 @@ class FolderThumbnailStrip(ttk.Frame):
                 pass
             self._request_after_id = None
         self._photos.clear()
+        self._requested.clear()
+        for child in self.inner.winfo_children():
+            child.destroy()
+        self.cards.clear()
+        self.paths.clear()
 
 
 class HistogramCanvas(ttk.Frame):
@@ -1141,6 +1301,7 @@ class ImageInspectorWorkspace:
         self._folder_browser_available = False
         self._folder_thumbnail_generation = 0
         self._metric_mode = "none"
+        self.image_transform_ops: Dict[str, list[str]] = {role: [] for role in IMAGE_ROLES}
         self._closed = False
         self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="TuneLabImage")
         self._load_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="TuneLabDecode")
@@ -1152,6 +1313,7 @@ class ImageInspectorWorkspace:
         self._match_tokens = {role: 0 for role in IMAGE_ROLES}
         self._matching_roles: set[str] = set()
         self._poll_after_id: Optional[str] = None
+        self._polling_background = False
         self._fit_after_id: Optional[str] = None
         self._image_cache = ImageDataCache()
 
@@ -1169,7 +1331,9 @@ class ImageInspectorWorkspace:
             self.status_var.set(
                 "OpenCV 未能导入：像素与选区统计仍可使用，自动匹配暂用较慢的 NumPy FFT 后备路径。"
             )
-        self._poll_after_id = self.root.after(50, self._poll_background)
+        # Background completion polling starts on demand in _submit so an
+        # idle or hidden inspector does not wake Tk twenty times per second.
+        self._poll_after_id = None
 
     def _configure_styles(self) -> None:
         style = configure_macos_theme(self.root)
@@ -1308,6 +1472,8 @@ class ImageInspectorWorkspace:
         self.help_menu.add_command(label="TuneLab 使用说明", command=self._show_workbench_help)
         self.help_menu.add_separator()
         self.help_menu.add_command(label="图像分析器边界", command=self.show_help)
+        self.help_menu.add_separator()
+        self.help_menu.add_command(label="检查更新...", command=self._check_for_updates)
         self.help_menu.add_command(label="关于 TuneLab", command=self._show_about)
         menu.add_cascade(label="帮助", menu=self.help_menu)
         self.root.configure(menu=menu)
@@ -1367,6 +1533,10 @@ class ImageInspectorWorkspace:
         self.search_combo.bind("<<ComboboxSelected>>", lambda _event: self._settings_changed())
         self.live_pixel_var = tk.BooleanVar(value=self.settings.live_pixel)
         self.show_histogram_var = tk.BooleanVar(value=self.settings.show_histogram)
+        self.show_luminance_histogram_var = tk.BooleanVar(
+            value=self.settings.show_luminance_histogram
+        )
+        self.show_exif_var = tk.BooleanVar(value=self.settings.show_exif)
         self.include_full_path_var = tk.BooleanVar(value=self.settings.include_full_path)
         # Rebuild now that the Tk variable exists; Tk checkbutton menu variables
         # cannot be created safely before _build_ui.
@@ -1381,7 +1551,7 @@ class ImageInspectorWorkspace:
         self.location_bar = location_bar
         location_bar.pack(fill="x", pady=(0, 8))
         ttk.Label(location_bar, text="位置", style="InspectorCard.TLabel").grid(row=0, column=0, padx=(0, 6))
-        self.folder_path_var = tk.StringVar(value=self.last_directory or "尚未打开图片文件夹")
+        self.folder_path_var = tk.StringVar(value=self.last_directory or "")
         self.folder_address_entry = ttk.Entry(location_bar, textvariable=self.folder_path_var)
         self.folder_address_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8))
         self.folder_address_entry.bind("<Return>", self._open_folder_from_address)
@@ -1401,7 +1571,7 @@ class ImageInspectorWorkspace:
             style="Quiet.TButton",
         )
         self.previous_group_button.grid(row=0, column=3, padx=(0, 4))
-        self.group_status_var = tk.StringVar(value="尚未载入图片")
+        self.group_status_var = tk.StringVar(value="")
         ttk.Label(
             location_bar,
             textvariable=self.group_status_var,
@@ -1450,6 +1620,7 @@ class ImageInspectorWorkspace:
                 roi_callback=self._on_roi,
                 live_enabled=self.live_pixel_var.get,
                 zoom_callback=self._zoom_views_from,
+                context_callback=self._show_image_context_menu,
             )
         self.before_view = self.views["before"]
         self.after_view = self.views["after"]
@@ -1501,7 +1672,7 @@ class ImageInspectorWorkspace:
         self._set_image_count(1)
         self.root.after_idle(self._restore_panel_ratio)
         self.status_var = tk.StringVar(
-            value="请直接打开 1–4 张图片，或打开文件夹后按自然顺序与缩略图浏览。滚轮联动缩放全部图片。"
+            value="请打开 1–4 张图片，或从左侧图库选择；滚轮联动缩放，右键图片可旋转或镜像。"
         )
 
     def _build_information_panel(self) -> None:
@@ -1511,12 +1682,37 @@ class ImageInspectorWorkspace:
             row=0, column=0, columnspan=4, sticky="w", pady=(0, 4)
         )
         controls.columnconfigure(0, weight=1)
+        global_row = ttk.Frame(controls, style="InspectorSurface.TFrame")
+        global_row.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 3))
+        global_row.columnconfigure(0, weight=1)
+        ttk.Label(global_row, text="全部图片", style="InspectorCard.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 5)
+        )
+        ttk.Checkbutton(
+            global_row,
+            text="RGB",
+            variable=self.show_histogram_var,
+            command=lambda: self._on_global_info_visibility_changed("rgb"),
+        ).grid(row=0, column=1, padx=(3, 2))
+        ttk.Checkbutton(
+            global_row,
+            text="亮度",
+            variable=self.show_luminance_histogram_var,
+            command=lambda: self._on_global_info_visibility_changed("luminance"),
+        ).grid(row=0, column=2, padx=2)
+        ttk.Checkbutton(
+            global_row,
+            text="EXIF",
+            variable=self.show_exif_var,
+            command=lambda: self._on_global_info_visibility_changed("exif"),
+        ).grid(row=0, column=3, padx=(2, 0))
+        self.info_global_row = global_row
         self.histogram_visible_vars: Dict[str, tk.BooleanVar] = {}
         self.luminance_histogram_visible_vars: Dict[str, tk.BooleanVar] = {}
         self.exif_visible_vars: Dict[str, tk.BooleanVar] = {}
         self.info_name_vars: Dict[str, tk.StringVar] = {}
         self.info_control_rows: Dict[str, ttk.Frame] = {}
-        for index, role in enumerate(IMAGE_ROLES, start=1):
+        for index, role in enumerate(IMAGE_ROLES, start=2):
             row = ttk.Frame(controls, style="InspectorSurface.TFrame")
             row.grid(row=index, column=0, columnspan=4, sticky="ew", pady=1)
             row.columnconfigure(0, weight=1)
@@ -1525,8 +1721,10 @@ class ImageInspectorWorkspace:
                 row=0, column=0, sticky="w", padx=(0, 5)
             )
             histogram_var = tk.BooleanVar(value=self.settings.show_histogram)
-            luminance_histogram_var = tk.BooleanVar(value=False)
-            exif_var = tk.BooleanVar(value=True)
+            luminance_histogram_var = tk.BooleanVar(
+                value=self.settings.show_luminance_histogram
+            )
+            exif_var = tk.BooleanVar(value=self.settings.show_exif)
             ttk.Checkbutton(
                 row,
                 text="RGB",
@@ -1660,6 +1858,10 @@ class ImageInspectorWorkspace:
 
     def _on_info_visibility_changed(self, _role: str) -> None:
         self.show_histogram_var.set(any(variable.get() for variable in self.histogram_visible_vars.values()))
+        self.show_luminance_histogram_var.set(
+            any(variable.get() for variable in self.luminance_histogram_visible_vars.values())
+        )
+        self.show_exif_var.set(any(variable.get() for variable in self.exif_visible_vars.values()))
         self._refresh_information_sidebar()
         self._settings_changed()
 
@@ -1786,8 +1988,8 @@ class ImageInspectorWorkspace:
                 pass
 
     def _empty_metric_text(self, role: str) -> str:
-        index = IMAGE_ROLES.index(role) + 1
-        return f"图{index} · R:— G:— B:— · R/G:— R/B:—"
+        _ = role
+        return ""
 
     def _metric_text(self, role: str, rgb: Tuple[float, float, float]) -> str:
         red, green, blue = rgb
@@ -1802,6 +2004,7 @@ class ImageInspectorWorkspace:
         )
 
     def _refresh_metric_strip(self) -> None:
+        has_values = False
         for role in IMAGE_ROLES:
             text = self._empty_metric_text(role)
             if role in self.active_roles:
@@ -1809,7 +2012,12 @@ class ImageInspectorWorkspace:
                     text = self._metric_text(role, self.roi_statistics[role].mean_rgb)
                 elif self._metric_mode == "pixel" and self.fixed_pixels[role] is not None:
                     text = self._metric_text(role, self.fixed_pixels[role].rgb)
+            has_values = has_values or bool(text)
             self.metric_vars[role].set(text)
+        if has_values:
+            self.metrics_grid.grid()
+        else:
+            self.metrics_grid.grid_remove()
 
     def _set_image_count(self, count: int) -> None:
         count = min(4, max(1, int(count)))
@@ -1905,7 +2113,9 @@ class ImageInspectorWorkspace:
             self.info_sections[role].pack_forget()
         for role in self.active_roles:
             image_data = self.images.get(role)
-            name = _role_label(role) if image_data is None else f"{_role_label(role)} · {image_data.filename}"
+            if image_data is None:
+                continue
+            name = f"{_role_label(role)} · {image_data.filename}"
             self.info_name_vars[role].set(name)
             self.info_control_rows[role].grid()
             show_histogram = self.histogram_visible_vars[role].get()
@@ -2157,7 +2367,7 @@ class ImageInspectorWorkspace:
 
         self.previous_group_button.configure(state="disabled")
         self.next_group_button.configure(state="disabled")
-        self.group_status_var.set(f"已载入 {loaded} 张图片" if loaded else "尚未载入图片")
+        self.group_status_var.set(f"已载入 {loaded} 张图片" if loaded else "")
 
     def _load_group_index(self, index: int) -> None:
         if not self.folder_groups:
@@ -2385,11 +2595,14 @@ class ImageInspectorWorkspace:
         future.add_done_callback(
             lambda done, k=kind, t=token, r=role, m=details: self._result_queue.put((k, t, r, done, m))
         )
+        if self._poll_after_id is None and not self._polling_background:
+            self._poll_after_id = self.root.after(50, self._poll_background)
 
     def _poll_background(self) -> None:
         self._poll_after_id = None
         if self._closed:
             return
+        self._polling_background = True
         while True:
             try:
                 kind, token, role, future, meta = self._result_queue.get_nowait()
@@ -2411,7 +2624,9 @@ class ImageInspectorWorkspace:
         if self._pending == 0:
             self.progress.stop()
             self.progress.grid_remove()
-        self._poll_after_id = self.root.after(50, self._poll_background)
+        self._polling_background = False
+        if self._pending > 0:
+            self._poll_after_id = self.root.after(50, self._poll_background)
 
     def _finish_load(self, token: int, role: str, future: Future[Any], meta: Dict[str, Any]) -> None:
         if token != self._load_tokens[role]:
@@ -2443,6 +2658,7 @@ class ImageInspectorWorkspace:
         if token != self._load_tokens[role] or self._closed:
             return
         self.images[role] = image_data
+        self.image_transform_ops[role] = []
         view = self.views[role]
         view.set_image(image_data)
         view.set_title(f"{_role_label(role)} · {image_data.filename}")
@@ -2492,6 +2708,7 @@ class ImageInspectorWorkspace:
         view.set_sample_point(None)
         if clear_image:
             self.images[role] = None
+            self.image_transform_ops[role] = []
             view.clear_image()
         if was_anchor:
             self.roi_anchor_role = None
@@ -3031,9 +3248,126 @@ class ImageInspectorWorkspace:
     def zoom_out(self) -> None:
         self._zoom_active(1.0 / 1.25)
 
+    def _show_image_context_menu(self, role: str, x_root: int, y_root: int) -> None:
+        """Open native image-orientation actions for the clicked viewport."""
+
+        if role not in self.active_roles or self.images.get(role) is None:
+            return
+        menu = getattr(self, "_image_context_menu", None)
+        try:
+            menu_alive = menu is not None and bool(menu.winfo_exists())
+        except tk.TclError:
+            menu_alive = False
+        if not menu_alive:
+            menu = tk.Menu(self.root, tearoff=False)
+            self._image_context_menu = menu
+        else:
+            menu.delete(0, "end")
+        menu.add_command(
+            label=ORIENTATION_LABELS["rotate_left"],
+            command=lambda selected=role: self._apply_image_orientation(selected, "rotate_left"),
+        )
+        menu.add_command(
+            label=ORIENTATION_LABELS["rotate_right"],
+            command=lambda selected=role: self._apply_image_orientation(selected, "rotate_right"),
+        )
+        menu.add_separator()
+        menu.add_command(
+            label=ORIENTATION_LABELS["flip_horizontal"],
+            command=lambda selected=role: self._apply_image_orientation(selected, "flip_horizontal"),
+        )
+        menu.add_command(
+            label=ORIENTATION_LABELS["flip_vertical"],
+            command=lambda selected=role: self._apply_image_orientation(selected, "flip_vertical"),
+        )
+        menu.add_separator()
+        menu.add_command(
+            label="还原图片方向",
+            command=lambda selected=role: self._reset_image_orientation(selected),
+            state="normal" if self.image_transform_ops[role] else "disabled",
+        )
+        try:
+            menu.tk_popup(int(x_root), int(y_root))
+        finally:
+            try:
+                menu.grab_release()
+            except tk.TclError:
+                pass
+
+    def _replace_oriented_image(
+        self,
+        role: str,
+        image_data: ImageData,
+        operations: Sequence[str],
+        description: str,
+    ) -> None:
+        self._invalidate_role(role, clear_image=False, refresh=False)
+        self.images[role] = image_data
+        self.image_transform_ops[role] = list(operations)
+        view = self.views[role]
+        view.set_image(image_data)
+        view.set_title(f"{_role_label(role)} · {image_data.filename}")
+        for active_role in self.active_roles:
+            self.fixed_pixels[active_role] = None
+            self.views[active_role].set_sample_point(None)
+        self._metric_mode = "roi" if any(self.roi_statistics.values()) else "none"
+        self._refresh_outputs()
+        self._refresh_information_sidebar()
+        anchor_role = self.roi_anchor_role
+        if (
+            anchor_role is not None
+            and role != anchor_role
+            and self.rois.get(anchor_role) is not None
+            and self.images.get(anchor_role) is not None
+        ):
+            self._start_match(role)
+        self.root.after_idle(self.fit_images)
+        self.status_var.set(f"{_role_label(role)} 已{description}；仅改变当前查看，不修改原文件。")
+
+    def _apply_image_orientation(self, role: str, operation: str) -> None:
+        image_data = self.images.get(role)
+        if image_data is None:
+            return
+        try:
+            oriented = reorient_image(image_data, operation)
+        except ImageInspectorError as exc:
+            messagebox.showerror("图片方向调整失败", str(exc), parent=self.root)
+            return
+        operations = [*self.image_transform_ops[role], operation]
+        self._replace_oriented_image(role, oriented, operations, ORIENTATION_LABELS[operation])
+
+    def _reset_image_orientation(self, role: str) -> None:
+        image_data = self.images.get(role)
+        operations = self.image_transform_ops.get(role, [])
+        if image_data is None or not operations:
+            return
+        original = self._image_cache.get(image_data.path)
+        if original is None:
+            original = image_data
+            for operation in reversed(operations):
+                original = reorient_image(original, INVERSE_ORIENTATION[operation])
+            self._image_cache.put(original)
+        self._replace_oriented_image(role, original, (), "还原图片方向")
+
     def _on_histogram_visibility_changed(self) -> None:
-        for variable in self.histogram_visible_vars.values():
-            variable.set(self.show_histogram_var.get())
+        """Backward-compatible entry point for the RGB global switch."""
+
+        self._on_global_info_visibility_changed("rgb")
+
+    def _on_global_info_visibility_changed(self, category: str) -> None:
+        groups = {
+            "rgb": (self.show_histogram_var, self.histogram_visible_vars),
+            "luminance": (
+                self.show_luminance_histogram_var,
+                self.luminance_histogram_visible_vars,
+            ),
+            "exif": (self.show_exif_var, self.exif_visible_vars),
+        }
+        if category not in groups:
+            return
+        master, variables = groups[category]
+        for variable in variables.values():
+            variable.set(master.get())
         self._refresh_information_sidebar()
         self._settings_changed()
 
@@ -3061,6 +3395,8 @@ class ImageInspectorWorkspace:
             search_range=self._search_range(),
             match_threshold=self.settings.match_threshold,
             show_histogram=self.show_histogram_var.get(),
+            show_luminance_histogram=self.show_luminance_histogram_var.get(),
+            show_exif=self.show_exif_var.get(),
             live_pixel=self.live_pixel_var.get(),
             default_roi_name=self.settings.default_roi_name,
             window_geometry=geometry,
@@ -3119,6 +3455,7 @@ class ImageInspectorWorkspace:
             "本工具可直接打开或从左侧图库选择 1–4 张普通 JPG/JPEG/PNG/BMP/TIFF；"
             "点按单选，⌘/Ctrl 点按多选。底部显示同步像素或选区的 R/G/B、R/G 与 R/B，"
             "右侧检查器可逐图显示直方图和 EXIF。多图时可任意选择图像 A/B；"
+            "顶部总开关可统一控制 RGB、亮度与 EXIF；右键图片可做非破坏旋转或镜像。"
             "首次框选的图片作为选区锚点，其他图片仍可逐张手动调整，文件名和角色不会被预设。\n\n"
             f"自动匹配：{backend}；支持轻微平移、很小裁切以及轻微曝光/颜色变化。"
             "旋转、透视、大幅缩放、物体移动、遮挡或景深变化可能导致失败。\n\n"
@@ -3136,6 +3473,9 @@ class ImageInspectorWorkspace:
     def _show_workbench_help(self) -> None:
         show_workbench_help(self.root)
 
+    def _check_for_updates(self) -> None:
+        update_controller_for(self.root).check(manual=True)
+
     def is_alive(self) -> bool:
         try:
             return bool(self.outer.winfo_exists())
@@ -3149,11 +3489,17 @@ class ImageInspectorWorkspace:
         self._build_menu()
         self.root.title(WINDOW_TITLE)
         self.outer.pack(fill="both", expand=True)
+        for view in self.views.values():
+            view.resume_rendering()
+        self.root.after_idle(self.fit_images)
         return True
 
     def hide(self) -> None:
         if self.is_alive():
             self._persist_settings()
+            for view in self.views.values():
+                view.suspend_rendering()
+            self._image_cache.retain(list(self.current_paths))
             self.outer.pack_forget()
 
     def shutdown(self) -> None:
@@ -3184,6 +3530,32 @@ class ImageInspectorWorkspace:
         # a worker thread during rapid close/reopen or a test-suite teardown.
         self._executor.shutdown(wait=True, cancel_futures=True)
         self._load_executor.shutdown(wait=True, cancel_futures=True)
+        self._futures.clear()
+        while True:
+            try:
+                self._result_queue.get_nowait()
+            except queue.Empty:
+                break
+        for role, view in self.views.items():
+            view.clear_image()
+            self.images[role] = None
+            self.rois[role] = None
+            self.roi_statistics[role] = None
+            self.fixed_pixels[role] = None
+            self.match_results[role] = None
+        for role in COMPARISON_ROLES:
+            self.comparisons[role] = None
+        for histogram in (
+            *self.histogram_canvases.values(),
+            *self.luminance_histogram_canvases.values(),
+        ):
+            histogram.histogram = None
+        context_menu = getattr(self, "_image_context_menu", None)
+        if context_menu is not None:
+            try:
+                context_menu.destroy()
+            except tk.TclError:
+                pass
 
     def close(self) -> None:
         if self.on_close is not None:
