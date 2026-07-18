@@ -3,6 +3,7 @@
 from .engine import (
     ColorCheckerDetection,
     ColorCheckerError,
+    COLORCHECKER_CLASSIC_SRGB_8BIT,
     DetectedPatch,
     RESTORATION_PROFILES,
     RESTORATION_RESPONSE_PROFILES,
@@ -18,11 +19,13 @@ from .engine import (
     sample_patch_means,
     simulate_correction,
     simulate_restoration_response,
+    standard_colorchecker_reference,
 )
 
 __all__ = [
     "ColorCheckerDetection",
     "ColorCheckerError",
+    "COLORCHECKER_CLASSIC_SRGB_8BIT",
     "DetectedPatch",
     "RESTORATION_PROFILES",
     "RESTORATION_RESPONSE_PROFILES",
@@ -38,4 +41,5 @@ __all__ = [
     "sample_patch_means",
     "simulate_correction",
     "simulate_restoration_response",
+    "standard_colorchecker_reference",
 ]

@@ -8,6 +8,7 @@ import numpy as np
 
 from tunelab.ccm.color_science import srgb_to_linear
 from tunelab.colorchecker.engine import (
+    COLORCHECKER_CLASSIC_SRGB_8BIT,
     ColorCheckerError,
     LUMA_WEIGHTS,
     RESTORATION_PROFILES,
@@ -19,17 +20,18 @@ from tunelab.colorchecker.engine import (
     sample_patch_means,
     simulate_correction,
     simulate_restoration_response,
+    standard_colorchecker_reference,
 )
-from tunelab.ccm.optimizer import evaluate_ccm_correction
+from tunelab.ccm.optimizer import (
+    OptimizationError,
+    evaluate_ccm_correction,
+    evaluate_protected_ccm_correction,
+    optimize_ccm,
+)
 from tunelab.image_inspector.types import ImageData
 
 
-CLASSIC_RGB = (
-    (115, 82, 68), (194, 150, 130), (98, 122, 157), (87, 108, 67), (133, 128, 177), (103, 189, 170),
-    (214, 126, 44), (80, 91, 166), (193, 90, 99), (94, 60, 108), (157, 188, 64), (224, 163, 46),
-    (56, 61, 150), (70, 148, 73), (175, 54, 60), (231, 199, 31), (187, 86, 149), (8, 133, 161),
-    (243, 243, 242), (200, 200, 200), (160, 160, 160), (122, 122, 121), (85, 85, 85), (52, 52, 52),
-)
+CLASSIC_RGB = COLORCHECKER_CLASSIC_SRGB_8BIT
 
 
 def synthetic_chart(name: str = "4000K_test.png", *, colour_scale: float = 1.0) -> ImageData:
@@ -54,6 +56,21 @@ def synthetic_chart(name: str = "4000K_test.png", *, colour_scale: float = 1.0) 
 
 
 class ColorCheckerEngineTests(unittest.TestCase):
+    def test_builtin_standard_reference_has_exact_classic_24_srgb_values(self) -> None:
+        reference = standard_colorchecker_reference()
+        self.assertEqual(reference.method, "内置 ColorChecker Classic 24 标准 sRGB")
+        self.assertEqual(reference.confidence, 1.0)
+        self.assertEqual(len(reference.patches), 24)
+        self.assertIn("不参与拍摄 CCT 推断", reference.warning)
+        self.assertEqual(reference.image.path.name, "ColorChecker_Classic_24_standard_sRGB.png")
+        self.assertEqual(reference.image.display_rgb.shape, (640, 960, 3))
+        np.testing.assert_array_equal(
+            np.rint(np.asarray([patch.mean_rgb for patch in reference.patches])).astype(np.uint8),
+            np.asarray(COLORCHECKER_CLASSIC_SRGB_8BIT, dtype=np.uint8),
+        )
+        sampled = sample_patch_means(reference.image, reference)
+        np.testing.assert_allclose(sampled, COLORCHECKER_CLASSIC_SRGB_8BIT, atol=0.01)
+
     def test_calibrated_profiles_reproduce_the_accepted_3000k_and_4000k_matrices(self) -> None:
         for profile in RESTORATION_PROFILES:
             with self.subTest(cct=profile.cct):
@@ -137,6 +154,57 @@ class ColorCheckerEngineTests(unittest.TestCase):
             measured_luma = float(np.asarray(srgb_to_linear(patch.measured_srgb)) @ LUMA_WEIGHTS)
             target_luma = float(np.asarray(srgb_to_linear(patch.ideal_srgb)) @ LUMA_WEIGHTS)
             self.assertAlmostEqual(measured_luma, target_luma, places=5)
+
+    def test_custom_target_filename_cannot_override_test_capture_cct(self) -> None:
+        with mock.patch("tunelab.colorchecker.engine._mcc_polygons", return_value=None):
+            measured = detect_colorchecker(synthetic_chart("capture_without_cct.png"))
+            reference = detect_colorchecker(synthetic_chart("D65_6500K_target.png"))
+        dataset = build_comparison_dataset(measured, reference)
+        self.assertIsNone(dataset.inferred_cct)
+
+    def test_validated_profile_direction_is_subject_to_regression_protection(self) -> None:
+        profile = RESTORATION_PROFILES[1]
+        plan = build_calibrated_restoration_plan(profile.source_matrix, profile.cct)
+        with mock.patch("tunelab.colorchecker.engine._mcc_polygons", return_value=None):
+            measured = detect_colorchecker(synthetic_chart("4000K_Before.png"))
+        dataset = build_comparison_dataset(measured, standard_colorchecker_reference())
+        with self.assertRaisesRegex(OptimizationError, "Regression Protection"):
+            evaluate_protected_ccm_correction(
+                dataset,
+                profile.source_matrix,
+                plan.correction_matrix,
+                config=restoration_evaluation_config(profile.source_matrix, plan.optimized_matrix),
+                search_method="calibrated-restoration",
+            )
+
+    def test_protected_fixed_direction_accepts_a_safe_correction(self) -> None:
+        source = synthetic_chart("4000K_warm.png")
+        warm_rgb = np.rint(
+            np.clip(source.display_rgb.astype(np.float64) * np.asarray((1.15, 1.0, 0.8)), 0, 255)
+        ).astype(np.uint8)
+        warm = ImageData(
+            path=source.path,
+            width=source.width,
+            height=source.height,
+            bit_depth=8,
+            source_mode="RGB",
+            rgb=warm_rgb,
+            display_rgb=warm_rgb,
+        )
+        with mock.patch("tunelab.colorchecker.engine._mcc_polygons", return_value=None):
+            measured = detect_colorchecker(warm)
+        dataset = build_comparison_dataset(measured, standard_colorchecker_reference())
+        identity = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        fitted = optimize_ccm(dataset, identity)
+        protected = evaluate_protected_ccm_correction(
+            dataset,
+            identity,
+            fitted.correction_matrix,
+            search_method="known-safe-direction",
+            blend=fitted.blend,
+        )
+        self.assertLess(protected.mean_after, protected.mean_before)
+        self.assertFalse(any(patch.regression_status == "FAIL" for patch in protected.patch_results))
 
     def test_simulation_identity_is_exact_and_neutral_axis_is_preserved(self) -> None:
         pixels = np.asarray(

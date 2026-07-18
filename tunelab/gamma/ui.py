@@ -9,19 +9,31 @@ from typing import Callable, Iterable, Optional, Sequence
 
 from ..branding import application_icon_path, show_about_dialog, show_workbench_help
 from ..ui_foundation import (
+    ACTION_BLUE,
+    DANGER,
     FONT_BODY,
     FONT_CARD_TITLE,
     FONT_KPI,
     FONT_MONO,
+    FONT_NAV_SECTION,
     FONT_PLOT_TITLE,
     FONT_SMALL,
     FONT_SMALL_BOLD,
     FONT_TITLE,
+    INFO_BG,
+    INK,
+    MUTED,
+    PANEL_BG,
     ROW_HEIGHT,
+    SUBTLE_SEPARATOR,
+    SUCCESS,
     TABLE_HEADING_BG,
+    TERTIARY,
+    WARNING,
+    WINDOW_BG,
     bind_responsive_wrap,
-    configure_action_styles,
-    configure_typography,
+    configure_macos_theme,
+    default_sources_directory,
     elide_canvas_text,
     fit_window_to_screen,
 )
@@ -40,14 +52,12 @@ from .imatest import GrayCSVError, analyze_gray_range, parse_gray_csv
 from .qualcomm_xml import QualcommGammaDocument, QualcommGammaXMLError
 
 
-BG = "#F3F5F8"
-PANEL = "#FFFFFF"
-INK = "#172033"
-MUTED = "#667085"
-BLUE = "#2563EB"
-GREEN = "#0F9D75"
-RED = "#D92D20"
-AMBER = "#B54708"
+BG = WINDOW_BG
+PANEL = PANEL_BG
+BLUE = ACTION_BLUE
+GREEN = SUCCESS
+RED = DANGER
+AMBER = WARNING
 PURPLE = "#7F56D9"
 class CurvePlot(ttk.Frame):
     def __init__(
@@ -122,11 +132,11 @@ class CurvePlot(ttk.Frame):
             y_value = y_min + fraction * (y_max - y_min)
             x_coordinate = x_pos(x_value)
             y_coordinate = y_pos(y_value)
-            canvas.create_line(x_coordinate, top, x_coordinate, bottom, fill="#EAECF0")
-            canvas.create_line(left, y_coordinate, right, y_coordinate, fill="#EAECF0")
+            canvas.create_line(x_coordinate, top, x_coordinate, bottom, fill=SUBTLE_SEPARATOR)
+            canvas.create_line(left, y_coordinate, right, y_coordinate, fill=SUBTLE_SEPARATOR)
             canvas.create_text(x_coordinate, bottom + 16, text=f"{x_value:.2f}", fill=MUTED, font=FONT_SMALL)
             canvas.create_text(left - 7, y_coordinate, text=f"{y_value:.3f}", anchor="e", fill=MUTED, font=FONT_SMALL)
-        canvas.create_rectangle(left, top, right, bottom, outline="#98A2B3")
+        canvas.create_rectangle(left, top, right, bottom, outline=TERTIARY)
         canvas.create_text((left + right) / 2, height - 10, text=self.x_label, fill=MUTED)
         canvas.create_text(5, (top + bottom) / 2, text=self.y_label, fill=MUTED, anchor="w")
         legend_x = left + 6
@@ -218,9 +228,7 @@ class GammaWorkspace:
         if self.on_home is not None:
             self.functions_menu.add_command(label="首页", command=self.on_home)
         if self.on_close is not None:
-            self.functions_menu.add_command(label="CC 校正", command=self.on_close)
-        if self.on_colorchecker is not None:
-            self.functions_menu.add_command(label="ColorChecker 图像校正", command=self.on_colorchecker)
+            self.functions_menu.add_command(label="CCM / ColorChecker 校正", command=self.on_close)
         if self.on_image_inspector is not None:
             self.functions_menu.add_command(label="图像分析器", command=self.on_image_inspector)
         menu.add_cascade(label="工具", menu=self.functions_menu)
@@ -243,14 +251,23 @@ class GammaWorkspace:
         show_workbench_help(self.root)
 
     def _configure_styles(self) -> None:
-        style = configure_typography(self.root)
+        style = configure_macos_theme(self.root)
         style.configure("GammaRoot.TFrame", background=BG)
-        style.configure("GammaCard.TFrame", background=PANEL)
+        style.configure(
+            "GammaCard.TFrame",
+            background=PANEL,
+            relief="solid",
+            borderwidth=1,
+            bordercolor=SUBTLE_SEPARATOR,
+            lightcolor=SUBTLE_SEPARATOR,
+            darkcolor=SUBTLE_SEPARATOR,
+        )
+        style.configure("GammaSurface.TFrame", background=PANEL)
         style.configure("GammaCard.TLabel", background=PANEL, foreground=INK, font=FONT_BODY)
         style.configure("GammaTitle.TLabel", background=BG, foreground=INK, font=FONT_TITLE)
         style.configure("GammaMuted.TLabel", background=BG, foreground=MUTED, font=FONT_BODY)
+        style.configure("GammaEyebrow.TLabel", background=BG, foreground=TERTIARY, font=FONT_NAV_SECTION)
         style.configure("GammaKpi.TLabel", background=PANEL, foreground=INK, font=FONT_KPI)
-        configure_action_styles(style)
         style.configure(
             "Gamma.Treeview",
             rowheight=ROW_HEIGHT,
@@ -262,26 +279,37 @@ class GammaWorkspace:
         style.configure(
             "Gamma.Treeview.Heading",
             background=TABLE_HEADING_BG,
-            foreground=INK,
+            foreground=MUTED,
             font=FONT_SMALL_BOLD,
+            relief="flat",
+            padding=(8, 7),
         )
 
     def _build_ui(self) -> None:
         self.root.title("TuneLab · Qualcomm Gamma 1.5 LUT 优化")
-        outer = ttk.Frame(self.root, padding=(16, 10), style="GammaRoot.TFrame")
+        outer = ttk.Frame(self.root, padding=(24, 18), style="GammaRoot.TFrame")
         self.outer = outer
         outer.pack(fill="both", expand=True)
         title = ttk.Frame(outer, style="GammaRoot.TFrame")
-        title.pack(fill="x", pady=(0, 6))
-        ttk.Label(title, text="Gamma 优化", style="GammaTitle.TLabel").pack(side="left")
-        ttk.Label(title, text="Imatest Stepchart · Qualcomm Gamma LUT（点数/位宽由 XML 决定）", style="GammaMuted.TLabel").pack(side="left", padx=(12, 0), pady=(5, 0))
+        title.pack(fill="x", pady=(0, 16))
+        heading = ttk.Frame(title, style="GammaRoot.TFrame")
+        heading.pack(side="left", fill="x", expand=True)
+        ttk.Label(heading, text="灰阶工作区", style="GammaEyebrow.TLabel").pack(anchor="w")
+        ttk.Label(heading, text="Gamma 优化", style="GammaTitle.TLabel").pack(anchor="w", pady=(3, 0))
+        ttk.Label(
+            heading,
+            text="Imatest Stepchart · Qualcomm Gamma LUT，点数与位宽由 XML 自动识别",
+            style="GammaMuted.TLabel",
+        ).pack(anchor="w", pady=(4, 0))
+        if self.on_home is not None:
+            ttk.Button(title, text="返回首页", command=self.on_home, style="Quiet.TButton").pack(side="right", anchor="n", pady=(7, 0))
 
-        toolbar = ttk.Frame(outer, padding=(10, 7), style="GammaCard.TFrame")
+        toolbar = ttk.Frame(outer, padding=(14, 11), style="GammaCard.TFrame")
         self.toolbar_panel = toolbar
-        toolbar.pack(fill="x", pady=(0, 6))
+        toolbar.pack(fill="x", pady=(0, 8))
         toolbar.columnconfigure(5, weight=1)
         ttk.Button(toolbar, text="1  打开 Gamma CSV", command=self.load_csv).grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        ttk.Button(toolbar, text="2  打开 Gamma XML", command=self.load_xml).grid(row=0, column=1, sticky="ew", padx=(0, 12))
+        ttk.Button(toolbar, text="2  打开 Gamma XML", command=self.load_xml).grid(row=0, column=1, sticky="ew", padx=(0, 8))
         ttk.Label(toolbar, text="CCT", style="GammaCard.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 5))
         self.cct_var = tk.StringVar(value="6500")
         ttk.Entry(toolbar, textvariable=self.cct_var, width=8).grid(row=0, column=3, sticky="w", padx=(0, 8))
@@ -293,7 +321,7 @@ class GammaWorkspace:
         )
         self.region_match_button.grid(row=0, column=4, sticky="ew", padx=(0, 8))
         self.region_var = tk.StringVar()
-        self.region_combo = ttk.Combobox(toolbar, textvariable=self.region_var, state="readonly", width=12)
+        self.region_combo = ttk.Combobox(toolbar, textvariable=self.region_var, state="readonly", width=10)
         self.region_combo.grid(row=0, column=5, sticky="ew", padx=(0, 8))
         self.region_combo.bind("<<ComboboxSelected>>", self._on_region_selected)
         self.optimize_button = ttk.Button(toolbar, text="3  自动优化", command=self.run_optimization, style="Primary.TButton")
@@ -301,9 +329,9 @@ class GammaWorkspace:
         self.save_button = ttk.Button(toolbar, text="保存 XML", command=self.save_xml, state="disabled")
         self.save_button.grid(row=0, column=7, sticky="ew")
 
-        settings = ttk.Frame(outer, padding=(10, 6), style="GammaCard.TFrame")
+        settings = ttk.Frame(outer, padding=(14, 10), style="GammaCard.TFrame")
         self.settings_panel = settings
-        settings.pack(fill="x", pady=(0, 6))
+        settings.pack(fill="x", pady=(0, 8))
         config = self.settings
         ttk.Label(settings, text="Gamma", style="GammaCard.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 5))
         self.target_gamma_var = tk.StringVar(value=f"{config.target_gamma:g}")
@@ -320,7 +348,7 @@ class GammaWorkspace:
         ttk.Label(settings, text="暗部保护", style="GammaCard.TLabel").grid(row=0, column=8, sticky="w", padx=(0, 5))
         self.shadow_var = tk.DoubleVar(value=config.shadow_protection * 100.0)
         ttk.Scale(settings, from_=0, to=100, variable=self.shadow_var, orient="horizontal", length=90).grid(row=0, column=9, sticky="w")
-        secondary = ttk.Frame(settings, style="GammaCard.TFrame")
+        secondary = ttk.Frame(settings, style="GammaSurface.TFrame")
         secondary.grid(row=1, column=0, columnspan=10, sticky="ew", pady=(5, 0))
         rgb_label = next((label for label, value in self.RGB_LABELS.items() if value == config.rgb_mode), next(iter(self.RGB_LABELS)))
         ttk.Label(secondary, text="RGB", style="GammaCard.TLabel").pack(side="left", padx=(0, 5))
@@ -339,7 +367,7 @@ class GammaWorkspace:
         threshold_entry.bind("<Return>", lambda _event: self.reanalyze())
         threshold_entry.bind("<FocusOut>", lambda _event: self.reanalyze(quiet=True))
         ttk.Label(secondary, text="手动 Zone", style="GammaCard.TLabel").pack(side="left", padx=(0, 5))
-        manual = ttk.Frame(secondary, style="GammaCard.TFrame")
+        manual = ttk.Frame(secondary, style="GammaSurface.TFrame")
         manual.pack(side="left")
         self.manual_start_var = tk.StringVar(value=str(config.manual_start_zone or 1))
         self.manual_end_var = tk.StringVar(value=str(config.manual_end_zone or 12))
@@ -359,22 +387,22 @@ class GammaWorkspace:
             outer,
             textvariable=self.status_var,
             foreground=BLUE,
-            background="#EAF0FF",
-            padding=(8, 4),
+            background=INFO_BG,
+            padding=(12, 8),
         )
-        self.status_label.pack(fill="x", pady=(0, 5))
+        self.status_label.pack(fill="x", pady=(0, 8))
         bind_responsive_wrap(self.status_label)
 
         self.notebook = ttk.Notebook(outer)
         self.notebook.pack(fill="both", expand=True)
-        self.curve_tab = ttk.Frame(self.notebook, padding=8, style="GammaRoot.TFrame")
-        self.engineering_tab = ttk.Frame(self.notebook, padding=8, style="GammaRoot.TFrame")
-        self.diagnosis_tab = ttk.Frame(self.notebook, padding=8, style="GammaRoot.TFrame")
-        self.history_tab = ttk.Frame(self.notebook, padding=8, style="GammaRoot.TFrame")
-        self.notebook.add(self.curve_tab, text="  曲线对比  ")
-        self.notebook.add(self.engineering_tab, text="  工程统计  ")
-        self.notebook.add(self.diagnosis_tab, text="  诊断与解释  ")
-        self.notebook.add(self.history_tab, text="  History / XML Diff  ")
+        self.curve_tab = ttk.Frame(self.notebook, padding=10, style="GammaRoot.TFrame")
+        self.engineering_tab = ttk.Frame(self.notebook, padding=10, style="GammaRoot.TFrame")
+        self.diagnosis_tab = ttk.Frame(self.notebook, padding=10, style="GammaRoot.TFrame")
+        self.history_tab = ttk.Frame(self.notebook, padding=10, style="GammaRoot.TFrame")
+        self.notebook.add(self.curve_tab, text="曲线对比")
+        self.notebook.add(self.engineering_tab, text="工程统计")
+        self.notebook.add(self.diagnosis_tab, text="诊断与解释")
+        self.notebook.add(self.history_tab, text="History / XML Diff")
 
         self.curve_tab.columnconfigure(0, weight=1)
         self.curve_tab.rowconfigure(1, weight=5, minsize=230)
@@ -441,7 +469,7 @@ class GammaWorkspace:
         self.pair_tree.tag_configure("valid", foreground=GREEN)
 
         ttk.Label(zone_panel, text="每个 Zone 的误差与改善", style="GammaCard.TLabel").pack(anchor="w", pady=(0, 5))
-        zone_frame = ttk.Frame(zone_panel, style="GammaCard.TFrame")
+        zone_frame = ttk.Frame(zone_panel, style="GammaSurface.TFrame")
         zone_frame.pack(fill="both", expand=True)
         columns = ("zone", "used", "pixel", "target", "after", "before_error", "after_error", "improve", "local_before", "local_after")
         self.zone_tree = ttk.Treeview(
@@ -470,7 +498,7 @@ class GammaWorkspace:
         zone_h.grid(row=1, column=0, sticky="ew")
         zone_frame.columnconfigure(0, weight=1)
         zone_frame.rowconfigure(0, weight=1)
-        self.zone_tree.tag_configure("fit", background="#ECFDF3")
+        self.zone_tree.tag_configure("fit", background="#EDF8F0")
         self.zone_tree.tag_configure("constraint", background="#FFF7E8")
         self.zone_tree.tag_configure("excluded", foreground=MUTED)
 
@@ -541,8 +569,8 @@ class GammaWorkspace:
         self.diff_text = tk.Text(
             self.history_tab,
             wrap="none",
-            background="#101828",
-            foreground="#F2F4F7",
+            background="#1C1C1E",
+            foreground="#F5F5F7",
             insertbackground="white",
             relief="flat",
             padx=12,
@@ -562,6 +590,7 @@ class GammaWorkspace:
     def load_csv(self, path: Optional[str] = None) -> None:
         selected = path or filedialog.askopenfilename(
             title="打开 Gamma CSV",
+            initialdir=str(default_sources_directory()),
             filetypes=[("CSV", "*.csv"), ("所有文件", "*.*")],
         )
         if not selected:
@@ -617,6 +646,7 @@ class GammaWorkspace:
     def load_xml(self, path: Optional[str] = None) -> None:
         selected = path or filedialog.askopenfilename(
             title="打开 Qualcomm Gamma XML",
+            initialdir=str(default_sources_directory()),
             filetypes=[("XML", "*.xml"), ("所有文件", "*.*")],
         )
         if not selected:

@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import unittest
-from pathlib import Path
 
 from tunelab.ccm.imatest import infer_cct, parse_imatest_csv
 
-
-ROOT = Path(__file__).resolve().parents[1]
+from .materials import D65_CSV
 
 
 class ImatestParserTests(unittest.TestCase):
     def test_parse_uploaded_summary(self) -> None:
-        dataset = parse_imatest_csv(ROOT / "source" / "D65_normal_summary.csv")
+        dataset = parse_imatest_csv(D65_CSV)
         self.assertEqual(len(dataset.patches), 24)
         self.assertEqual(dataset.image_name, "D65_normal.jpg")
         self.assertEqual(dataset.inferred_cct, 6500)

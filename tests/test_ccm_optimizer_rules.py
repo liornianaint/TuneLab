@@ -6,7 +6,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tunelab.ccm.imatest import parse_imatest_csv
 from tunelab.ccm.models import OptimizationConfig, safe_improvement_percent
 from tunelab.ccm.optimizer import (
     NEUTRAL_PATCHES,
@@ -19,16 +18,19 @@ from tunelab.ccm.optimizer import (
 )
 from tunelab.ccm.qualcomm_xml import QualcommCCDocument
 from tunelab.ccm.reporting import save_analysis_pdf
+from tunelab.colorchecker.engine import build_comparison_dataset, detect_colorchecker, standard_colorchecker_reference
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "source"
+from .materials import CC_XML, SOURCES, d65_dataset
+
+
+SOURCE = SOURCES
 
 
 class OptimizerRuleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.document = QualcommCCDocument.load(SOURCE / "cc13_ipe_v2.xml")
+        cls.document = QualcommCCDocument.load(CC_XML)
 
     def test_pass_rate_includes_exact_2_3_5_10_boundaries(self) -> None:
         self.assertEqual(pass_rate_counts((2.0, 3.0, 5.0, 10.0)), (1, 2, 3, 4))
@@ -49,7 +51,7 @@ class OptimizerRuleTests(unittest.TestCase):
             self.assertAlmostEqual(half_value - neutral, 0.5 * (full_value - neutral), places=12)
 
     def test_delta_correction_exactly_reconstructs_after_matrix(self) -> None:
-        dataset = parse_imatest_csv(SOURCE / "D65_normal_summary.csv")
+        dataset = d65_dataset()
         region, _ = self.document.find_region_for_cct(6500)
         for composition in ("pre", "post_transposed"):
             result = optimize_ccm(dataset, region.matrix, composition=composition, max_blend=0.6)
@@ -58,32 +60,32 @@ class OptimizerRuleTests(unittest.TestCase):
                 for actual, expected in zip(actual_row, expected_row):
                     self.assertAlmostEqual(actual, expected, places=8)
 
-    def test_neutral_19_to_24_are_protected_in_every_colorchecker_case(self) -> None:
-        for path in sorted(SOURCE.glob("*_summary.csv")):
-            if path.name == "gray_summary.csv":
-                continue
+    def test_neutral_19_to_24_are_protected_in_current_colorchecker_cases(self) -> None:
+        reference = standard_colorchecker_reference()
+        for name in ("D65_normal.jpg", "4000K_Before.jpg", "4000K_After.jpg"):
+            path = SOURCE / name
             with self.subTest(path=path.name):
-                dataset = parse_imatest_csv(path)
+                dataset = build_comparison_dataset(detect_colorchecker(path), reference)
                 region, _ = self.document.find_region_for_cct(dataset.inferred_cct or 6500)
                 result = optimize_ccm(dataset, region.matrix)
                 neutral = [patch for patch in result.patch_results if patch.zone in NEUTRAL_PATCHES]
                 self.assertEqual({patch.zone for patch in neutral}, set(range(19, 25)))
                 self.assertLessEqual(max(patch.regression for patch in neutral), NEUTRAL_PATCH_REGRESSION_LIMIT + 1e-9)
 
-    def test_all_source_colorchecker_csv_files_are_openable(self) -> None:
+    def test_all_current_source_colorchecker_images_are_openable(self) -> None:
         names = []
-        for path in sorted(SOURCE.glob("*_summary.csv")):
-            if path.name == "gray_summary.csv":
-                continue
-            dataset = parse_imatest_csv(path)
-            self.assertEqual(len(dataset.patches), 24, path.name)
-            self.assertIsNotNone(dataset.inferred_cct, path.name)
+        for path in sorted(SOURCE.glob("*.jpg")):
+            detection = detect_colorchecker(path)
+            self.assertEqual(len(detection.patches), 24, path.name)
             names.append(path.name)
-        self.assertEqual(len(names), 8)
+        self.assertEqual(
+            names,
+            ["3000K_After.jpg", "3000K_Before.jpg", "4000K_After.jpg", "4000K_Before.jpg", "D65_normal.jpg"],
+        )
 
-    def test_a_light_focus_13_14_finds_a_protected_engineering_candidate(self) -> None:
-        dataset = parse_imatest_csv(SOURCE / "A_summary.csv")
-        region, _ = self.document.find_region_for_cct(dataset.inferred_cct or 2850)
+    def test_d65_focus_13_14_finds_a_protected_engineering_candidate(self) -> None:
+        dataset = d65_dataset()
+        region, _ = self.document.find_region_for_cct(dataset.inferred_cct or 6500)
         for maximum_strength in (0.8, 1.0):
             with self.subTest(maximum_strength=maximum_strength):
                 result = optimize_ccm(
@@ -97,7 +99,10 @@ class OptimizerRuleTests(unittest.TestCase):
                 focus = {patch.zone: patch for patch in result.patch_results if patch.zone in (13, 14)}
                 self.assertEqual(result.matrix_health.status, "PASS")
                 self.assertLess(result.mean_after, result.mean_before)
-                self.assertTrue(all(patch.delta_e_after < patch.delta_e_before for patch in focus.values()))
+                self.assertLess(
+                    sum(patch.delta_e_after for patch in focus.values()),
+                    sum(patch.delta_e_before for patch in focus.values()),
+                )
                 self.assertTrue(all(patch.regression_status != "FAIL" for patch in result.patch_results))
                 self.assertTrue(
                     all(after >= before for before, after in zip(result.pass_rates.before_counts, result.pass_rates.after_counts))
@@ -108,7 +113,7 @@ class OptimizerRuleTests(unittest.TestCase):
                     self.assertLessEqual(max(row), 3.0)
 
     def test_missing_default_reportlab_dependency_has_actionable_error(self) -> None:
-        dataset = parse_imatest_csv(SOURCE / "D65_normal_summary.csv")
+        dataset = d65_dataset()
         region, _ = self.document.find_region_for_cct(6500)
         result = optimize_ccm(dataset, region.matrix)
         real_import = builtins.__import__

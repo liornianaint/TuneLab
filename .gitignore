@@ -5,11 +5,11 @@ __pycache__/
 .venv/
 *.egg-info/
 .tmp/
-# Local analysis renders generated from the source PPTX files.
+# Local analysis renders and camera captures.
 build/
 dist/
 *.spec
 outputs/
 .DS_Store
-source/*
+sources/*
 examples/
