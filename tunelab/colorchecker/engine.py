@@ -1,11 +1,12 @@
 """ColorChecker input adapter, calibrated profiles and full-image preview.
 
-The unified CCM page defaults to protected image fitting: every reference patch
-is matched to measured luminance in linear sRGB before the common optimizer
-sees it.  Hardware-validated 3000K/4000K Delta CCM anchors remain available as
-an advanced candidate direction, with a fitted real-shot response for preview.
-Both paths prevent JPEG exposure and tone-map differences from being mistaken
-for arbitrary white-balance shifts.
+The unified CCM page matches every reference patch to measured luminance in
+linear sRGB before evaluation.  In image mode it automatically prefers the
+hardware-validated 3000K/4000K Delta CCM direction, subject to the same patch
+and matrix protections as generic fitting, and uses the fitted real-shot
+response for preview.  Rejected or out-of-range profiles safely fall back to
+the common optimizer.  Both paths prevent JPEG exposure and tone-map
+differences from being mistaken for arbitrary white-balance shifts.
 """
 
 from __future__ import annotations

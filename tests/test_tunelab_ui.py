@@ -137,6 +137,7 @@ class DesktopUISmokeTests(unittest.TestCase):
                 "打开 Qualcomm CC XML...",
                 "保存 XML...",
                 "导出工程报告...",
+                "导出改后模拟图...",
                 "退出",
             ],
         )
@@ -231,9 +232,13 @@ class DesktopUISmokeTests(unittest.TestCase):
     def test_comparison_tab_contains_plots_and_complete_scrollable_patch_table(self) -> None:
         tabs = [self.app.notebook.tab(tab_id, "text").strip() for tab_id in self.app.notebook.tabs()]
         self.assertEqual(tabs[0], "色差对比")
-        self.assertEqual(tabs[1], "ColorChecker 输入")
+        self.assertNotIn("ColorChecker 输入", tabs)
         self.assertNotIn("色块明细", tabs)
         self.assertEqual(int(str(self.app.patch_table_panel.cget("width"))), 420)
+        self.assertFalse(self.app.advanced_parameters_visible)
+        self.assertFalse(self.app.advanced_parameters.winfo_manager())
+        self.assertEqual(self.app.before_plot.title, "改前：Camera / Ideal")
+        self.assertEqual(self.app.after_plot.title, "改后模拟：Camera / Ideal")
         self.assertEqual(self.root.title(), APP_TITLE)
         self.assertIsNotNone(self.app._app_icon)
         self.assertEqual(self.app.app_icon_source_path.resolve(), (ROOT / "tunelab" / "assets" / "tunelab.png").resolve())
