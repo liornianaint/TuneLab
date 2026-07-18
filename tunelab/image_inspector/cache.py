@@ -26,7 +26,13 @@ def image_data_byte_size(image: ImageData) -> int:
 
     total = 0
     seen: set[int] = set()
-    for value in (image.rgb, image.display_rgb, image.alpha, image.histogram):
+    for value in (
+        image.rgb,
+        image.display_rgb,
+        image.alpha,
+        image.histogram,
+        image.luminance_histogram,
+    ):
         if value is None or id(value) in seen:
             continue
         seen.add(id(value))
@@ -106,6 +112,19 @@ class ImageDataCache:
         entry = self._entries.pop(path, None)
         if entry is not None:
             self._byte_size = max(0, self._byte_size - entry.byte_size)
+
+    def discard(self, path: Union[str, Path]) -> None:
+        """Drop one cached decode while leaving active users untouched."""
+
+        self._remove(self._path(path))
+
+    def retain(self, paths: list[Union[str, Path]]) -> None:
+        """Keep only the named entries, useful when a workspace is hidden."""
+
+        retained = {self._path(path) for path in paths}
+        for path in tuple(self._entries):
+            if path not in retained:
+                self._remove(path)
 
     def clear(self) -> None:
         self._entries.clear()

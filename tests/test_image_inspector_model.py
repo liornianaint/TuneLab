@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import gc
+import weakref
 from pathlib import Path
 
 try:
@@ -10,7 +12,16 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise unittest.SkipTest(f"Image dependencies unavailable: {exc}")
 
-from tunelab.image_inspector.model import ROIError, analyse_roi, compare_statistics, load_image, pixel_metrics
+from tunelab.image_inspector.model import (
+    ROIError,
+    analyse_roi,
+    compare_statistics,
+    histogram_luminance,
+    histogram_rgb,
+    load_image,
+    pixel_metrics,
+    reorient_image,
+)
 from tunelab.image_inspector.types import ImageData, ROI
 
 
@@ -31,6 +42,39 @@ def image_data(values: np.ndarray, *, bit_depth: int = 8) -> ImageData:
 
 
 class ImageInspectorModelTests(unittest.TestCase):
+    def test_chunked_histograms_match_the_reference_formulas(self) -> None:
+        random = np.random.default_rng(20260719)
+        pixels = random.integers(0, 256, size=(900, 700, 3), dtype=np.uint8)
+        expected_rgb = np.stack(
+            [np.bincount(pixels[..., channel].reshape(-1), minlength=256) for channel in range(3)]
+        )
+        np.testing.assert_array_equal(histogram_rgb(pixels), expected_rgb)
+        flat = pixels.reshape(-1, 3).astype(np.float64)
+        levels = np.rint(flat @ np.array((0.2126, 0.7152, 0.0722), dtype=np.float64))
+        expected_luminance = np.bincount(levels.astype(np.uint8), minlength=256)
+        np.testing.assert_array_equal(histogram_luminance(pixels), expected_luminance)
+
+    def test_orientation_changes_are_exact_shared_views_without_retained_models(self) -> None:
+        pixels = np.arange(2 * 3 * 3, dtype=np.uint8).reshape(2, 3, 3)
+        original = ImageData(Path("orientation.png"), 3, 2, 8, "RGB", pixels, pixels)
+        right = reorient_image(original, "rotate_right")
+        self.assertEqual((right.width, right.height), (2, 3))
+        np.testing.assert_array_equal(right.rgb, np.rot90(pixels, 3))
+        self.assertTrue(np.shares_memory(right.rgb, pixels))
+        self.assertIs(right.rgb, right.display_rgb)
+        restored = reorient_image(right, "rotate_left")
+        np.testing.assert_array_equal(restored.rgb, pixels)
+
+        current = original
+        released = []
+        for _index in range(64):
+            successor = reorient_image(current, "flip_horizontal")
+            if current is not original:
+                released.append(weakref.ref(current))
+            current = successor
+        gc.collect()
+        self.assertTrue(all(reference() is None for reference in released))
+
     def test_constant_colour_roi_statistics(self) -> None:
         data = image_data(np.full((8, 9, 3), (20, 40, 80), dtype=np.float32))
         stats = analyse_roi(data, ROI(1, 2, 6, 5, "常量"))

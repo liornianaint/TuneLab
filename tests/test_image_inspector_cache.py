@@ -50,6 +50,21 @@ class ImageDataCacheTests(unittest.TestCase):
             self.assertEqual(cache.item_count, 0)
             self.assertEqual(cache.byte_size, 0)
 
+    def test_discard_and_retain_release_unneeded_decodes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory) / f"{index}.png" for index in range(3)]
+            for path in paths:
+                path.write_bytes(b"image")
+            cache = ImageDataCache(max_items=4, max_bytes=4096)
+            for index, path in enumerate(paths):
+                cache.put(_image(path, index))
+            cache.discard(paths[0])
+            self.assertIsNone(cache.get(paths[0]))
+            cache.retain([paths[2]])
+            self.assertIsNone(cache.get(paths[1]))
+            self.assertIsNotNone(cache.get(paths[2]))
+            self.assertEqual(cache.item_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

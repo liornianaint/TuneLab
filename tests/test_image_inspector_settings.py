@@ -19,6 +19,8 @@ class ImageInspectorSettingsTests(unittest.TestCase):
             search_range=200,
             match_threshold=0.84,
             show_histogram=False,
+            show_luminance_histogram=True,
+            show_exif=False,
             live_pixel=False,
             default_roi_name="灰墙",
             window_geometry="1280x800+20+30",

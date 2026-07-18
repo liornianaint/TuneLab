@@ -37,6 +37,7 @@ from ..ui_foundation import (
     elide_canvas_text,
     fit_window_to_screen,
 )
+from ..updates import update_controller_for
 from .models import (
     GammaOptimizationConfig,
     GammaOptimizationResult,
@@ -237,6 +238,8 @@ class GammaWorkspace:
         self.help_menu.add_command(label="TuneLab 使用说明", command=self._show_workbench_help)
         self.help_menu.add_separator()
         self.help_menu.add_command(label="Gamma 参数说明", command=self.show_help)
+        self.help_menu.add_separator()
+        self.help_menu.add_command(label="检查更新...", command=self._check_for_updates)
         self.help_menu.add_command(label="关于 TuneLab", command=self._show_about)
         menu.add_cascade(label="帮助", menu=self.help_menu)
         self.root.configure(menu=menu)
@@ -249,6 +252,9 @@ class GammaWorkspace:
 
     def _show_workbench_help(self) -> None:
         show_workbench_help(self.root)
+
+    def _check_for_updates(self) -> None:
+        update_controller_for(self.root).check(manual=True)
 
     def _configure_styles(self) -> None:
         style = configure_macos_theme(self.root)
@@ -1300,6 +1306,7 @@ def open_gamma_window(master: tk.Misc) -> GammaWorkspace:
 def main() -> None:
     root = tk.Tk()
     GammaWorkspace(root)
+    update_controller_for(root).schedule_startup_check()
     root.mainloop()
 
 

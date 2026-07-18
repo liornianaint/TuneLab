@@ -6,6 +6,7 @@ import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+from . import __version__
 from .ui_foundation import (
     FONT_BODY,
     FONT_BODY_BOLD,
@@ -20,7 +21,7 @@ from .ui_foundation import (
 
 
 APP_NAME = "TuneLab"
-APP_VERSION = "0.2.0"
+APP_VERSION = __version__
 APP_TAGLINE = "Qualcomm Camera Tuning Workbench"
 AUTHOR_EMAIL = "kaiyi.jiang@thundersoft.com"
 WORKBENCH_HELP_TEXT = (
