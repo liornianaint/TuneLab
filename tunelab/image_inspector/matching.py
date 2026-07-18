@@ -179,14 +179,14 @@ def match_roi(
     before_values = np.asarray(before_rgb)
     after_values = np.asarray(after_rgb)
     if before_values.ndim != 3 or after_values.ndim != 3:
-        raise MatchingError("图像 1 或当前图像的数组维度无效。")
+        raise MatchingError("基准图或目标图的数组维度无效。")
     before_height, before_width = before_values.shape[:2]
     after_height, after_width = after_values.shape[:2]
     roi = before_roi.normalized()
     if roi.width <= 0 or roi.height <= 0:
-        raise MatchingError("图像 1 ROI 为空。")
+        raise MatchingError("基准图 ROI 为空。")
     if roi != roi.clipped(before_width, before_height):
-        raise MatchingError("图像 1 ROI 超出图片边界。")
+        raise MatchingError("基准图 ROI 超出图片边界。")
 
     expected, scale_x, scale_y = _expected_after_roi(
         (before_height, before_width),
@@ -239,7 +239,7 @@ def match_roi(
             expected,
             search_bounds,
             method,
-            "图像 1 ROI 缺少可辨识纹理，无法可靠自动匹配；请手动确认当前图像 ROI。",
+            "基准图 ROI 缺少可辨识纹理，无法可靠自动匹配；请手动确认目标图 ROI。",
         )
 
     if cv2 is not None:
@@ -321,7 +321,7 @@ def confirm_match(result: MatchResult, roi: Optional[ROI] = None) -> MatchResult
 
 
 def manual_match(before_roi: ROI, after_roi: ROI) -> MatchResult:
-    """Create a reliable comparison gate after the user explicitly selects a comparison ROI."""
+    """Create a reliable gate after the user explicitly adjusts a target ROI."""
 
     return MatchResult(
         before_roi=before_roi,

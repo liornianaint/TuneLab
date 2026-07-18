@@ -59,6 +59,8 @@ class ImageData:
     original_dtype: str = "uint8"
     precision_preserved: bool = True
     histogram: Optional[Any] = None
+    luminance_histogram: Optional[Any] = None
+    exif: Tuple[Tuple[str, str], ...] = ()
 
     @property
     def filename(self) -> str:
@@ -110,6 +112,7 @@ class ROIStatistics:
     color_tendency: str
     neutral_assessment: str
     histogram: Any
+    luminance_histogram: Any
 
 
 @dataclass(frozen=True)
@@ -132,6 +135,7 @@ class ComparisonResult:
     after: ROIStatistics
     delta_rgb: Float3
     delta_rgb_percent: OptionalFloat3
+    delta_normalized_rgb: Float3
     delta_r_over_g: Optional[float]
     delta_b_over_g: Optional[float]
     delta_hsv: Float3
