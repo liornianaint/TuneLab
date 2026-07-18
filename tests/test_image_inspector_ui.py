@@ -165,6 +165,31 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         self.assertEqual(self.app.before_view.canvas_to_image(30.0, 40.0), (10.0, 10.0))
         self.assertEqual(self.app.before_view.image_to_canvas(10.0, 10.0), (30.0, 40.0))
 
+    def test_fit_view_hides_scrollbars_between_multiple_images(self) -> None:
+        rgb = np.zeros((50, 100, 3), dtype=np.float32)
+        data = ImageData(
+            path=Path("fit.png"),
+            width=100,
+            height=50,
+            bit_depth=8,
+            source_mode="RGB",
+            rgb=rgb,
+            display_rgb=rgb.astype(np.uint8),
+        )
+        view = self.app.before_view
+        view.image_data = data
+        with mock.patch.object(view.canvas, "winfo_width", return_value=500), mock.patch.object(
+            view.canvas, "winfo_height", return_value=300
+        ):
+            view.zoom = 1.0
+            view._update_scrollbars()
+            self.assertFalse(view.horizontal.winfo_manager())
+            self.assertFalse(view.vertical.winfo_manager())
+            view.zoom = 10.0
+            view._update_scrollbars()
+            self.assertEqual(view.horizontal.winfo_manager(), "grid")
+            self.assertEqual(view.vertical.winfo_manager(), "grid")
+
     def test_reference_roi_matches_three_comparison_images(self) -> None:
         rng = np.random.default_rng(2026)
         base = rng.integers(20, 235, size=(90, 110, 3), dtype=np.uint8)

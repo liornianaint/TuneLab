@@ -282,69 +282,69 @@ class GammaWorkspace:
             foreground=MUTED,
             font=FONT_SMALL_BOLD,
             relief="flat",
-            padding=(8, 7),
+            padding=(7, 6),
         )
 
     def _build_ui(self) -> None:
         self.root.title("TuneLab · Qualcomm Gamma 1.5 LUT 优化")
-        outer = ttk.Frame(self.root, padding=(24, 18), style="GammaRoot.TFrame")
+        outer = ttk.Frame(self.root, padding=(18, 12), style="GammaRoot.TFrame")
         self.outer = outer
         outer.pack(fill="both", expand=True)
         title = ttk.Frame(outer, style="GammaRoot.TFrame")
-        title.pack(fill="x", pady=(0, 16))
+        title.pack(fill="x", pady=(0, 10))
         heading = ttk.Frame(title, style="GammaRoot.TFrame")
         heading.pack(side="left", fill="x", expand=True)
         ttk.Label(heading, text="灰阶工作区", style="GammaEyebrow.TLabel").pack(anchor="w")
-        ttk.Label(heading, text="Gamma 优化", style="GammaTitle.TLabel").pack(anchor="w", pady=(3, 0))
+        ttk.Label(heading, text="Gamma 优化", style="GammaTitle.TLabel").pack(anchor="w", pady=(2, 0))
         ttk.Label(
             heading,
             text="Imatest Stepchart · Qualcomm Gamma LUT，点数与位宽由 XML 自动识别",
             style="GammaMuted.TLabel",
-        ).pack(anchor="w", pady=(4, 0))
+        ).pack(anchor="w", pady=(2, 0))
         if self.on_home is not None:
-            ttk.Button(title, text="返回首页", command=self.on_home, style="Quiet.TButton").pack(side="right", anchor="n", pady=(7, 0))
+            ttk.Button(title, text="返回首页", command=self.on_home, style="Quiet.TButton").pack(side="right", anchor="n", pady=(4, 0))
 
-        toolbar = ttk.Frame(outer, padding=(14, 11), style="GammaCard.TFrame")
+        toolbar = ttk.Frame(outer, padding=(10, 8), style="GammaCard.TFrame")
         self.toolbar_panel = toolbar
         toolbar.pack(fill="x", pady=(0, 8))
         toolbar.columnconfigure(5, weight=1)
-        ttk.Button(toolbar, text="1  打开 Gamma CSV", command=self.load_csv).grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        ttk.Button(toolbar, text="2  打开 Gamma XML", command=self.load_xml).grid(row=0, column=1, sticky="ew", padx=(0, 8))
-        ttk.Label(toolbar, text="CCT", style="GammaCard.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 5))
+        ttk.Button(toolbar, text="1  打开 Gamma CSV", command=self.load_csv).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(toolbar, text="2  打开 Gamma XML", command=self.load_xml).grid(row=0, column=1, sticky="ew", padx=(0, 6))
+        ttk.Label(toolbar, text="CCT", style="GammaCard.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 4))
         self.cct_var = tk.StringVar(value="6500")
-        ttk.Entry(toolbar, textvariable=self.cct_var, width=8).grid(row=0, column=3, sticky="w", padx=(0, 8))
+        ttk.Entry(toolbar, textvariable=self.cct_var, width=8).grid(row=0, column=3, sticky="w", padx=(0, 6))
         self.region_match_button = ttk.Button(
             toolbar,
             text="自动匹配 Region",
             command=self.auto_match_region,
             style="RegionMatch.TButton",
         )
-        self.region_match_button.grid(row=0, column=4, sticky="ew", padx=(0, 8))
+        self.region_match_button.grid(row=0, column=4, sticky="ew", padx=(0, 6))
         self.region_var = tk.StringVar()
         self.region_combo = ttk.Combobox(toolbar, textvariable=self.region_var, state="readonly", width=10)
-        self.region_combo.grid(row=0, column=5, sticky="ew", padx=(0, 8))
+        self.region_combo.grid(row=0, column=5, sticky="ew", padx=(0, 6))
         self.region_combo.bind("<<ComboboxSelected>>", self._on_region_selected)
         self.optimize_button = ttk.Button(toolbar, text="3  自动优化", command=self.run_optimization, style="Primary.TButton")
-        self.optimize_button.grid(row=0, column=6, sticky="ew", padx=(0, 8))
+        self.optimize_button.grid(row=0, column=6, sticky="ew", padx=(0, 6))
         self.save_button = ttk.Button(toolbar, text="保存 XML", command=self.save_xml, state="disabled")
         self.save_button.grid(row=0, column=7, sticky="ew")
 
-        settings = ttk.Frame(outer, padding=(14, 10), style="GammaCard.TFrame")
+        settings = ttk.Frame(outer, padding=(10, 8), style="GammaCard.TFrame")
         self.settings_panel = settings
         settings.pack(fill="x", pady=(0, 8))
         config = self.settings
         ttk.Label(settings, text="Gamma", style="GammaCard.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 5))
         self.target_gamma_var = tk.StringVar(value=f"{config.target_gamma:g}")
-        ttk.Entry(settings, textvariable=self.target_gamma_var, width=8).grid(row=0, column=1, sticky="w", padx=(0, 14))
+        ttk.Entry(settings, textvariable=self.target_gamma_var, width=8).grid(row=0, column=1, sticky="w", padx=(0, 10))
         ttk.Label(settings, text="目标阶数", style="GammaCard.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 5))
         self.target_steps_var = tk.StringVar(value="自动" if config.target_step_count is None else str(config.target_step_count))
-        ttk.Entry(settings, textvariable=self.target_steps_var, width=8).grid(row=0, column=3, sticky="w", padx=(0, 14))
+        ttk.Entry(settings, textvariable=self.target_steps_var, width=8).grid(row=0, column=3, sticky="w", padx=(0, 10))
         ttk.Label(settings, text="调整强度", style="GammaCard.TLabel").grid(row=0, column=4, sticky="w", padx=(0, 5))
         self.strength_var = tk.DoubleVar(value=config.maximum_adjustment * 100.0)
-        ttk.Scale(settings, from_=0, to=100, variable=self.strength_var, orient="horizontal", length=105).grid(row=0, column=5, sticky="w", padx=(0, 14))
+        ttk.Scale(settings, from_=0, to=100, variable=self.strength_var, orient="horizontal", length=105).grid(row=0, column=5, sticky="w", padx=(0, 10))
         ttk.Label(settings, text="高光保护", style="GammaCard.TLabel").grid(row=0, column=6, sticky="w", padx=(0, 5))
         self.highlight_var = tk.DoubleVar(value=config.highlight_protection * 100.0)
-        ttk.Scale(settings, from_=0, to=100, variable=self.highlight_var, orient="horizontal", length=90).grid(row=0, column=7, sticky="w", padx=(0, 14))
+        ttk.Scale(settings, from_=0, to=100, variable=self.highlight_var, orient="horizontal", length=90).grid(row=0, column=7, sticky="w", padx=(0, 10))
         ttk.Label(settings, text="暗部保护", style="GammaCard.TLabel").grid(row=0, column=8, sticky="w", padx=(0, 5))
         self.shadow_var = tk.DoubleVar(value=config.shadow_protection * 100.0)
         ttk.Scale(settings, from_=0, to=100, variable=self.shadow_var, orient="horizontal", length=90).grid(row=0, column=9, sticky="w")
@@ -353,17 +353,17 @@ class GammaWorkspace:
         rgb_label = next((label for label, value in self.RGB_LABELS.items() if value == config.rgb_mode), next(iter(self.RGB_LABELS)))
         ttk.Label(secondary, text="RGB", style="GammaCard.TLabel").pack(side="left", padx=(0, 5))
         self.rgb_mode_var = tk.StringVar(value=rgb_label)
-        ttk.Combobox(secondary, textvariable=self.rgb_mode_var, values=list(self.RGB_LABELS), state="readonly", width=17).pack(side="left", padx=(0, 14))
+        ttk.Combobox(secondary, textvariable=self.rgb_mode_var, values=list(self.RGB_LABELS), state="readonly", width=17).pack(side="left", padx=(0, 10))
         range_label = next((label for label, value in self.RANGE_LABELS.items() if value == config.range_mode), next(iter(self.RANGE_LABELS)))
         ttk.Label(secondary, text="灰阶范围", style="GammaCard.TLabel").pack(side="left", padx=(0, 5))
         self.range_mode_var = tk.StringVar(value=range_label)
         range_combo = ttk.Combobox(secondary, textvariable=self.range_mode_var, values=list(self.RANGE_LABELS), state="readonly", width=21)
-        range_combo.pack(side="left", padx=(0, 14))
+        range_combo.pack(side="left", padx=(0, 10))
         range_combo.bind("<<ComboboxSelected>>", lambda _event: self._range_changed())
         ttk.Label(secondary, text="阈值 / Pixel", style="GammaCard.TLabel").pack(side="left", padx=(0, 5))
         self.threshold_var = tk.StringVar(value=f"{config.threshold:g}")
         threshold_entry = ttk.Entry(secondary, textvariable=self.threshold_var, width=9)
-        threshold_entry.pack(side="left", padx=(0, 14))
+        threshold_entry.pack(side="left", padx=(0, 10))
         threshold_entry.bind("<Return>", lambda _event: self.reanalyze())
         threshold_entry.bind("<FocusOut>", lambda _event: self.reanalyze(quiet=True))
         ttk.Label(secondary, text="手动 Zone", style="GammaCard.TLabel").pack(side="left", padx=(0, 5))
@@ -388,17 +388,17 @@ class GammaWorkspace:
             textvariable=self.status_var,
             foreground=BLUE,
             background=INFO_BG,
-            padding=(12, 8),
+            padding=(10, 6),
         )
         self.status_label.pack(fill="x", pady=(0, 8))
         bind_responsive_wrap(self.status_label)
 
         self.notebook = ttk.Notebook(outer)
         self.notebook.pack(fill="both", expand=True)
-        self.curve_tab = ttk.Frame(self.notebook, padding=10, style="GammaRoot.TFrame")
-        self.engineering_tab = ttk.Frame(self.notebook, padding=10, style="GammaRoot.TFrame")
-        self.diagnosis_tab = ttk.Frame(self.notebook, padding=10, style="GammaRoot.TFrame")
-        self.history_tab = ttk.Frame(self.notebook, padding=10, style="GammaRoot.TFrame")
+        self.curve_tab = ttk.Frame(self.notebook, padding=8, style="GammaRoot.TFrame")
+        self.engineering_tab = ttk.Frame(self.notebook, padding=8, style="GammaRoot.TFrame")
+        self.diagnosis_tab = ttk.Frame(self.notebook, padding=8, style="GammaRoot.TFrame")
+        self.history_tab = ttk.Frame(self.notebook, padding=8, style="GammaRoot.TFrame")
         self.notebook.add(self.curve_tab, text="曲线对比")
         self.notebook.add(self.engineering_tab, text="工程统计")
         self.notebook.add(self.diagnosis_tab, text="诊断与解释")
@@ -414,7 +414,7 @@ class GammaWorkspace:
         captions = ("原始 Zone", "连续阶数", "目标阶数", "Global Gamma", "RMSE", "RGB 偏差", "LUT 格式", "曲线健康")
         self.kpi_vars: list[tk.StringVar] = []
         for column, caption in enumerate(captions):
-            card = ttk.Frame(kpis, padding=(8, 5), style="GammaCard.TFrame")
+            card = ttk.Frame(kpis, padding=(6, 4), style="GammaCard.TFrame")
             card.grid(row=0, column=column, sticky="nsew", padx=(0, 5 if column < 7 else 0))
             value = tk.StringVar(value="—")
             self.kpi_vars.append(value)
@@ -443,8 +443,8 @@ class GammaWorkspace:
         details = ttk.Panedwindow(self.curve_tab, orient="horizontal")
         self.details_panel = details
         details.grid(row=2, column=0, sticky="nsew")
-        pair_panel = ttk.Frame(details, padding=7, style="GammaCard.TFrame", width=410)
-        zone_panel = ttk.Frame(details, padding=7, style="GammaCard.TFrame")
+        pair_panel = ttk.Frame(details, padding=6, style="GammaCard.TFrame", width=410)
+        zone_panel = ttk.Frame(details, padding=6, style="GammaCard.TFrame")
         details.add(pair_panel, weight=1)
         details.add(zone_panel, weight=2)
         ttk.Label(pair_panel, text="相邻灰阶可区分性", style="GammaCard.TLabel").pack(anchor="w", pady=(0, 5))

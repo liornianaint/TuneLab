@@ -106,7 +106,7 @@ class ImageCanvas(ttk.Frame):
         roi_callback: Callable[[str, ROI], None],
         live_enabled: Callable[[], bool],
     ) -> None:
-        super().__init__(master, style="InspectorCard.TFrame")
+        super().__init__(master, style="InspectorImage.TFrame")
         self.role = role
         self.pixel_callback = pixel_callback
         self.roi_callback = roi_callback
@@ -129,7 +129,7 @@ class ImageCanvas(ttk.Frame):
         self._selection_canvas_start: Optional[Tuple[float, float]] = None
         self._pan_start: Optional[Tuple[float, float, float, float]] = None
 
-        header = ttk.Frame(self, padding=(11, 8), style="InspectorSurface.TFrame")
+        header = ttk.Frame(self, padding=(9, 6), style="InspectorSurface.TFrame")
         header.grid(row=0, column=0, columnspan=2, sticky="ew")
         header.columnconfigure(0, weight=1)
         self.title_var = tk.StringVar(value=_role_label(role))
@@ -138,15 +138,27 @@ class ImageCanvas(ttk.Frame):
         ttk.Label(header, textvariable=self.title_var, style="InspectorCardTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(header, textvariable=self.zoom_var, style="InspectorCardTitle.TLabel").grid(row=0, column=1, sticky="e")
         ttk.Label(header, textvariable=self.meta_var, style="InspectorMutedCard.TLabel").grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(2, 0)
+            row=1, column=0, columnspan=2, sticky="w", pady=(1, 0)
         )
 
         self.canvas = tk.Canvas(self, background=CANVAS_BG, highlightthickness=0, cursor="crosshair")
         self.canvas.grid(row=1, column=0, sticky="nsew")
-        self.horizontal = ttk.Scrollbar(self, orient="horizontal", command=self._xview)
+        self.horizontal = ttk.Scrollbar(
+            self,
+            orient="horizontal",
+            command=self._xview,
+            style="Inspector.Horizontal.TScrollbar",
+        )
         self.horizontal.grid(row=2, column=0, sticky="ew")
-        self.vertical = ttk.Scrollbar(self, orient="vertical", command=self._yview)
+        self.vertical = ttk.Scrollbar(
+            self,
+            orient="vertical",
+            command=self._yview,
+            style="Inspector.Vertical.TScrollbar",
+        )
         self.vertical.grid(row=1, column=1, sticky="ns")
+        self.horizontal.grid_remove()
+        self.vertical.grid_remove()
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
 
@@ -371,6 +383,8 @@ class ImageCanvas(ttk.Frame):
         if self.image_data is None:
             self.horizontal.set(0.0, 1.0)
             self.vertical.set(0.0, 1.0)
+            self.horizontal.grid_remove()
+            self.vertical.grid_remove()
             return
         canvas_width = max(1.0, float(self.canvas.winfo_width()))
         canvas_height = max(1.0, float(self.canvas.winfo_height()))
@@ -378,14 +392,18 @@ class ImageCanvas(ttk.Frame):
         scaled_height = self.image_data.height * self.zoom
         if scaled_width <= canvas_width:
             self.horizontal.set(0.0, 1.0)
+            self.horizontal.grid_remove()
         else:
             start = max(0.0, min(1.0, -self.pan_x / scaled_width))
             self.horizontal.set(start, min(1.0, start + canvas_width / scaled_width))
+            self.horizontal.grid()
         if scaled_height <= canvas_height:
             self.vertical.set(0.0, 1.0)
+            self.vertical.grid_remove()
         else:
             start = max(0.0, min(1.0, -self.pan_y / scaled_height))
             self.vertical.set(start, min(1.0, start + canvas_height / scaled_height))
+            self.vertical.grid()
 
     def _scroll(self, axis: str, *args: str) -> None:
         if self.image_data is None:
@@ -637,7 +655,6 @@ class ImageInspectorWorkspace:
         self.root.title(WINDOW_TITLE)
         if self.on_close is None:
             self.window_placement = fit_window_to_screen(self.root, desired_width=1540, desired_height=980)
-            self._apply_saved_window_size()
             try:
                 self.root.protocol("WM_DELETE_WINDOW", self.close)
             except tk.TclError:
@@ -661,20 +678,37 @@ class ImageInspectorWorkspace:
             darkcolor=SUBTLE_SEPARATOR,
         )
         style.configure("InspectorSurface.TFrame", background=PANEL)
+        style.configure("InspectorImage.TFrame", background=CANVAS_BG, borderwidth=0, relief="flat")
         style.configure("InspectorCard.TLabel", background=PANEL, foreground=INK, font=FONT_BODY)
         style.configure("InspectorMutedCard.TLabel", background=PANEL, foreground=MUTED, font=FONT_SMALL)
         style.configure("InspectorCardTitle.TLabel", background=PANEL, foreground=INK, font=FONT_CARD_TITLE)
         style.configure("InspectorTitle.TLabel", background=BG, foreground=INK, font=FONT_TITLE)
         style.configure("InspectorSubtitle.TLabel", background=BG, foreground=MUTED, font=FONT_BODY)
         style.configure("InspectorEyebrow.TLabel", background=BG, foreground=TERTIARY, font=FONT_NAV_SECTION)
-        style.configure("InspectorStatus.TLabel", background=INFO_BG, foreground=MUTED, padding=(12, 8), font=FONT_SMALL)
+        style.configure("InspectorStatus.TLabel", background=INFO_BG, foreground=MUTED, padding=(10, 6), font=FONT_SMALL)
         style.configure("InspectorMatchHigh.TLabel", background=PANEL, foreground=GREEN, font=FONT_BODY_BOLD)
         style.configure("InspectorMatchMedium.TLabel", background=PANEL, foreground=AMBER, font=FONT_BODY_BOLD)
         style.configure("InspectorMatchLow.TLabel", background=PANEL, foreground=RED, font=FONT_BODY_BOLD)
         style.configure("ImageBrowser.Treeview", rowheight=88, font=FONT_SMALL)
         style.configure("ImageBrowser.Treeview.Heading", font=FONT_SMALL)
-        style.configure("InspectorComparison.Treeview", rowheight=30, font=FONT_BODY)
+        style.configure("InspectorComparison.Treeview", rowheight=28, font=FONT_BODY)
         style.configure("InspectorComparison.Treeview.Heading", font=FONT_BODY_BOLD)
+        style.configure(
+            "Inspector.Vertical.TScrollbar",
+            width=8,
+            arrowsize=8,
+            background="#545458",
+            troughcolor=CANVAS_BG,
+            borderwidth=0,
+        )
+        style.configure(
+            "Inspector.Horizontal.TScrollbar",
+            width=8,
+            arrowsize=8,
+            background="#545458",
+            troughcolor=CANVAS_BG,
+            borderwidth=0,
+        )
 
     def _build_menu(self) -> None:
         menu = tk.Menu(self.root)
@@ -739,32 +773,32 @@ class ImageInspectorWorkspace:
         self.root.configure(menu=menu)
 
     def _build_ui(self) -> None:
-        self.outer = ttk.Frame(self.root, padding=(24, 18), style="InspectorRoot.TFrame")
+        self.outer = ttk.Frame(self.root, padding=(18, 12), style="InspectorRoot.TFrame")
         self.outer.pack(fill="both", expand=True)
         header = ttk.Frame(self.outer, style="InspectorRoot.TFrame")
-        header.pack(fill="x", pady=(0, 16))
+        header.pack(fill="x", pady=(0, 10))
         heading = ttk.Frame(header, style="InspectorRoot.TFrame")
         heading.pack(side="left", fill="x", expand=True)
         ttk.Label(heading, text="图像工作区", style="InspectorEyebrow.TLabel").pack(anchor="w")
-        ttk.Label(heading, text="图像分析器", style="InspectorTitle.TLabel").pack(anchor="w", pady=(3, 0))
+        ttk.Label(heading, text="图像分析器", style="InspectorTitle.TLabel").pack(anchor="w", pady=(2, 0))
         ttk.Label(
             heading,
             text="文件夹预览 · 1–4 图并排检查 · 像素、ROI、直方图与匹配置信度",
             style="InspectorSubtitle.TLabel",
-        ).pack(anchor="w", pady=(4, 0))
+        ).pack(anchor="w", pady=(2, 0))
         if self.on_home is not None:
-            ttk.Button(header, text="返回首页", command=self.on_home, style="Quiet.TButton").pack(side="right", anchor="n", pady=(7, 0))
+            ttk.Button(header, text="返回首页", command=self.on_home, style="Quiet.TButton").pack(side="right", anchor="n", pady=(4, 0))
 
-        toolbar = ttk.Frame(self.outer, padding=(14, 11), style="InspectorCard.TFrame")
+        toolbar = ttk.Frame(self.outer, padding=(10, 8), style="InspectorCard.TFrame")
         self.toolbar_panel = toolbar
         toolbar.pack(fill="x", pady=(0, 8))
-        ttk.Button(toolbar, text="打开文件夹", command=self.open_folder, style="Primary.TButton").grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(toolbar, text="显示所选（1–4 张）", command=self.load_selected_images).grid(row=0, column=1, padx=(0, 10))
+        ttk.Button(toolbar, text="打开文件夹", command=self.open_folder, style="Primary.TButton").grid(row=0, column=0, padx=(0, 5))
+        ttk.Button(toolbar, text="显示所选（1–4 张）", command=self.load_selected_images).grid(row=0, column=1, padx=(0, 8))
         ttk.Button(toolbar, text="−", command=self.zoom_out, width=3, style="Quiet.TButton").grid(row=0, column=2, padx=(0, 3))
         ttk.Button(toolbar, text="+", command=self.zoom_in, width=3, style="Quiet.TButton").grid(row=0, column=3, padx=(0, 4))
         ttk.Button(toolbar, text="1:1", command=self.one_to_one, style="Quiet.TButton").grid(row=0, column=4, padx=(0, 4))
         ttk.Button(toolbar, text="适应窗口", command=self.fit_images, style="Quiet.TButton").grid(row=0, column=5, padx=(0, 4))
-        ttk.Button(toolbar, text="清除 ROI", command=self.clear_roi, style="Quiet.TButton").grid(row=0, column=6, padx=(0, 10))
+        ttk.Button(toolbar, text="清除 ROI", command=self.clear_roi, style="Quiet.TButton").grid(row=0, column=6, padx=(0, 8))
         ttk.Label(toolbar, text="搜索", style="InspectorCard.TLabel").grid(row=0, column=7, padx=(0, 4))
         self.search_range_var = tk.StringVar(value=f"±{self.settings.search_range}")
         self.search_combo = ttk.Combobox(
@@ -782,7 +816,7 @@ class ImageInspectorWorkspace:
             text="将当前 ROI 视为中性区域",
             variable=self.neutral_mode_var,
             command=self._on_neutral_mode_changed,
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(5, 0), padx=(0, 10))
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0), padx=(0, 8))
         self.live_pixel_var = tk.BooleanVar(value=self.settings.live_pixel)
         self.show_histogram_var = tk.BooleanVar(value=self.settings.show_histogram)
         self.include_full_path_var = tk.BooleanVar(value=self.settings.include_full_path)
@@ -796,15 +830,15 @@ class ImageInspectorWorkspace:
             style="InspectorMatchLow.TLabel",
             wraplength=760,
         )
-        self.match_status_label.grid(row=1, column=4, columnspan=5, sticky="w", pady=(5, 0), padx=(6, 6))
+        self.match_status_label.grid(row=1, column=4, columnspan=5, sticky="w", pady=(4, 0), padx=(5, 5))
         toolbar.columnconfigure(9, weight=1)
         self.progress = ttk.Progressbar(toolbar, mode="indeterminate", length=80)
-        self.progress.grid(row=1, column=9, sticky="e", pady=(5, 0))
+        self.progress.grid(row=1, column=9, sticky="e", pady=(4, 0))
 
         self.main_pane = ttk.Panedwindow(self.outer, orient="vertical")
         self.main_pane.pack(fill="both", expand=True)
         self.viewer_pane = ttk.Panedwindow(self.main_pane, orient="horizontal")
-        self.folder_panel = ttk.Frame(self.viewer_pane, padding=(8, 7), style="InspectorCard.TFrame")
+        self.folder_panel = ttk.Frame(self.viewer_pane, padding=(7, 6), style="InspectorCard.TFrame")
         ttk.Label(self.folder_panel, text="图片文件夹", style="InspectorCardTitle.TLabel").pack(anchor="w")
         self.folder_path_var = tk.StringVar(value="尚未打开文件夹")
         ttk.Label(
@@ -866,10 +900,10 @@ class ImageInspectorWorkspace:
         self.main_pane.add(self.viewer_pane, weight=3)
 
         self.notebook = ttk.Notebook(self.main_pane)
-        self.pixel_tab = ttk.Frame(self.notebook, padding=7, style="InspectorRoot.TFrame")
-        self.compare_tab = ttk.Frame(self.notebook, padding=7, style="InspectorRoot.TFrame")
-        self.histogram_tab = ttk.Frame(self.notebook, padding=7, style="InspectorRoot.TFrame")
-        self.conclusion_tab = ttk.Frame(self.notebook, padding=7, style="InspectorRoot.TFrame")
+        self.pixel_tab = ttk.Frame(self.notebook, padding=6, style="InspectorRoot.TFrame")
+        self.compare_tab = ttk.Frame(self.notebook, padding=6, style="InspectorRoot.TFrame")
+        self.histogram_tab = ttk.Frame(self.notebook, padding=6, style="InspectorRoot.TFrame")
+        self.conclusion_tab = ttk.Frame(self.notebook, padding=6, style="InspectorRoot.TFrame")
         self.notebook.add(self.pixel_tab, text="像素 / ROI 数据")
         self.notebook.add(self.compare_tab, text="多图对比")
         self.notebook.add(self.histogram_tab, text="RGB 直方图")
@@ -1058,17 +1092,24 @@ class ImageInspectorWorkspace:
             self.image_grid.columnconfigure(index, weight=1, uniform="image-columns")
             self.image_grid.rowconfigure(index, weight=1, uniform="image-rows")
         if count == 1:
-            self.views["before"].grid(row=0, column=0, columnspan=2, rowspan=2, sticky="nsew", padx=2, pady=2)
+            self.views["before"].grid(row=0, column=0, columnspan=2, rowspan=2, sticky="nsew")
         elif count == 2:
-            self.views["before"].grid(row=0, column=0, rowspan=2, sticky="nsew", padx=2, pady=2)
-            self.views["after"].grid(row=0, column=1, rowspan=2, sticky="nsew", padx=2, pady=2)
+            self.views["before"].grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 1))
+            self.views["after"].grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(1, 0))
         elif count == 3:
-            self.views["before"].grid(row=0, column=0, rowspan=2, sticky="nsew", padx=2, pady=2)
-            self.views["after"].grid(row=0, column=1, sticky="nsew", padx=2, pady=2)
-            self.views["compare3"].grid(row=1, column=1, sticky="nsew", padx=2, pady=2)
+            self.views["before"].grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 1))
+            self.views["after"].grid(row=0, column=1, sticky="nsew", padx=(1, 0), pady=(0, 1))
+            self.views["compare3"].grid(row=1, column=1, sticky="nsew", padx=(1, 0), pady=(1, 0))
         else:
             for index, role in enumerate(self.active_roles):
-                self.views[role].grid(row=index // 2, column=index % 2, sticky="nsew", padx=2, pady=2)
+                row, column = index // 2, index % 2
+                self.views[role].grid(
+                    row=row,
+                    column=column,
+                    sticky="nsew",
+                    padx=((0, 1) if column == 0 else (1, 0)),
+                    pady=((0, 1) if row == 0 else (1, 0)),
+                )
         for role in self.active_roles:
             self.views[role].set_title(_role_label(role))
         histogram_labels = tuple(_role_label(role) for role in self.active_roles)

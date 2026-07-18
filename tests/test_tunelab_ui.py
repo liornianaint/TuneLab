@@ -14,6 +14,7 @@ from tunelab.app import (
     FONT_BODY,
     FONT_KPI,
     FONT_MONO,
+    FONT_SMALL,
     FONT_SMALL_BOLD,
     FONT_TITLE,
     LAB_PLACEHOLDER_BOUNDS,
@@ -93,16 +94,16 @@ class WindowPlacementTests(unittest.TestCase):
         self.assertEqual(compact.x * 2 + compact.width, 1024)
         self.assertEqual(compact.y * 2 + compact.height, 640)
 
-    def test_fit_uses_a_centered_native_document_window(self) -> None:
+    def test_fit_uses_the_full_available_screen(self) -> None:
         window = mock.Mock()
         window.winfo_screenwidth.return_value = 1512
         window.winfo_screenheight.return_value = 982
         window.winfo_vrootx.return_value = 0
         window.winfo_vrooty.return_value = 0
         placement = fit_window_to_screen(window)
-        self.assertEqual(placement.geometry, "1464x902+24+40")
-        window.geometry.assert_called_once_with("1464x902+24+40")
-        window.state.assert_not_called()
+        self.assertEqual(placement.geometry, "1512x982+0+0")
+        window.geometry.assert_called_once_with("1512x982+0+0")
+        window.state.assert_called_once_with("zoomed")
 
 
 class DesktopUISmokeTests(unittest.TestCase):
@@ -136,7 +137,6 @@ class DesktopUISmokeTests(unittest.TestCase):
                 "打开 Qualcomm CC XML...",
                 "保存 XML...",
                 "导出工程报告...",
-                "导出仿真图...",
                 "退出",
             ],
         )
@@ -191,15 +191,19 @@ class DesktopUISmokeTests(unittest.TestCase):
 
     def test_home_header_has_help_without_unused_settings(self) -> None:
         button_labels: list[str] = []
+        button_styles: list[str] = []
 
         def visit(widget: tk.Misc) -> None:
             for child in widget.winfo_children():
                 if child.winfo_class() == "TButton":
                     button_labels.append(str(child.cget("text")))
+                    button_styles.append(str(child.cget("style")))
                 visit(child)
 
         visit(self.app.home_view)
         self.assertIn("帮助", button_labels)
+        self.assertNotIn("开始色彩校正", button_labels)
+        self.assertNotIn("Primary.TButton", button_styles)
         self.assertNotIn("设置", button_labels)
         self.assertFalse(hasattr(self.app, "home_settings_button"))
         with mock.patch("tunelab.app.show_workbench_help") as help_dialog:
@@ -227,9 +231,9 @@ class DesktopUISmokeTests(unittest.TestCase):
     def test_comparison_tab_contains_plots_and_complete_scrollable_patch_table(self) -> None:
         tabs = [self.app.notebook.tab(tab_id, "text").strip() for tab_id in self.app.notebook.tabs()]
         self.assertEqual(tabs[0], "色差对比")
-        self.assertEqual(tabs[1], "图像对比")
+        self.assertEqual(tabs[1], "ColorChecker 输入")
         self.assertNotIn("色块明细", tabs)
-        self.assertEqual(int(str(self.app.patch_table_panel.cget("width"))), 460)
+        self.assertEqual(int(str(self.app.patch_table_panel.cget("width"))), 420)
         self.assertEqual(self.root.title(), APP_TITLE)
         self.assertIsNotNone(self.app._app_icon)
         self.assertEqual(self.app.app_icon_source_path.resolve(), (ROOT / "tunelab" / "assets" / "tunelab.png").resolve())
@@ -287,6 +291,9 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertEqual(style.lookup("TCombobox", "font"), FONT_BODY)
         self.assertEqual(style.lookup("TNotebook.Tab", "font"), FONT_BODY)
         self.assertEqual(style.lookup("ActiveNav.TButton", "font"), FONT_BODY_BOLD)
+        self.assertEqual(tkfont.Font(root=self.root, name=FONT_BODY, exists=True).actual("size"), 11)
+        self.assertEqual(tkfont.Font(root=self.root, name=FONT_SMALL, exists=True).actual("size"), 9)
+        self.assertEqual(tkfont.Font(root=self.root, name=FONT_TITLE, exists=True).actual("size"), 20)
         body_family = tkfont.Font(root=self.root, name=FONT_BODY, exists=True).actual("family")
         for font_name in ("TkDefaultFont", "TkHeadingFont", "TkMenuFont"):
             with self.subTest(font_name=font_name):
@@ -453,6 +460,8 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertNotIn("最近优化", visible_text)
         self.assertNotIn("快捷操作", visible_text)
         self.assertNotIn("Qualcomm CC13", visible_text)
+        self.assertNotIn("把调校工作，收进一个窗口。", visible_text)
+        self.assertIn("TuneLab 相机调校工程工作台", visible_text)
         self.app.show_cc_workspace()
         self.root.update_idletasks()
         self.assertFalse(self.app.home_view.winfo_manager())
