@@ -12,14 +12,12 @@ from typing import Callable, Iterable, Optional
 from PIL import Image, ImageTk
 
 from .branding import application_icon_path, show_about_dialog, show_workbench_help
-from .ccm.color_science import delta_e_2000, lab_to_srgb, srgb_to_lab
+from .ccm.color_science import lab_to_srgb
 from .ccm.history import load_history, record_from_result, save_history
 from .ccm.imatest import ImatestCSVError, infer_cct, parse_imatest_csv
 from .ccm.models import CCRegion, ImatestDataset, Matrix3, OptimizationConfig, OptimizationResult, PatchResult
 from .ccm.optimizer import (
     OptimizationError,
-    evaluate_ccm_correction,
-    evaluate_protected_ccm_correction,
     optimize_ccm,
 )
 from .ccm.qualcomm_xml import QualcommCCDocument, QualcommXMLError
@@ -28,15 +26,8 @@ from .ccm.settings import CcmSettings, application_data_dir, load_settings, save
 from .colorchecker.engine import (
     ColorCheckerDetection,
     ColorCheckerError,
-    RestorationPlan,
-    SimulationResult,
-    build_calibrated_restoration_plan,
     build_comparison_dataset,
     detect_colorchecker,
-    restoration_evaluation_config,
-    sample_patch_means,
-    simulate_correction,
-    simulate_restoration_response,
     standard_colorchecker_reference,
 )
 from .colorchecker.ui import PreviewPane
@@ -518,12 +509,19 @@ class LabPlot(ttk.Frame):
         canvas.create_text(max(14.0, left - 42.0), top + side / 2.0, text="b*", fill=INK)
         legend_y = top + 14
         canvas.create_rectangle(left + 9, legend_y - 4, left + 18, legend_y + 5, fill="#FFFFFF", outline=INK)
-        canvas.create_text(left + 25, legend_y, text="Ideal", fill=INK, anchor="w", font=FONT_SMALL)
-        canvas.create_oval(left + 75, legend_y - 5, left + 87, legend_y + 7, fill="#FFFFFF", outline=INK)
-        canvas.create_text(left + 94, legend_y + 1, text="Camera", fill=INK, anchor="w", font=FONT_SMALL)
+        canvas.create_text(left + 25, legend_y, text="Target", fill=INK, anchor="w", font=FONT_SMALL)
+        canvas.create_oval(left + 82, legend_y - 5, left + 94, legend_y + 7, fill="#FFFFFF", outline=INK)
+        canvas.create_text(
+            left + 101,
+            legend_y + 1,
+            text="Measured" if self.mode == "before" else "Optimized",
+            fill=INK,
+            anchor="w",
+            font=FONT_SMALL,
+        )
 
         occupied_labels: list[tuple[float, float, float, float]] = [
-            (left + 4, top + 3, left + 145, top + 27)
+            (left + 4, top + 3, left + 188, top + 27)
         ]
 
         def lab_is_visible(lab: tuple[float, float, float]) -> bool:
@@ -735,29 +733,11 @@ def _format_tick(value: float, step: float) -> str:
     return f"{value:.{decimals}f}"
 
 
-def _rgb8_delta_e(first: Iterable[float], second: Iterable[float]) -> float:
-    """CIEDE2000 between two rendered 8-bit RGB samples."""
-
-    first_srgb = tuple(float(value) / 255.0 for value in first)
-    second_srgb = tuple(float(value) / 255.0 for value in second)
-    return delta_e_2000(
-        srgb_to_lab(first_srgb),  # type: ignore[arg-type]
-        srgb_to_lab(second_srgb),  # type: ignore[arg-type]
-    )
-
-
 class TuneLabApp:
-    COMPOSITION_LABELS = {
-        "前乘 A × M（推荐：CC13 行主序）": "pre",
-        "后乘 M × Aᵀ（旧 Excel/C7）": "post_transposed",
-    }
+    COMPOSITION = "pre"
     INPUT_MODE_LABELS = {
         "CC CSV（Imatest）": "csv",
         "ColorChecker 图片": "image",
-    }
-    IMAGE_SOLVER_LABELS = {
-        "统一 ΔE/ΔC/Δh 优化（推荐）": "optimized",
-        "3000K/4000K 实拍 Profile（安全门禁）": "calibrated",
     }
 
     def __init__(self, root: tk.Tk) -> None:
@@ -769,8 +749,6 @@ class TuneLabApp:
         self.test_detection: Optional[ColorCheckerDetection] = None
         self.reference_detection: Optional[ColorCheckerDetection] = None
         self.reference_is_standard = False
-        self.simulation: Optional[SimulationResult] = None
-        self.restoration_plan: Optional[RestorationPlan] = None
         self.document: Optional[QualcommCCDocument] = None
         self.selected_region: Optional[CCRegion] = None
         self.result: Optional[OptimizationResult] = None
@@ -858,11 +836,11 @@ class TuneLabApp:
         style.configure("HomeToolTitle.TLabel", background=PANEL, foreground=INK, font=FONT_KPI)
         style.configure("Subtitle.TLabel", background=BG, foreground=MUTED, font=FONT_BODY)
         style.configure("ActiveRegion.TLabel", background=BG, foreground=BLUE, font=FONT_SMALL_BOLD)
-        style.configure("Status.TLabel", background=INFO_BG, foreground=MUTED, padding=(12, 8), font=FONT_SMALL)
-        style.configure("StatusSuccess.TLabel", background=SUCCESS_BG, foreground=GREEN, padding=(12, 8), font=FONT_SMALL)
-        style.configure("StatusWarning.TLabel", background=WARNING_BG, foreground=AMBER, padding=(12, 8), font=FONT_SMALL)
-        style.configure("StatusFail.TLabel", background=DANGER_BG, foreground=RED, padding=(12, 8), font=FONT_SMALL)
-        style.configure("Matrix.TLabel", background="#F7F7FA", foreground=INK, padding=(5, 5), font=FONT_MONO)
+        style.configure("Status.TLabel", background=INFO_BG, foreground=MUTED, padding=(10, 6), font=FONT_SMALL)
+        style.configure("StatusSuccess.TLabel", background=SUCCESS_BG, foreground=GREEN, padding=(10, 6), font=FONT_SMALL)
+        style.configure("StatusWarning.TLabel", background=WARNING_BG, foreground=AMBER, padding=(10, 6), font=FONT_SMALL)
+        style.configure("StatusFail.TLabel", background=DANGER_BG, foreground=RED, padding=(10, 6), font=FONT_SMALL)
+        style.configure("Matrix.TLabel", background="#F7F7FA", foreground=INK, padding=(4, 4), font=FONT_MONO)
         style.configure("CardLink.TButton", background=PANEL, foreground=BLUE, padding=(0, 4), borderwidth=0, font=FONT_BODY_BOLD)
         style.map("CardLink.TButton", background=[("active", PANEL)], foreground=[("active", "#005ECC")])
         style.configure("TCheckbutton", background=PANEL, foreground=INK, font=FONT_BODY, padding=(4, 3))
@@ -871,7 +849,7 @@ class TuneLabApp:
         style.configure("KpiCaption.TLabel", background=PANEL, foreground=MUTED, font=FONT_BODY)
         style.configure("Treeview", rowheight=UI["row_height"], fieldbackground=PANEL, background=PANEL, foreground=INK, font=FONT_SMALL)
         style.map("Treeview", background=[("selected", UI["selection"])], foreground=[("selected", INK)])
-        style.configure("Treeview.Heading", background=UI["table_heading"], foreground=MUTED, font=FONT_SMALL_BOLD, relief="flat", padding=(8, 7))
+        style.configure("Treeview.Heading", background=UI["table_heading"], foreground=MUTED, font=FONT_SMALL_BOLD, relief="flat", padding=(7, 6))
 
     def _install_app_icon(self) -> None:
         source_icon_path = application_icon_path()
@@ -896,7 +874,6 @@ class TuneLabApp:
         file_menu.add_command(label="打开 Qualcomm CC XML...", command=self.load_xml)
         file_menu.add_command(label="保存 XML...", command=self.save_xml)
         file_menu.add_command(label="导出工程报告...", command=self.save_report)
-        file_menu.add_command(label="导出仿真图...", command=self.export_simulation)
         file_menu.add_command(label="退出", command=self.close)
         self.file_menu = file_menu
         menu.add_cascade(label="文件", menu=file_menu)
@@ -951,11 +928,11 @@ class TuneLabApp:
         home.columnconfigure(1, weight=1)
         home.rowconfigure(0, weight=1)
 
-        sidebar = ttk.Frame(home, width=238, padding=(18, 22), style="Sidebar.TFrame")
+        sidebar = ttk.Frame(home, width=218, padding=(14, 16), style="Sidebar.TFrame")
         sidebar.grid(row=0, column=0, sticky="nsew")
         sidebar.grid_propagate(False)
         identity = ttk.Frame(sidebar, style="Sidebar.TFrame")
-        identity.pack(fill="x", pady=(0, 30))
+        identity.pack(fill="x", pady=(0, 20))
         try:
             with Image.open(self.app_icon_source_path) as source:
                 icon = source.convert("RGBA")
@@ -972,67 +949,63 @@ class TuneLabApp:
         ttk.Label(identity_text, text="TuneLab", style="SidebarBrand.TLabel").pack(anchor="w")
         ttk.Label(identity_text, text="Camera Tuning", style="SidebarMeta.TLabel").pack(anchor="w", pady=(1, 0))
 
-        ttk.Label(sidebar, text="工作区", style="SidebarSection.TLabel").pack(anchor="w", padx=12, pady=(0, 7))
-        ttk.Button(sidebar, text="首页", command=self.show_home_workspace, style="ActiveNav.TButton").pack(fill="x", pady=2)
-        ttk.Button(sidebar, text="CCM / ColorChecker", command=self.show_cc_workspace, style="Nav.TButton").pack(fill="x", pady=2)
-        ttk.Button(sidebar, text="Gamma 优化", command=self.open_gamma_optimizer, style="Nav.TButton").pack(fill="x", pady=2)
-        ttk.Button(sidebar, text="图像分析器", command=self.open_image_inspector, style="Nav.TButton").pack(fill="x", pady=2)
+        ttk.Label(sidebar, text="工作区", style="SidebarSection.TLabel").pack(anchor="w", padx=10, pady=(0, 5))
+        ttk.Button(sidebar, text="首页", command=self.show_home_workspace, style="ActiveNav.TButton").pack(fill="x", pady=1)
+        ttk.Button(sidebar, text="CCM / ColorChecker", command=self.show_cc_workspace, style="Nav.TButton").pack(fill="x", pady=1)
+        ttk.Button(sidebar, text="Gamma 优化", command=self.open_gamma_optimizer, style="Nav.TButton").pack(fill="x", pady=1)
+        ttk.Button(sidebar, text="图像分析器", command=self.open_image_inspector, style="Nav.TButton").pack(fill="x", pady=1)
 
         sidebar_footer = ttk.Frame(sidebar, style="Sidebar.TFrame")
         sidebar_footer.pack(side="bottom", fill="x")
-        ttk.Separator(sidebar_footer).pack(fill="x", pady=(0, 14))
+        ttk.Separator(sidebar_footer).pack(fill="x", pady=(0, 10))
         ttk.Label(sidebar_footer, text="●  本地处理", style="SidebarStatus.TLabel").pack(anchor="w", padx=8)
         ttk.Label(sidebar_footer, text="图片与参数不会离开此设备", style="SidebarMeta.TLabel").pack(anchor="w", padx=8, pady=(4, 0))
 
-        content = ttk.Frame(home, padding=(42, 34), style="Home.TFrame")
+        content = ttk.Frame(home, padding=(28, 22), style="Home.TFrame")
         content.grid(row=0, column=1, sticky="nsew")
         content.columnconfigure(0, weight=1)
-        content.rowconfigure(3, weight=1)
+        content.rowconfigure(4, weight=1)
 
         hero = ttk.Frame(content, style="Home.TFrame")
-        hero.grid(row=0, column=0, sticky="ew", pady=(0, 30))
+        hero.grid(row=0, column=0, sticky="ew", pady=(0, 18))
         hero.columnconfigure(0, weight=1)
         brand = ttk.Frame(hero, style="Home.TFrame")
         brand.grid(row=0, column=0, sticky="w")
-        ttk.Label(brand, text="CAMERA TUNING WORKBENCH", style="HomeEyebrow.TLabel").pack(anchor="w")
-        ttk.Label(brand, text="把调校工作，收进一个窗口。", style="HomeBrand.TLabel").pack(anchor="w", pady=(7, 0))
+        ttk.Label(brand, text="CAMERA TUNING ENGINEERING", style="HomeEyebrow.TLabel").pack(anchor="w")
+        ttk.Label(brand, text="TuneLab 相机调校工程工作台", style="HomeBrand.TLabel").pack(anchor="w", pady=(4, 0))
         hero_description = ttk.Label(
             brand,
-            text="从 ColorChecker 与 Gamma 优化，到像素、ROI 和多图分析；所有流程共享一致的工程视图与本地数据边界。",
+            text="面向 CCM、Gamma 与图像质量分析的本地工程工具，统一管理输入、诊断、参数验证与结果导出。",
             style="HomeMuted.TLabel",
             justify="left",
         )
-        hero_description.pack(anchor="w", pady=(10, 0))
+        hero_description.pack(anchor="w", pady=(6, 0))
         bind_responsive_wrap(hero_description, minimum=520)
         hero_actions = ttk.Frame(hero, style="Home.TFrame")
-        hero_actions.grid(row=0, column=1, sticky="ne", padx=(24, 0), pady=(18, 0))
-        ttk.Button(hero_actions, text="开始色彩校正", command=self.show_cc_workspace, style="Primary.TButton").pack(side="left")
+        hero_actions.grid(row=0, column=1, sticky="ne", padx=(20, 0), pady=(13, 0))
         self.home_help_button = ttk.Button(hero_actions, text="帮助", command=self.show_help, style="Quiet.TButton")
-        self.home_help_button.pack(side="left", padx=(8, 0))
+        self.home_help_button.pack(side="left")
 
-        ttk.Separator(content).grid(row=1, column=0, sticky="ew", pady=(0, 24))
+        ttk.Separator(content).grid(row=1, column=0, sticky="ew", pady=(0, 14))
         section_header = ttk.Frame(content, style="Home.TFrame")
-        section_header.grid(row=2, column=0, sticky="ew", pady=(0, 12))
-        ttk.Label(section_header, text="工作台", style="HomeSection.TLabel").pack(side="left")
-        ttk.Label(section_header, text="选择一项开始", style="HomeMuted.TLabel").pack(side="left", padx=(10, 0), pady=(2, 0))
+        section_header.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(section_header, text="工程模块", style="HomeSection.TLabel").pack(side="left")
+        ttk.Label(section_header, text="按当前任务进入对应工作区", style="HomeMuted.TLabel").pack(side="left", padx=(8, 0), pady=(1, 0))
         tools = ttk.Frame(content, style="Home.TFrame")
-        tools.grid(row=3, column=0, sticky="nsew")
+        tools.grid(row=3, column=0, sticky="new")
         tools.columnconfigure(0, weight=1, uniform="home-tools")
-        tools.columnconfigure(1, weight=1, uniform="home-tools")
-        tools.columnconfigure(2, weight=1, uniform="home-tools")
-        tools.rowconfigure(0, weight=1, minsize=285, uniform="home-tools")
         self._build_home_tool_card(
             tools, 0, 0, "CC", "CCM / ColorChecker", "色彩校正",
-            "导入 Imatest CSV 或实拍色卡，完成 Delta CCM 优化、色差保护、整图仿真与 XML 安全回写。",
+            "导入 Imatest CSV 或 ColorChecker，完成 Delta CCM 优化、色差保护与 XML 安全回写。",
             self.show_cc_workspace, BLUE,
         )
         self._build_home_tool_card(
-            tools, 0, 1, "γ", "Gamma 优化", "灰阶与 LUT",
+            tools, 1, 0, "γ", "Gamma 优化", "灰阶与 LUT",
             "分析 Stepchart 连续阶数与曲线健康，生成受高光、暗部和硬件格式约束的 Gamma LUT。",
             self.open_gamma_optimizer, GREEN,
         )
         self._build_home_tool_card(
-            tools, 0, 2, "ROI", "图像分析器", "像素与多图",
+            tools, 2, 0, "ROI", "图像分析器", "像素与多图",
             "浏览文件夹并并排查看 1–4 张图片，以像素、ROI、直方图与匹配置信度解释变化。",
             self.open_image_inspector, "#7A5AF8",
         )
@@ -1057,29 +1030,33 @@ class TuneLabApp:
         *,
         columnspan: int = 1,
     ) -> None:
-        card = ttk.Frame(parent, padding=(22, 20), style="HomeCard.TFrame")
+        card = ttk.Frame(parent, padding=(16, 13), style="HomeCard.TFrame")
         card.grid(
             row=row,
             column=column,
             columnspan=columnspan,
-            sticky="nsew",
-            padx=(0, 8) if column == 0 else ((8, 0) if column == 2 else 8),
+            sticky="ew",
+            pady=(0, 7) if row < 2 else 0,
         )
-        icon = tk.Canvas(card, width=46, height=46, background=PANEL, highlightthickness=0)
-        icon.pack(anchor="w")
-        icon.create_oval(1, 1, 45, 45, fill=colour, outline="")
-        icon.create_text(23, 23, text=glyph, fill="white", font=FONT_SMALL_BOLD)
-        ttk.Label(card, text=subtitle.upper(), foreground=TERTIARY, background=PANEL, font=FONT_NAV_SECTION).pack(anchor="w", pady=(18, 0))
-        ttk.Label(card, text=title, style="HomeToolTitle.TLabel").pack(anchor="w", pady=(5, 0))
+        icon = tk.Canvas(card, width=42, height=42, background=PANEL, highlightthickness=0)
+        icon.pack(side="left", padx=(0, 14))
+        icon.create_oval(1, 1, 41, 41, fill=colour, outline="")
+        icon.create_text(21, 21, text=glyph, fill="white", font=FONT_SMALL_BOLD)
+        copy = ttk.Frame(card, style="Surface.TFrame")
+        copy.pack(side="left", fill="x", expand=True)
+        heading = ttk.Frame(copy, style="Surface.TFrame")
+        heading.pack(fill="x")
+        ttk.Label(heading, text=title, style="HomeToolTitle.TLabel").pack(side="left")
+        ttk.Label(heading, text=subtitle, foreground=TERTIARY, background=PANEL, font=FONT_NAV_SECTION).pack(side="left", padx=(8, 0), pady=(2, 0))
         description_label = ttk.Label(
-            card,
+            copy,
             text=description,
             style="Card.TLabel",
             justify="left",
         )
-        description_label.pack(fill="x", anchor="w", pady=(14, 0))
-        bind_responsive_wrap(description_label, minimum=180)
-        ttk.Button(card, text="打开工作台  ›", command=command, style="CardLink.TButton").pack(anchor="w", side="bottom", pady=(22, 0))
+        description_label.pack(fill="x", anchor="w", pady=(5, 0))
+        bind_responsive_wrap(description_label, minimum=320)
+        ttk.Button(card, text="打开", command=command, style="Quiet.TButton").pack(side="right", padx=(16, 0))
 
     def _run_cc_action(self, action: Callable[[], None]) -> None:
         self.show_cc_workspace()
@@ -1090,30 +1067,30 @@ class TuneLabApp:
         self.notebook.select(self.history_tab)
 
     def _build_ui(self) -> None:
-        outer = ttk.Frame(self.root, padding=(24, 18), style="Root.TFrame")
+        outer = ttk.Frame(self.root, padding=(18, 12), style="Root.TFrame")
         self.cc_view = outer
         outer.pack(fill="both", expand=True)
         header = ttk.Frame(outer, style="Root.TFrame")
-        header.pack(fill="x", pady=(0, 16))
+        header.pack(fill="x", pady=(0, 10))
         heading = ttk.Frame(header, style="Root.TFrame")
         heading.pack(side="left", fill="x", expand=True)
         ttk.Label(heading, text="色彩工作区", style="Eyebrow.TLabel").pack(anchor="w")
-        ttk.Label(heading, text="CCM / ColorChecker 校正", style="Title.TLabel").pack(anchor="w", pady=(3, 0))
+        ttk.Label(heading, text="CCM / ColorChecker 校正", style="Title.TLabel").pack(anchor="w", pady=(2, 0))
         ttk.Label(
             heading,
             text="CSV 与实拍图片共享 Delta CCM 优化、保护诊断与 Qualcomm CC13 回写流程",
             style="Subtitle.TLabel",
-        ).pack(anchor="w", pady=(4, 0))
-        ttk.Button(header, text="返回首页", command=self.show_home_workspace, style="Quiet.TButton").pack(side="right", anchor="n", pady=(7, 0))
+        ).pack(anchor="w", pady=(2, 0))
+        ttk.Button(header, text="返回首页", command=self.show_home_workspace, style="Quiet.TButton").pack(side="right", anchor="n", pady=(4, 0))
 
-        controls = ttk.Frame(outer, padding=(14, 11), style="Card.TFrame")
+        controls = ttk.Frame(outer, padding=(10, 8), style="Card.TFrame")
         self.controls_panel = controls
         controls.pack(fill="x", pady=(0, 8))
         controls.columnconfigure(1, weight=1)
 
         source_group = ttk.Frame(controls, style="Surface.TFrame")
         source_group.grid(row=0, column=0, sticky="w")
-        ttk.Label(source_group, text="数据输入", background=PANEL, foreground=TERTIARY, font=FONT_NAV_SECTION).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        ttk.Label(source_group, text="数据输入", background=PANEL, foreground=TERTIARY, font=FONT_NAV_SECTION).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
         self.input_mode_var = tk.StringVar(value=next(iter(self.INPUT_MODE_LABELS)))
         self.input_mode_combo = ttk.Combobox(
             source_group,
@@ -1122,25 +1099,25 @@ class TuneLabApp:
             state="readonly",
             width=14,
         )
-        self.input_mode_combo.grid(row=1, column=0, padx=(0, 7), sticky="ew")
+        self.input_mode_combo.grid(row=1, column=0, padx=(0, 6), sticky="ew")
         self.input_mode_combo.bind("<<ComboboxSelected>>", self._on_input_mode_selected)
         self.input_open_button = ttk.Button(source_group, text="1  打开 CC CSV", command=self.open_active_input)
-        self.input_open_button.grid(row=1, column=1, padx=(0, 7), sticky="ew")
+        self.input_open_button.grid(row=1, column=1, padx=(0, 6), sticky="ew")
         ttk.Button(source_group, text="2  打开 CC XML", command=self.load_xml).grid(row=1, column=2, sticky="ew")
 
         region_group = ttk.Frame(controls, style="Surface.TFrame")
-        region_group.grid(row=0, column=1, sticky="e", padx=(24, 18))
-        ttk.Label(region_group, text="目标 Region", background=PANEL, foreground=TERTIARY, font=FONT_NAV_SECTION).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
-        ttk.Label(region_group, text="CCT", style="Card.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 5))
+        region_group.grid(row=0, column=1, sticky="e", padx=(16, 12))
+        ttk.Label(region_group, text="目标 Region", background=PANEL, foreground=TERTIARY, font=FONT_NAV_SECTION).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 4))
+        ttk.Label(region_group, text="CCT", style="Card.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 4))
         self.cct_var = tk.StringVar()
-        ttk.Entry(region_group, textvariable=self.cct_var, width=8).grid(row=1, column=1, sticky="w", padx=(0, 7))
+        ttk.Entry(region_group, textvariable=self.cct_var, width=8).grid(row=1, column=1, sticky="w", padx=(0, 6))
         self.region_match_button = ttk.Button(
             region_group,
             text="自动匹配 Region",
             command=self.auto_match_region,
             style="RegionMatch.TButton",
         )
-        self.region_match_button.grid(row=1, column=2, sticky="ew", padx=(0, 7))
+        self.region_match_button.grid(row=1, column=2, sticky="ew", padx=(0, 6))
         self.region_var = tk.StringVar()
         self.region_combo = ttk.Combobox(region_group, textvariable=self.region_var, state="readonly", width=10)
         self.region_combo.grid(row=1, column=3, sticky="ew")
@@ -1148,67 +1125,44 @@ class TuneLabApp:
 
         action_group = ttk.Frame(controls, style="Surface.TFrame")
         action_group.grid(row=0, column=2, sticky="e")
-        ttk.Label(action_group, text="执行", background=PANEL, foreground=TERTIARY, font=FONT_NAV_SECTION).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(action_group, text="执行", background=PANEL, foreground=TERTIARY, font=FONT_NAV_SECTION).grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.optimize_button = ttk.Button(action_group, text="3  自动优化", command=self.run_optimization, style="Primary.TButton")
         self.optimize_button.grid(row=1, column=0, sticky="ew")
         self.save_xml_button = ttk.Button(action_group, text="保存 XML", command=self.save_xml, state="disabled")
-        self.save_xml_button.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        self.save_xml_button.grid(row=2, column=0, sticky="ew", pady=(4, 0))
 
         self.image_input_controls = ttk.Frame(controls, style="Surface.TFrame")
-        self.image_input_controls.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(11, 0))
-        self.image_input_controls.columnconfigure(5, weight=1)
-        ttk.Label(self.image_input_controls, text="图片目标", style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 5))
+        self.image_input_controls.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        self.image_input_controls.columnconfigure(3, weight=1)
+        ttk.Label(self.image_input_controls, text="ColorChecker 目标", style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 5))
         ttk.Button(
             self.image_input_controls,
             text="使用标准 ColorChecker",
             command=self.use_standard_reference,
             style="Quiet.TButton",
-        ).grid(row=0, column=1, sticky="w", padx=(0, 7))
+        ).grid(row=0, column=1, sticky="w", padx=(0, 6))
         ttk.Button(
             self.image_input_controls,
             text="自定义目标...",
             command=self.load_reference_image,
             style="Quiet.TButton",
-        ).grid(row=0, column=2, sticky="w", padx=(0, 14))
-        ttk.Label(self.image_input_controls, text="求解", style="Card.TLabel").grid(row=0, column=3, sticky="w", padx=(0, 5))
-        self.image_solver_var = tk.StringVar(value=next(iter(self.IMAGE_SOLVER_LABELS)))
-        self.image_solver_combo = ttk.Combobox(
-            self.image_input_controls,
-            textvariable=self.image_solver_var,
-            values=list(self.IMAGE_SOLVER_LABELS),
-            state="readonly",
-            width=30,
-        )
-        self.image_solver_combo.grid(row=0, column=4, sticky="w")
+        ).grid(row=0, column=2, sticky="w", padx=(0, 12))
         self.image_input_var = tk.StringVar(value="测试图：未加载 · 目标：标准 ColorChecker Classic 24")
         ttk.Label(
             self.image_input_controls,
             textvariable=self.image_input_var,
             style="Card.TLabel",
-        ).grid(row=1, column=0, columnspan=6, sticky="ew", pady=(5, 0))
+        ).grid(row=0, column=3, sticky="ew")
         self.image_input_controls.grid_remove()
 
-        parameters = ttk.Frame(outer, padding=(14, 10), style="Card.TFrame")
+        parameters = ttk.Frame(outer, padding=(10, 8), style="Card.TFrame")
         self.parameters_panel = parameters
         parameters.pack(fill="x", pady=(0, 8))
         config = self.settings.optimization
-        composition_label = next(
-            (label for label, value in self.COMPOSITION_LABELS.items() if value == self.settings.composition),
-            next(iter(self.COMPOSITION_LABELS)),
-        )
-        self.composition_var = tk.StringVar(value=composition_label)
-        ttk.Label(parameters, text="组合", style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 5))
-        ttk.Combobox(
-            parameters,
-            textvariable=self.composition_var,
-            values=list(self.COMPOSITION_LABELS),
-            state="readonly",
-            width=22,
-        ).grid(row=0, column=1, sticky="w", padx=(0, 14))
-        ttk.Label(parameters, text="强度", style="Card.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 5))
+        ttk.Label(parameters, text="强度", style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 4))
         self.strength_var = tk.DoubleVar(value=self.settings.optimization.max_blend * 100.0)
-        ttk.Scale(parameters, from_=20, to=100, variable=self.strength_var, orient="horizontal", length=110).grid(row=0, column=3, sticky="w", padx=(0, 14))
-        ttk.Label(parameters, text="策略", style="Card.TLabel").grid(row=0, column=4, sticky="w", padx=(0, 5))
+        ttk.Scale(parameters, from_=20, to=100, variable=self.strength_var, orient="horizontal", length=110).grid(row=0, column=1, sticky="w", padx=(0, 10))
+        ttk.Label(parameters, text="策略", style="Card.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 4))
         self.strategy_var = tk.StringVar(value=config.strategy)
         ttk.Combobox(
             parameters,
@@ -1216,15 +1170,15 @@ class TuneLabApp:
             values=("conservative", "balanced", "aggressive"),
             state="readonly",
             width=12,
-        ).grid(row=0, column=5, sticky="w", padx=(0, 14))
-        ttk.Label(parameters, text="正则", style="Card.TLabel").grid(row=0, column=6, sticky="w", padx=(0, 5))
+        ).grid(row=0, column=3, sticky="w", padx=(0, 10))
+        ttk.Label(parameters, text="正则", style="Card.TLabel").grid(row=0, column=4, sticky="w", padx=(0, 4))
         self.regularization_var = tk.StringVar(value="Auto" if config.regularization is None else f"{config.regularization:g}")
-        ttk.Entry(parameters, textvariable=self.regularization_var, width=8).grid(row=0, column=7, sticky="w", padx=(0, 14))
-        ttk.Label(parameters, text="饱和", style="Card.TLabel").grid(row=0, column=8, sticky="w", padx=(0, 5))
+        ttk.Entry(parameters, textvariable=self.regularization_var, width=8).grid(row=0, column=5, sticky="w", padx=(0, 10))
+        ttk.Label(parameters, text="饱和", style="Card.TLabel").grid(row=0, column=6, sticky="w", padx=(0, 4))
         self.saturation_var = tk.StringVar(value=f"{config.saturation_factor:g}")
-        ttk.Entry(parameters, textvariable=self.saturation_var, width=7).grid(row=0, column=9, sticky="w")
+        ttk.Entry(parameters, textvariable=self.saturation_var, width=7).grid(row=0, column=7, sticky="w")
         secondary = ttk.Frame(parameters, style="Surface.TFrame")
-        secondary.grid(row=1, column=0, columnspan=10, sticky="ew", pady=(5, 0))
+        secondary.grid(row=1, column=0, columnspan=8, sticky="ew", pady=(4, 0))
         ttk.Label(secondary, text="重点色块", style="Card.TLabel").pack(side="left", padx=(0, 5))
         self.focus_patches_var = tk.StringVar(value=",".join(str(zone) for zone in config.focus_patches))
         ttk.Entry(secondary, textvariable=self.focus_patches_var, width=15).pack(side="left", padx=(0, 14))
@@ -1242,7 +1196,7 @@ class TuneLabApp:
         self.show_motion_var = tk.BooleanVar(value=self.settings.show_motion)
         ttk.Checkbutton(secondary, text="显示轨迹", variable=self.show_motion_var, command=self._on_show_motion_changed).pack(side="left", padx=(0, 14))
         ttk.Button(secondary, text="恢复 a*b* 视图", command=self._reset_lab_view, style="Quiet.TButton").pack(side="left")
-        parameters.columnconfigure(9, weight=1)
+        parameters.columnconfigure(7, weight=1)
 
         info = ttk.Frame(outer, style="Root.TFrame")
         info.pack(fill="x", pady=(0, 4))
@@ -1269,28 +1223,27 @@ class TuneLabApp:
 
         self.notebook = ttk.Notebook(outer)
         self.notebook.pack(fill="both", expand=True)
-        overview = ttk.Frame(self.notebook, padding=12, style="Root.TFrame")
-        image_tab = ttk.Frame(self.notebook, padding=12, style="Root.TFrame")
-        engineering = ttk.Frame(self.notebook, padding=12, style="Root.TFrame")
-        advice = ttk.Frame(self.notebook, padding=12, style="Root.TFrame")
-        history_tab = ttk.Frame(self.notebook, padding=12, style="Root.TFrame")
+        overview = ttk.Frame(self.notebook, padding=8, style="Root.TFrame")
+        image_tab = ttk.Frame(self.notebook, padding=8, style="Root.TFrame")
+        engineering = ttk.Frame(self.notebook, padding=8, style="Root.TFrame")
+        advice = ttk.Frame(self.notebook, padding=8, style="Root.TFrame")
+        history_tab = ttk.Frame(self.notebook, padding=8, style="Root.TFrame")
         self.image_tab = image_tab
         self.history_tab = history_tab
         self.notebook.add(overview, text="色差对比")
-        self.notebook.add(image_tab, text="图像对比")
+        self.notebook.add(image_tab, text="ColorChecker 输入")
         self.notebook.add(engineering, text="工程统计")
         self.notebook.add(advice, text="诊断与解释")
         self.notebook.add(history_tab, text="History / XML Diff")
 
         image_tab.columnconfigure(0, weight=1, uniform="cc-image-preview")
         image_tab.columnconfigure(1, weight=1, uniform="cc-image-preview")
-        image_tab.columnconfigure(2, weight=1, uniform="cc-image-preview")
         image_tab.rowconfigure(1, weight=1)
         image_header = ttk.Frame(image_tab, style="Root.TFrame")
-        image_header.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        image_header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         image_header.columnconfigure(0, weight=1)
         self.image_metrics_var = tk.StringVar(
-            value="导入测试 ColorChecker 后可查看原图、仿真图和标准/自定义目标；整图预览不替代上机重拍。"
+            value="ColorChecker 图片用于 24 色块识别、目标对照与色块级优化。"
         )
         ttk.Label(
             image_header,
@@ -1303,25 +1256,16 @@ class TuneLabApp:
             text="显示 24 色块框",
             variable=self.show_checker_overlay_var,
             command=self._redraw_image_previews,
-        ).grid(row=0, column=1, padx=(12, 8))
-        self.export_simulation_button = ttk.Button(
-            image_header,
-            text="导出仿真图...",
-            command=self.export_simulation,
-            state="disabled",
-            style="Quiet.TButton",
-        )
-        self.export_simulation_button.grid(row=0, column=2)
+        ).grid(row=0, column=1, padx=(12, 0))
         overlay_enabled = lambda: self.show_checker_overlay_var.get()
         self.test_preview = PreviewPane(image_tab, "原始测试图", overlay_enabled)
-        self.simulation_preview = PreviewPane(image_tab, "CCM 仿真图", overlay_enabled)
         self.reference_preview = PreviewPane(image_tab, "标准 ColorChecker 目标", overlay_enabled)
-        for column, pane in enumerate((self.test_preview, self.simulation_preview, self.reference_preview)):
+        for column, pane in enumerate((self.test_preview, self.reference_preview)):
             pane.grid(
                 row=1,
                 column=column,
                 sticky="nsew",
-                padx=(0, 6) if column < 2 else 0,
+                padx=(0, 5) if column == 0 else (5, 0),
             )
 
         summary_row = ttk.Frame(overview, style="Root.TFrame")
@@ -1357,14 +1301,14 @@ class TuneLabApp:
         plot_container.pack(fill="both", expand=True)
         plot_container.columnconfigure(0, weight=1, uniform="lab-plots")
         plot_container.columnconfigure(1, weight=1, uniform="lab-plots")
-        plot_container.columnconfigure(2, weight=0, minsize=460)
+        plot_container.columnconfigure(2, weight=0, minsize=420)
         plot_container.rowconfigure(0, weight=1)
-        self.before_plot = LabPlot(plot_container, "改前：Camera → Ideal", self.lab_view, self._redraw_plots, self._show_patch_detail, self._clear_patch_selection)
+        self.before_plot = LabPlot(plot_container, "优化前色差：Measured / Target", self.lab_view, self._redraw_plots, self._show_patch_detail, self._clear_patch_selection)
         self.before_plot.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
-        self.after_plot = LabPlot(plot_container, "改后模拟：Camera → Ideal", self.lab_view, self._redraw_plots, self._show_patch_detail, self._clear_patch_selection)
+        self.after_plot = LabPlot(plot_container, "优化后色差：Optimized / Target", self.lab_view, self._redraw_plots, self._show_patch_detail, self._clear_patch_selection)
         self.after_plot.grid(row=0, column=1, sticky="nsew", padx=5)
 
-        self.patch_table_panel = ttk.Frame(plot_container, width=460, padding=8, style="Card.TFrame")
+        self.patch_table_panel = ttk.Frame(plot_container, width=420, padding=6, style="Card.TFrame")
         self.patch_table_panel.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
         self.patch_table_panel.grid_propagate(False)
         self.patch_table_panel.columnconfigure(0, weight=1)
@@ -1504,7 +1448,7 @@ class TuneLabApp:
     def _set_advice(self, text: str) -> None:
         self.advice_text.configure(state="normal")
         self.advice_text.delete("1.0", "end")
-        section_titles = {"优化摘要", "Explainable Optimization", "模块诊断（Confidence / Root Cause）", "警告与前提", "模拟边界"}
+        section_titles = {"优化摘要", "Explainable Optimization", "模块诊断（Confidence / Root Cause）", "警告与前提", "模型边界"}
         for line in text.splitlines():
             tag = "section" if line in section_titles else "module" if line.startswith("· ") and " · " in line else "detail"
             self.advice_text.insert("end", line + "\n", tag)
@@ -1536,7 +1480,6 @@ class TuneLabApp:
 
     def _install_settings_autosave(self) -> None:
         variables: tuple[tk.Variable, ...] = (
-            self.composition_var,
             self.strength_var,
             self.strategy_var,
             self.regularization_var,
@@ -1585,10 +1528,9 @@ class TuneLabApp:
     def _persist_settings(self, *, show_error: bool = False) -> bool:
         try:
             config = self._config_from_controls()
-            composition = self.COMPOSITION_LABELS[self.composition_var.get()]
             self.settings = CcmSettings(
                 optimization=config,
-                composition=composition,
+                composition=self.COMPOSITION,
                 show_motion=self.show_motion_var.get(),
                 last_report_format=self.settings.last_report_format,
             )
@@ -1601,12 +1543,7 @@ class TuneLabApp:
 
     def _apply_settings_to_controls(self, settings: CcmSettings) -> None:
         config = settings.optimization
-        composition_label = next(
-            (label for label, value in self.COMPOSITION_LABELS.items() if value == settings.composition),
-            next(iter(self.COMPOSITION_LABELS)),
-        )
-        self.settings = settings
-        self.composition_var.set(composition_label)
+        self.settings = replace(settings, composition=self.COMPOSITION)
         self.strength_var.set(config.max_blend * 100.0)
         self.strategy_var.set(config.strategy)
         self.regularization_var.set("Auto" if config.regularization is None else f"{config.regularization:g}")
@@ -1629,7 +1566,7 @@ class TuneLabApp:
             payload = json.loads(Path(path).read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("配置根节点必须是 JSON object。")
-            settings = CcmSettings.from_dict(payload)
+            settings = replace(CcmSettings.from_dict(payload), composition=self.COMPOSITION)
             settings.optimization.validate()
             self._apply_settings_to_controls(settings)
             save_settings(settings)
@@ -1643,7 +1580,7 @@ class TuneLabApp:
             config = self._config_from_controls()
             settings = CcmSettings(
                 optimization=config,
-                composition=self.COMPOSITION_LABELS[self.composition_var.get()],
+                composition=self.COMPOSITION,
                 show_motion=self.show_motion_var.get(),
                 last_report_format=self.settings.last_report_format,
             )
@@ -2117,95 +2054,8 @@ class TuneLabApp:
         )
 
     def _redraw_image_previews(self) -> None:
-        for pane in (self.test_preview, self.simulation_preview, self.reference_preview):
+        for pane in (self.test_preview, self.reference_preview):
             pane.redraw()
-
-    def _render_image_simulation(self) -> None:
-        self.simulation = None
-        self.export_simulation_button.configure(state="disabled")
-        if self.result is None or self.test_detection is None:
-            self.simulation_preview.clear()
-            self.image_metrics_var.set(
-                "未导入测试图：当前结果仍可用于报告与 XML；如需整图仿真，请切换到图片输入并导入实拍图。"
-            )
-            return
-        try:
-            if self.restoration_plan is not None:
-                simulation = simulate_restoration_response(
-                    self.test_detection.image,
-                    self.restoration_plan,
-                )
-            else:
-                simulation = simulate_correction(
-                    self.test_detection.image,
-                    self.result.correction_matrix,
-                    domain="linear",
-                )
-            simulated_means = sample_patch_means(simulation.rgb, self.test_detection)
-        except ColorCheckerError as exc:
-            self.simulation_preview.clear()
-            self.image_metrics_var.set(f"整图仿真失败：{exc}")
-            self.result.warnings.append(f"整图仿真失败：{exc}")
-            return
-        self.simulation = simulation
-        self.simulation_preview.set_image(
-            self.test_detection.image,
-            rgb=simulation.rgb,
-            polygons=[patch.polygon for patch in self.test_detection.patches],
-            meta_suffix=(
-                "实拍 Before→After 响应"
-                if simulation.domain == "real-shot-response"
-                else "linear sRGB 近似"
-            )
-            + f" · clip {simulation.clipped_pixel_ratio:.2%}",
-        )
-        self.export_simulation_button.configure(state="normal")
-        if self.reference_detection is None:
-            self.image_metrics_var.set(
-                f"整图仿真完成 · clip {simulation.clipped_pixel_ratio:.2%}；没有目标色块可计算渲染预览 ΔE00。"
-            )
-            return
-        before_errors = []
-        after_errors = []
-        for source_patch, simulated_rgb, target_patch in zip(
-            self.test_detection.patches,
-            simulated_means,
-            self.reference_detection.patches,
-        ):
-            before_errors.append(_rgb8_delta_e(source_patch.mean_rgb, target_patch.mean_rgb))
-            after_errors.append(_rgb8_delta_e(simulated_rgb, target_patch.mean_rgb))
-        mean_before = sum(before_errors) / len(before_errors)
-        mean_after = sum(after_errors) / len(after_errors)
-        improved = sum(after < before - 1e-9 for before, after in zip(before_errors, after_errors))
-        regressed = sum(after > before + 0.05 for before, after in zip(before_errors, after_errors))
-        self.image_metrics_var.set(
-            f"JPEG 仿真预览（不参与求解）ΔE00 {mean_before:.2f} → {mean_after:.2f} · "
-            f"改善/回退 {improved}/{regressed} · clip {simulation.clipped_pixel_ratio:.2%}；"
-            "写回判断以“色差对比”的亮度匹配 ΔE/ΔC/Δh 与保护门限为准。"
-        )
-
-    def export_simulation(self) -> None:
-        if self.simulation is None or self.test_detection is None:
-            messagebox.showinfo("尚无仿真图", "请先导入测试图并完成自动优化。", parent=self.root)
-            return
-        path = filedialog.asksaveasfilename(
-            title="导出 CCM 仿真图",
-            defaultextension=".png",
-            initialfile=f"{self.test_detection.image.path.stem}_CC_simulation.png",
-            filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg *.jpeg")],
-        )
-        if not path:
-            return
-        try:
-            image = Image.fromarray(self.simulation.rgb, mode="RGB")
-            if Path(path).suffix.lower() in {".jpg", ".jpeg"}:
-                image.save(path, quality=95)
-            else:
-                image.save(path)
-        except OSError as exc:
-            messagebox.showerror("仿真图导出失败", str(exc), parent=self.root)
-            return
-        self._set_status(f"已导出仿真图：{path}", "success")
 
     def load_csv(self) -> None:
         path = filedialog.askopenfilename(
@@ -2326,7 +2176,7 @@ class TuneLabApp:
             input_name = "测试 ColorChecker" if self.dataset_source == "image" else "CC CSV"
             messagebox.showinfo("资料未齐", f"请先打开{input_name}、CC XML，并选择 CCT Region。")
             return
-        composition = self.COMPOSITION_LABELS[self.composition_var.get()]
+        composition = self.COMPOSITION
         try:
             config = self._config_from_controls()
         except ValueError as exc:
@@ -2355,73 +2205,12 @@ class TuneLabApp:
         self._set_status(f"正在用{source_name}搜索参数，并验证 ΔE/ΔC/Δh、回退与 Matrix 工程约束…")
         self.root.update_idletasks()
         try:
-            self.restoration_plan = None
-            use_profile = (
-                self.dataset_source == "image"
-                and self.IMAGE_SOLVER_LABELS[self.image_solver_var.get()] == "calibrated"
+            self.result = optimize_ccm(
+                self.dataset,
+                self.selected_region.matrix,
+                composition=composition,
+                config=solve_config,
             )
-            profile_rejection = ""
-            if use_profile:
-                try:
-                    if composition != "pre":
-                        raise ValueError("实拍 Profile 只支持前乘 A × M；当前组合方式将改用统一优化。")
-                    cct = float(self.cct_var.get())
-                    requested_plan = build_calibrated_restoration_plan(
-                        self.selected_region.matrix,
-                        cct,
-                        strength=solve_config.max_blend,
-                    )
-                    profile_config = restoration_evaluation_config(
-                        self.selected_region.matrix,
-                        requested_plan.optimized_matrix,
-                    )
-                    if requested_plan.already_calibrated:
-                        result = evaluate_ccm_correction(
-                            self.dataset,
-                            self.selected_region.matrix,
-                            requested_plan.correction_matrix,
-                            composition="pre",
-                            config=profile_config,
-                            search_method="calibrated-restoration-already-applied",
-                            blend=requested_plan.strength,
-                            prediction_domain="linear",
-                            extra_warnings=requested_plan.warnings,
-                        )
-                    else:
-                        result = evaluate_protected_ccm_correction(
-                            self.dataset,
-                            self.selected_region.matrix,
-                            requested_plan.correction_matrix,
-                            composition="pre",
-                            config=profile_config,
-                            search_method="calibrated-restoration",
-                            blend=requested_plan.strength,
-                            prediction_domain="linear",
-                            extra_warnings=(
-                                *requested_plan.warnings,
-                                "3000K/4000K 实拍矩阵仅作为候选方向；写回前仍执行统一 ΔE/ΔC/Δh、Neutral、Pass Rate 与 Matrix 保护。",
-                            ),
-                        )
-                    self.restoration_plan = build_calibrated_restoration_plan(
-                        self.selected_region.matrix,
-                        cct,
-                        strength=result.blend,
-                    )
-                    self.result = result
-                except (ValueError, ColorCheckerError, OptimizationError) as exc:
-                    profile_rejection = str(exc)
-                    self.restoration_plan = None
-            if not use_profile or self.result is None or profile_rejection:
-                self.result = optimize_ccm(
-                    self.dataset,
-                    self.selected_region.matrix,
-                    composition=composition,
-                    config=solve_config,
-                )
-                if profile_rejection:
-                    self.result.warnings.append(
-                        f"实拍 Profile 未通过或不适用，已自动改用统一优化：{profile_rejection}"
-                    )
             self.xml_diff = self.document.diff_with_matrix(
                 self.selected_region.index,
                 self.result.optimized_matrix,
@@ -2443,26 +2232,17 @@ class TuneLabApp:
             save_history(self.history)
         except OSError:
             self.result.warnings.append("Matrix History 无法写入用户配置目录；当前会话内记录仍保留。")
-        self._render_image_simulation()
         self._render_result()
         self._render_history()
 
     def _clear_result(self) -> None:
-        self.simulation = None
-        self.restoration_plan = None
-        if hasattr(self, "simulation_preview"):
-            self.simulation_preview.clear()
-        if hasattr(self, "export_simulation_button"):
-            self.export_simulation_button.configure(state="disabled")
         if hasattr(self, "image_metrics_var"):
             self.image_metrics_var.set(
-                "导入测试 ColorChecker 后可查看原图、仿真图和标准/自定义目标；整图预览不替代上机重拍。"
+                "ColorChecker 图片用于 24 色块识别、目标对照与色块级优化。"
             )
         self.lab_view.fit([])
         self.before_plot.selected_zone = None
         self.after_plot.selected_zone = None
-        composition = self.COMPOSITION_LABELS.get(self.composition_var.get(), "pre")
-        relation = "M新=A×M旧" if composition == "pre" else "M新=M旧×Aᵀ"
         self.correction_panel.set_title("Delta correction")
         self.correction_panel.set_matrix(None)
         self.optimized_panel.set_matrix(None)
@@ -2489,7 +2269,6 @@ class TuneLabApp:
         self.before_plot.selected_zone = None
         self.after_plot.selected_zone = None
         self.original_panel.set_matrix(result.original_matrix)
-        relation = "M新=A×M旧" if result.composition == "pre" else "M新=M旧×Aᵀ"
         self.correction_panel.set_title("Delta correction")
         self.correction_panel.set_matrix(result.correction_matrix)
         self.optimized_panel.set_matrix(result.optimized_matrix)
@@ -2623,7 +2402,7 @@ class TuneLabApp:
             lines.append("· 无额外警告。")
         if self.dataset_source == "image":
             model_boundary = (
-                "· 图片输入由自动识别的 24 色块构造；目标逐块匹配测试亮度后，仅让 CCM 拟合色度差异。"
+                "· 图片输入由自动识别的 24 色块构造；目标逐块匹配测试亮度后，仅执行色块级 CCM 求解，不生成整图仿真。"
             )
         else:
             model_boundary = (
@@ -2632,7 +2411,7 @@ class TuneLabApp:
         lines.extend(
             [
                 "",
-                "模拟边界",
+                "模型边界",
                 model_boundary,
                 "· 该结果适合首轮收敛与方向判断，最终仍需烧录/编译后重拍 ColorChecker 验证。",
                 "· Gamma、AWB、CV、SCE、2D LUT 或 TMC 改动后，应重新采集当前输入，不能把其误差全部压给 CC。",
@@ -2735,7 +2514,7 @@ class TuneLabApp:
             "2. 输入可选 Imatest measured/ideal CSV，或自动识别完整 24 色块的测试图；图片目标会逐块匹配测试亮度。\n"
             "3. CSV 与图片共用 Delta CCM 多目标优化和 ΔE/ΔC/Δh、Neutral、Pass Rate 回退保护。\n"
             "4. CCT 只来自测试图/CSV 或手动输入，标准及自定义目标不决定 Region。\n"
-            "5. 改后图是模型模拟，不代替上机重拍验证。\n"
+            "5. 图片模式不生成整图 Ideal–Camera 仿真；优化结果以色块级预测和工程门禁为准。\n"
             "6. CCT gap 属于运行时插值区，保存时必须明确选择某个端点 region。",
         )
 

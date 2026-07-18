@@ -96,20 +96,20 @@ def show_about_dialog(root: tk.Misc, icon_path: Path | None = None) -> tk.Toplev
     body_bold_font = FONT_BODY_BOLD if FONT_BODY_BOLD in available_fonts else "TkHeadingFont"
     small_font = FONT_SMALL if FONT_SMALL in available_fonts else "TkDefaultFont"
 
-    body = tk.Frame(dialog, background=surface, padx=42, pady=34)
+    body = tk.Frame(dialog, background=surface, padx=34, pady=26)
     body.pack(fill="both", expand=True)
     try:
-        about_image = _about_icon(dialog, icon_path or application_icon_path(), size=112)
+        about_image = _about_icon(dialog, icon_path or application_icon_path(), size=92)
         setattr(dialog, "_tunelab_icon", about_image)
-        tk.Label(body, image=about_image, background=surface, borderwidth=0).pack(pady=(0, 16))
+        tk.Label(body, image=about_image, background=surface, borderwidth=0).pack(pady=(0, 12))
     except (ImportError, OSError, ValueError, tk.TclError):
         pass
 
     tk.Label(body, text=APP_NAME, background=surface, foreground=INK, font=title_font).pack()
-    tk.Label(body, text=APP_TAGLINE, background=surface, foreground=MUTED, font=body_font).pack(pady=(6, 0))
+    tk.Label(body, text=APP_TAGLINE, background=surface, foreground=MUTED, font=body_font).pack(pady=(4, 0))
 
-    details = tk.Frame(body, background=surface, highlightthickness=1, highlightbackground=SUBTLE_SEPARATOR, padx=16, pady=12)
-    details.pack(fill="x", pady=(22, 0))
+    details = tk.Frame(body, background=surface, highlightthickness=1, highlightbackground=SUBTLE_SEPARATOR, padx=14, pady=9)
+    details.pack(fill="x", pady=(16, 0))
     for index, (label, value) in enumerate((("版本", APP_VERSION), ("联系", AUTHOR_EMAIL))):
         tk.Label(details, text=label, background=surface, foreground=TERTIARY, font=small_font).grid(row=index, column=0, sticky="w", pady=3)
         tk.Label(details, text=value, background=surface, foreground=INK, font=body_bold_font).grid(row=index, column=1, sticky="e", padx=(24, 0), pady=3)
@@ -121,8 +121,8 @@ def show_about_dialog(root: tk.Misc, icon_path: Path | None = None) -> tk.Toplev
         background=surface,
         foreground=MUTED,
         font=small_font,
-    ).pack(pady=(18, 0))
-    ttk.Button(body, text="完成", command=dialog.destroy, style="Primary.TButton").pack(fill="x", pady=(18, 0))
+    ).pack(pady=(13, 0))
+    ttk.Button(body, text="完成", command=dialog.destroy, style="Primary.TButton").pack(fill="x", pady=(13, 0))
 
     def forget_dialog(event: tk.Event) -> None:
         if event.widget is dialog and getattr(root, "_tunelab_about_dialog", None) is dialog:
@@ -131,7 +131,7 @@ def show_about_dialog(root: tk.Misc, icon_path: Path | None = None) -> tk.Toplev
     dialog.bind("<Destroy>", forget_dialog, add="+")
     dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
     dialog.update_idletasks()
-    width = max(460, dialog.winfo_reqwidth())
+    width = max(420, dialog.winfo_reqwidth())
     height = dialog.winfo_reqheight()
     owner = root.winfo_toplevel()
     x_pos = owner.winfo_rootx() + max(0, (owner.winfo_width() - width) // 2)

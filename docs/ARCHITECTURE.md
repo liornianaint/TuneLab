@@ -26,8 +26,8 @@ Qualcomm XML ───────> Trigger Tree ─> Selected CCT Region ─> O
 - `ccm/reporting.py`、`ccm/settings.py`、`ccm/history.py`：CCM 报告、配置与历史记录
 - `ccm/cli.py`：CCM 批处理入口
 - `gamma/`：Gamma 数据模型、Imatest 解析、Qualcomm XML、优化、报告、配置、历史与页面
-- `colorchecker/engine.py`：图片输入适配器，包括 MCC24/几何后备检测、标准/自定义目标取样、3000K/4000K 实拍 Profile、mired 插值与整图 Delta CCM 仿真
-- `colorchecker/ui.py`：统一页面复用的三图预览组件；不再拥有独立工作区、优化状态或 XML 写回
+- `colorchecker/engine.py`：图片输入适配器，包括 MCC24/几何后备检测、标准/自定义目标取样与统一 dataset 构造
+- `colorchecker/ui.py`：统一页面复用的测试图/目标图预览组件；不拥有独立工作区、优化状态或 XML 写回
 - `image_inspector/`：普通场景 1–4 图浏览、像素/ROI 分析、匹配与 CSV 导出
 - `regression.py`：跨 CCM/Gamma 的 Golden Dataset 发现、验收和汇总
 
@@ -47,28 +47,22 @@ y_sim     = A × y_current
 
 ```text
 M_new = A × M_old               # CC13 行主序/列向量
-M_new = M_old × Aᵀ              # 旧 Excel/C7 行向量等价形式
 ```
 
 这使工具能在没有 RAW 和 sensor spectral response 的情况下给出工程上可用的首轮方向，同时明确保留“必须上机复测”的边界。
 
 图片输入与 CSV 输入不再拥有两套页面或两套优化生命周期。MCC24 自动识别测试图的 24 个中心色块；目标默认由引擎生成 ColorChecker Classic 24 标准 8-bit sRGB 色块及确定几何，也可切换为自动识别的自定义目标图。目标色块的 linear-sRGB 亮度逐块匹配到测试图，再构造与 Imatest 完全相同的 measured/ideal dataset，交给同一个 `optimize_ccm()`。内置目标没有 CCT 语义；自定义目标文件名也不参与 Region 推断，CCT 只来自测试图或用户输入。
 
-图片默认使用统一的 ΔE/ΔC/Δh 优化。3000K/4000K 的 `source_matrix → target_matrix` 标定对保留为高级 Profile：先计算 Delta `A=M_target×M_source⁻¹`，再按 CCT 在 mired 空间插值，强度使用 `A(α)=I+α(A-I)`。Profile 方向必须经过与自动优化相同的 `_protection_failure` 门禁；完整强度失败时沿该方向确定性回退，仍无安全候选则由页面自动改用 `optimize_ccm()`。
-
-资料标定预览与 XML 数学分层：XML 只回写组合后的 3×3 `M_new`；预览则使用随工程固化的 3000K/4000K 实拍 Before→After 二次 RGB 响应面，特征为 `1,R,G,B,R²,G²,B²,RG,RB,GB`，在 mired 空间插值后按强度与原图混合。该模型吸收样例中 CCM 节点之后实际观察到的 Gamma、Tone Mapping、饱和度和剪切，使预览接近所给 After；自动拟合预览仍使用 linear sRGB。当前标准/自定义目标只用于色块对照与诊断，不覆盖测试图推断出的拍摄 CCT。
+图片与 CSV 都只调用统一的 ΔE/ΔC/Δh `optimize_ccm()` 路径，并固定使用 `M_new = A × M_old`。ColorChecker 页面只预览测试图与目标图，以便核对 24 色块定位；不执行整图 Ideal–Camera 仿真，也不提供 3000K/4000K 实拍 Profile 求解。
 
 ## 3. 约束与稳健性
 
 - 通用自动拟合仍要求 Delta CCM 与最终 CCM 每行和严格等于 1。
-- 实拍标定模式允许最终矩阵三行和为同一个非 1 数值；等行和保证中性 RGB 仍映射为中性，公共值作为亮度尺度单独显示。4000K 验证矩阵的公共尺度约为 `0.757635`。
-- 已匹配 target matrix 的 Region 不会再次应用同一 Delta，避免重复校正。
 - ideal 线性亮度先匹配 measured 亮度，防止用 CC 追逐曝光/Gamma 误差。
 - Ridge 正则化把 `A` 拉向单位阵，避免 18 个色块上的过拟合。
 - 自动搜索多个正则化与 blend 候选，并直接搜索最终 Matrix 的三组行内系数对。
 - Loss 同时约束 ΔE/ΔC/Δh/P90、Regression、Saturation、矩阵幅度与 Smoothness。
 - 默认保护 13/14/15；所有候选必须通过 Pass Rate、局部/整体饱和度和 Patch Regression 硬门槛。
-- 实拍 Profile 也不能绕过上述门槛；Profile 只是候选方向，不是无条件可写回的绝对结果。
 - 最终 Matrix 默认限制在 `[-3,3]`，并输出 PASS/WARNING/FAIL 工程检查。
 - Qualcomm `c_tab` 范围在保存前再次校验为 `[-15.99, 15.99]`。
 

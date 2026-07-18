@@ -22,11 +22,11 @@ FONT_MONO = "TuneLabMonoFont"
 FONT_HERO = "TuneLabHeroFont"
 FONT_NAV_SECTION = "TuneLabNavSectionFont"
 
-BODY_SIZE = 12
-SMALL_SIZE = 10
-TITLE_SIZE = 22
-SECTION_SIZE = 13
-ROW_HEIGHT = 30
+BODY_SIZE = 11
+SMALL_SIZE = 9
+TITLE_SIZE = 20
+SECTION_SIZE = 12
+ROW_HEIGHT = 28
 
 # TuneLab intentionally uses one light, native-macOS-inspired visual system on
 # every desktop.  The restrained system colours, generous control metrics and
@@ -131,7 +131,13 @@ def fit_window_to_screen(
     minimum_width: int = 1180,
     minimum_height: int = 760,
 ) -> WindowPlacement:
-    """Open a large centred document window without forcing platform zoom."""
+    """Fit the application to the active screen on first launch.
+
+    The explicit geometry is the reliable cross-platform fallback.  Native
+    zoom is requested as well where Tk exposes it (notably Windows); Aqua Tk
+    may reject that state, in which case the full-screen geometry remains in
+    effect.
+    """
 
     screen_width = int(window.winfo_screenwidth())
     screen_height = int(window.winfo_screenheight())
@@ -140,22 +146,17 @@ def fit_window_to_screen(
         screen_y = int(window.winfo_vrooty())
     except (AttributeError, tk.TclError):
         screen_x = screen_y = 0
-    placement = calculate_window_placement(
-        screen_width,
-        screen_height,
-        desired_width=desired_width,
-        desired_height=desired_height,
-        screen_x=screen_x,
-        screen_y=screen_y,
-        horizontal_margin=48,
-        vertical_margin=80,
-    )
+    placement = WindowPlacement(screen_width, screen_height, screen_x, screen_y)
     # Never let a fixed minimum force the window back outside a small display.
     window.minsize(
         min(minimum_width, placement.width),
         min(minimum_height, placement.height),
     )
     window.geometry(placement.geometry)
+    try:
+        window.state("zoomed")
+    except (AttributeError, tk.TclError):
+        pass
     return placement
 
 
@@ -244,7 +245,7 @@ def configure_typography(
     install(FONT_CARD_TITLE, size=section_size, weight="bold", family=families.display)
     install(FONT_KPI, size=base_size + 3, weight="bold", family=families.display)
     install(FONT_TITLE, size=title_size, weight="bold", family=families.display)
-    install(FONT_HERO, size=title_size + 7, weight="bold", family=families.display)
+    install(FONT_HERO, size=title_size + 5, weight="bold", family=families.display)
     install(FONT_PLOT_TITLE, size=section_size, weight="bold", family=families.display)
     install(FONT_NAV_SECTION, size=max(9, small_size - 1), weight="bold")
     install(FONT_MONO, size=max(small_size, base_size - 1), family=families.mono)
@@ -355,7 +356,7 @@ def configure_macos_theme(
         "TButton",
         background=CONTROL_SECONDARY_BG,
         foreground=INK,
-        padding=(13, 7),
+        padding=(11, 6),
         borderwidth=0,
         relief="flat",
         focusthickness=1,
@@ -366,13 +367,13 @@ def configure_macos_theme(
         background=[("disabled", CONTROL_SECONDARY_BG), ("pressed", PRESSED_BG), ("active", HOVER_BG)],
         foreground=[("disabled", ACTION_DISABLED), ("pressed", INK), ("active", INK)],
     )
-    selected_style.configure("Quiet.TButton", background=CONTROL_SECONDARY_BG, foreground=INK, padding=(11, 6))
-    selected_style.configure("Icon.TButton", background=CONTROL_SECONDARY_BG, foreground=INK, padding=(8, 6))
+    selected_style.configure("Quiet.TButton", background=CONTROL_SECONDARY_BG, foreground=INK, padding=(9, 5))
+    selected_style.configure("Icon.TButton", background=CONTROL_SECONDARY_BG, foreground=INK, padding=(7, 5))
     selected_style.configure("Link.TButton", background=PANEL_BG, foreground=ACTION_BLUE, padding=(0, 3), font=FONT_BODY_BOLD)
     selected_style.map("Link.TButton", background=[("active", PANEL_BG), ("pressed", PANEL_BG)], foreground=[("active", ACTION_BLUE_HOVER)])
-    selected_style.configure("Nav.TButton", background=SIDEBAR_BG, foreground=INK, anchor="w", padding=(14, 10), borderwidth=0)
+    selected_style.configure("Nav.TButton", background=SIDEBAR_BG, foreground=INK, anchor="w", padding=(12, 8), borderwidth=0)
     selected_style.map("Nav.TButton", background=[("active", HOVER_BG), ("pressed", PRESSED_BG)])
-    selected_style.configure("ActiveNav.TButton", background="#DDE8F6", foreground="#0057B8", anchor="w", padding=(14, 10), borderwidth=0, font=FONT_BODY_BOLD)
+    selected_style.configure("ActiveNav.TButton", background="#DDE8F6", foreground="#0057B8", anchor="w", padding=(12, 8), borderwidth=0, font=FONT_BODY_BOLD)
     selected_style.map("ActiveNav.TButton", background=[("active", "#D5E3F3"), ("pressed", "#CADBF0")], foreground=[("active", "#0057B8")])
 
     for name in ("TEntry", "TCombobox"):
@@ -382,7 +383,7 @@ def configure_macos_theme(
             background=CONTROL_BG,
             foreground=INK,
             insertcolor=INK,
-            padding=(8, 7),
+            padding=(7, 5),
             borderwidth=1,
             relief="flat",
             bordercolor=SEPARATOR,
@@ -404,7 +405,7 @@ def configure_macos_theme(
     selected_style.map("TRadiobutton", background=[("active", PANEL_BG)], foreground=[("disabled", ACTION_DISABLED)])
 
     selected_style.configure("TNotebook", background=WINDOW_BG, borderwidth=0, tabmargins=(0, 0, 0, 8))
-    selected_style.configure("TNotebook.Tab", background=CONTROL_SECONDARY_BG, foreground=MUTED, padding=(15, 8), borderwidth=0)
+    selected_style.configure("TNotebook.Tab", background=CONTROL_SECONDARY_BG, foreground=MUTED, padding=(12, 6), borderwidth=0)
     selected_style.map(
         "TNotebook.Tab",
         background=[("selected", PANEL_BG), ("active", HOVER_BG)],
@@ -425,7 +426,7 @@ def configure_macos_theme(
         "Treeview.Heading",
         background=TABLE_HEADING_BG,
         foreground=MUTED,
-        padding=(8, 7),
+        padding=(7, 6),
         relief="flat",
         borderwidth=0,
         font=FONT_SMALL_BOLD,
@@ -499,7 +500,7 @@ def configure_action_styles(style: ttk.Style) -> ttk.Style:
         "Primary.TButton",
         background=ACTION_BLUE,
         foreground="white",
-        padding=(14, 7),
+        padding=(12, 6),
         borderwidth=0,
         font=FONT_BODY_BOLD,
         relief="flat",

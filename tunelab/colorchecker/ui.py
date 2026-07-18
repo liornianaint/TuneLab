@@ -35,12 +35,12 @@ class PreviewPane(ttk.Frame):
         self._photo: Optional[ImageTk.PhotoImage] = None
         self._polygons: tuple[PatchPolygon, ...] = ()
         self._redraw_after: Optional[str] = None
-        header = ttk.Frame(self, padding=(10, 7), style="CheckerCard.TFrame")
+        header = ttk.Frame(self, padding=(8, 6), style="CheckerCard.TFrame")
         header.pack(fill="x")
         self.title_var = tk.StringVar(value=title)
         self.meta_var = tk.StringVar(value="尚未加载")
         ttk.Label(header, textvariable=self.title_var, style="CheckerCardTitle.TLabel").pack(anchor="w")
-        ttk.Label(header, textvariable=self.meta_var, style="CheckerMutedCard.TLabel").pack(anchor="w", pady=(2, 0))
+        ttk.Label(header, textvariable=self.meta_var, style="CheckerMutedCard.TLabel").pack(anchor="w", pady=(1, 0))
         self.canvas = tk.Canvas(self, background=CANVAS_BG, highlightthickness=0, height=420)
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", self._schedule_redraw)
