@@ -1,12 +1,11 @@
-"""ColorChecker detection, calibrated restoration and full-image preview.
+"""ColorChecker input adapter, calibrated profiles and full-image preview.
 
-The default workflow applies hardware-validated 3000K/4000K Delta CCM anchors
-and previews them through a response model fitted from the supplied real
-Before/After captures.  The optional image-fit workflow treats the comparison
-image as a chromatic target rather than an exposure target: each reference
-patch is matched to measured luminance in linear sRGB before the protected
-optimizer sees it.  Both paths prevent JPEG exposure and tone-map differences
-from being mistaken for arbitrary white-balance shifts.
+The unified CCM page defaults to protected image fitting: every reference patch
+is matched to measured luminance in linear sRGB before the common optimizer
+sees it.  Hardware-validated 3000K/4000K Delta CCM anchors remain available as
+an advanced candidate direction, with a fitted real-shot response for preview.
+Both paths prevent JPEG exposure and tone-map differences from being mistaken
+for arbitrary white-balance shifts.
 """
 
 from __future__ import annotations
@@ -43,6 +42,37 @@ Point = tuple[float, float]
 PatchPolygon = tuple[Point, Point, Point, Point]
 MAX_DETECTION_SIDE = 1600
 LUMA_WEIGHTS = np.asarray((0.2126729, 0.7151522, 0.0721750), dtype=np.float64)
+
+# Common 8-bit sRGB reference values for ColorChecker Classic 24, ordered
+# left-to-right and top-to-bottom.  This display reference is intentionally
+# independent of capture CCT: it supplies target patch colours but never
+# guesses which XML Region should be selected.
+COLORCHECKER_CLASSIC_SRGB_8BIT: tuple[tuple[int, int, int], ...] = (
+    (115, 82, 68),
+    (194, 150, 130),
+    (98, 122, 157),
+    (87, 108, 67),
+    (133, 128, 177),
+    (103, 189, 170),
+    (214, 126, 44),
+    (80, 91, 166),
+    (193, 90, 99),
+    (94, 60, 108),
+    (157, 188, 64),
+    (224, 163, 46),
+    (56, 61, 150),
+    (70, 148, 73),
+    (175, 54, 60),
+    (231, 199, 31),
+    (187, 86, 149),
+    (8, 133, 161),
+    (243, 243, 242),
+    (200, 200, 200),
+    (160, 160, 160),
+    (122, 122, 121),
+    (85, 85, 85),
+    (52, 52, 52),
+)
 
 
 class ColorCheckerError(ValueError):
@@ -146,6 +176,74 @@ class RestorationPlan:
     neutral_scale: float
     neutral_spread: float
     warnings: tuple[str, ...] = ()
+
+
+def standard_colorchecker_reference() -> ColorCheckerDetection:
+    """Create the built-in ColorChecker Classic 24 sRGB target.
+
+    Geometry and patch measurements are generated together, so this reference
+    needs no file on disk and does not depend on OpenCV detection.  Its neutral
+    filename and explicit method label also ensure it cannot silently set CCT.
+    """
+
+    width, height = 960, 640
+    rgb = np.full((height, width, 3), 214, dtype=np.uint8)
+    chart_left, chart_top = 48, 48
+    chart_right, chart_bottom = width - 48, height - 48
+    rgb[chart_top:chart_bottom, chart_left:chart_right] = (24, 25, 31)
+    cell_width = (chart_right - chart_left) / 6.0
+    cell_height = (chart_bottom - chart_top) / 4.0
+    inset_x, inset_y = 18, 18
+    patches = []
+    for index, colour in enumerate(COLORCHECKER_CLASSIC_SRGB_8BIT):
+        row, column = divmod(index, 6)
+        left = int(round(chart_left + column * cell_width + inset_x))
+        right = int(round(chart_left + (column + 1) * cell_width - inset_x))
+        top = int(round(chart_top + row * cell_height + inset_y))
+        bottom = int(round(chart_top + (row + 1) * cell_height - inset_y))
+        rgb[top:bottom, left:right] = colour
+        polygon: PatchPolygon = (
+            (float(left), float(top)),
+            (float(right - 1), float(top)),
+            (float(right - 1), float(bottom - 1)),
+            (float(left), float(bottom - 1)),
+        )
+        patches.append(
+            DetectedPatch(
+                zone=index + 1,
+                name=PATCH_NAMES_ZH[index],
+                polygon=polygon,
+                mean_rgb=tuple(float(value) for value in colour),  # type: ignore[arg-type]
+                std_rgb=(0.0, 0.0, 0.0),
+            )
+        )
+    display = np.ascontiguousarray(rgb)
+    image = ImageData(
+        path=Path("ColorChecker_Classic_24_standard_sRGB.png"),
+        width=width,
+        height=height,
+        bit_depth=8,
+        source_mode="Generated sRGB reference",
+        rgb=display,
+        display_rgb=display,
+        original_dtype="uint8",
+        precision_preserved=True,
+        histogram=histogram_rgb(display),
+    )
+    chart_box: PatchPolygon = (
+        (float(chart_left), float(chart_top)),
+        (float(chart_right - 1), float(chart_top)),
+        (float(chart_right - 1), float(chart_bottom - 1)),
+        (float(chart_left), float(chart_bottom - 1)),
+    )
+    return ColorCheckerDetection(
+        image=image,
+        chart_box=chart_box,
+        patches=tuple(patches),
+        method="内置 ColorChecker Classic 24 标准 sRGB",
+        confidence=1.0,
+        warning="标准目标仅提供色块参考值，不参与拍摄 CCT 推断。",
+    )
 
 
 # These two anchors are the final matrices validated by the supplied 3000K and
@@ -674,7 +772,7 @@ def build_comparison_dataset(
     """Build a 24-patch dataset while excluding JPEG exposure differences."""
 
     if len(measured.patches) != 24 or len(reference.patches) != 24:
-        raise ColorCheckerError("测试图和目标对比图都必须识别到 24 个 ColorChecker 色块。")
+        raise ColorCheckerError("测试图和目标都必须提供 24 个 ColorChecker 色块。")
     patches = []
     for measured_patch, reference_patch in zip(measured.patches, reference.patches):
         target = _luminance_matched_reference(measured_patch.srgb, reference_patch.srgb)
@@ -687,7 +785,7 @@ def build_comparison_dataset(
             )
         )
     warnings = [
-        "目标对比图已在 linear sRGB 中逐色块匹配测试图亮度；CCM 仅拟合色度差异。",
+        "目标色块已在 linear sRGB 中逐色块匹配测试图亮度；CCM 仅拟合色度差异。",
     ]
     for detection in (measured, reference):
         if detection.warning:
@@ -697,7 +795,10 @@ def build_comparison_dataset(
         patches=patches,
         image_name=measured.image.path.name,
         color_space="sRGB",
-        inferred_cct=infer_cct(measured.image.path.name, reference.image.path.name),
+        # Region selection describes the illumination of the test capture.
+        # A custom target may be a standard chart or a stylistic endpoint, so
+        # its filename must never override the test image's CCT.
+        inferred_cct=infer_cct(measured.image.path.name),
         warnings=warnings,
     )
 

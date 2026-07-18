@@ -5,21 +5,20 @@ import unittest
 from pathlib import Path
 
 from tunelab.ccm.color_science import row_sums
-from tunelab.ccm.imatest import parse_imatest_csv
 from tunelab.ccm.models import OptimizationConfig
 from tunelab.ccm.optimizer import optimize_ccm
 from tunelab.ccm.qualcomm_xml import QualcommCCDocument
 from tunelab.ccm.reporting import save_analysis_csv
 
 
-ROOT = Path(__file__).resolve().parents[1]
+from .materials import CC_XML, d65_dataset
 
 
 class OptimizerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.dataset = parse_imatest_csv(ROOT / "source" / "D65_normal_summary.csv")
-        cls.document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
+        cls.dataset = d65_dataset()
+        cls.document = QualcommCCDocument.load(CC_XML)
         cls.region, _ = cls.document.find_region_for_cct(6500)
 
     def test_sample_improves_and_preserves_neutral_axis(self) -> None:

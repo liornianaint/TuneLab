@@ -1056,3 +1056,97 @@ def evaluate_ccm_correction(
         explainability=explainability,
         warnings=warnings,
     )
+
+
+def evaluate_protected_ccm_correction(
+    dataset: ImatestDataset,
+    original_matrix: Matrix3,
+    correction_matrix: Matrix3,
+    *,
+    composition: str = "pre",
+    config: Optional[OptimizationConfig] = None,
+    search_method: str = "protected-calibrated-correction",
+    blend: float = 1.0,
+    prediction_domain: str = "linear",
+    extra_warnings: Iterable[str] = (),
+) -> OptimizationResult:
+    """Evaluate a fixed correction direction with every optimizer safety gate.
+
+    Hardware-validated CCM profiles remain useful as a preferred direction,
+    but they must not bypass the same ΔE/ΔC/Δh, neutral, pass-rate and Matrix
+    protections used by automatic fitting.  The requested endpoint is tested
+    first; if it fails, the correction is deterministically backed off toward
+    identity.  No safe point means the caller must use the normal optimizer or
+    leave the XML unchanged.
+    """
+
+    if composition not in {"pre", "post_transposed"}:
+        raise OptimizationError(f"未知矩阵组合方式: {composition}")
+    base_config = config or OptimizationConfig()
+    resolved_config = _strategy_config(base_config)
+    resolved_config.validate()
+    baseline = _evaluate_candidate(
+        dataset,
+        original_matrix,
+        identity_matrix(),
+        composition,
+        resolved_config,
+        0.0,
+        0.0,
+        enforce_bounds=False,
+        search_method="baseline",
+        prediction_domain=prediction_domain,
+    )
+    rejected: Counter[str] = Counter()
+    fractions = tuple(
+        fraction
+        for fraction in (
+            1.0, 0.95, 0.90, 0.85, 0.80, 0.75, 0.70, 0.65, 0.60, 0.55, 0.50,
+            0.45, 0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10, 0.05,
+        )
+        if blend * fraction >= 0.05 - 1e-12
+    )
+    for fraction in fractions:
+        candidate_correction = matrix_blend(correction_matrix, fraction)
+        candidate = _evaluate_candidate(
+            dataset,
+            original_matrix,
+            candidate_correction,
+            composition,
+            resolved_config,
+            0.0,
+            blend * fraction,
+            enforce_bounds=False,
+            search_method=search_method,
+            prediction_domain=prediction_domain,
+        )
+        failure = _protection_failure(candidate, baseline, resolved_config)
+        if failure:
+            rejected[failure] += 1
+            continue
+        warnings = list(extra_warnings)
+        if fraction < 1.0:
+            warnings.append(
+                f"实拍 Profile 在完整强度下触发保护门限，已自动回退到请求强度的 {fraction:.0%}。"
+            )
+        result = evaluate_ccm_correction(
+            dataset,
+            original_matrix,
+            candidate_correction,
+            composition=composition,
+            config=base_config,
+            search_method=search_method if fraction == 1.0 else f"{search_method}-safety-backoff",
+            blend=blend * fraction,
+            prediction_domain=prediction_domain,
+            extra_warnings=warnings,
+        )
+        return replace(
+            result,
+            rejected_candidates=dict(rejected),
+            explainability=(
+                *result.explainability,
+                f"Profile safety gate：接受比例={fraction:.0%}；此前拒绝={dict(rejected)}。",
+            ),
+        )
+    reasons = ", ".join(f"{name}={count}" for name, count in rejected.most_common())
+    raise OptimizationError(f"实拍 Profile 沿线没有候选通过 Regression Protection：{reasons}")

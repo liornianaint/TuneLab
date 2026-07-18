@@ -11,11 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class TuneLabRegressionTests(unittest.TestCase):
     def test_all_uploaded_csv_and_xml_cases_pass(self) -> None:
-        csv_files, xml_files = discover_golden_inputs([ROOT / "source"])
+        csv_files, xml_files = discover_golden_inputs([ROOT / "sources"])
         self.assertGreaterEqual(len(csv_files), 8)
         self.assertGreaterEqual(len(xml_files), 1)
         self.assertNotIn("gray_summary.csv", {path.name.lower() for path in csv_files})
-        suite = run_golden_suite([ROOT / "source"])
+        suite = run_golden_suite([ROOT / "sources"])
         self.assertEqual(
             suite.status,
             "PASS",

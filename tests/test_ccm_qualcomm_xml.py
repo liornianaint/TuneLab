@@ -8,8 +8,10 @@ from pathlib import Path
 from tunelab.ccm.qualcomm_xml import QualcommCCDocument
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SOURCE_XML = ROOT / "source" / "cc13_ipe_v2.xml"
+from .materials import CC_XML
+
+
+SOURCE_XML = CC_XML
 
 
 class QualcommXMLTests(unittest.TestCase):
@@ -62,8 +64,8 @@ class QualcommXMLTests(unittest.TestCase):
             for row, values in enumerate(region.matrix)
         )
         diff = document.diff_with_matrix(region.index, matrix)
-        self.assertIn("--- cc13_ipe_v2.xml", diff)
-        self.assertIn("+++ cc13_ipe_v2_optimized.xml", diff)
+        self.assertIn(f"--- {SOURCE_XML.name}", diff)
+        self.assertIn(f"+++ {SOURCE_XML.stem}_optimized.xml", diff)
         self.assertEqual(sum(line.startswith("-") and not line.startswith("---") for line in diff.splitlines()), 1)
         self.assertEqual(sum(line.startswith("+") and not line.startswith("+++") for line in diff.splitlines()), 1)
 

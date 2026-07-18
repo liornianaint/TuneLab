@@ -382,7 +382,7 @@ def save_golden_html(destination: Union[str, Path], suite: GoldenSuiteResult) ->
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run TuneLab Golden Dataset regression")
-    parser.add_argument("--source", type=Path, action="append", help="source directory; may be repeated")
+    parser.add_argument("--source", type=Path, action="append", help="input directory; may be repeated")
     parser.add_argument("--json", type=Path, help="Write JSON result")
     parser.add_argument("--html", type=Path, help="Write HTML result")
     return parser
@@ -390,7 +390,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = _parser().parse_args(argv)
-    directories = args.source or [Path("source")]
+    directories = args.source or [Path("sources")]
     suite = run_golden_suite(directories)
     if args.json:
         save_golden_json(args.json, suite)

@@ -7,20 +7,19 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
-from tunelab.ccm.imatest import parse_imatest_csv
 from tunelab.ccm.optimizer import optimize_ccm
 from tunelab.ccm.qualcomm_xml import QualcommCCDocument
 from tunelab.ccm.reporting import save_analysis_html, save_analysis_pdf, save_analysis_xlsx
 
 
-ROOT = Path(__file__).resolve().parents[1]
+from .materials import CC_XML, d65_dataset
 
 
 class ReportTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.dataset = parse_imatest_csv(ROOT / "source" / "D65_normal_summary.csv")
-        cls.document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
+        cls.dataset = d65_dataset()
+        cls.document = QualcommCCDocument.load(CC_XML)
         cls.region, _ = cls.document.find_region_for_cct(6500)
         cls.result = optimize_ccm(cls.dataset, cls.region.matrix)
         cls.diff = cls.document.diff_with_matrix(cls.region.index, cls.result.optimized_matrix)

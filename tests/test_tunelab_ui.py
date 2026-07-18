@@ -3,6 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 import tkinter.font as tkfont
 import unittest
+from pathlib import Path
 from tkinter import ttk
 from types import SimpleNamespace
 from unittest import mock
@@ -21,13 +22,13 @@ from tunelab.app import (
     calculate_lab_bounds,
     lab_plane_hex,
 )
-from tunelab.ui_foundation import calculate_window_placement, fit_window_to_screen
+from tunelab.ui_foundation import ACTION_BLUE, ACTION_BLUE_HOVER, calculate_window_placement, default_sources_directory, fit_window_to_screen, select_font_families
 from tunelab.ui_foundation import FONT_BODY_BOLD
-from tunelab.ccm.imatest import parse_imatest_csv
 from tunelab.ccm.optimizer import optimize_ccm
 from tunelab.ccm.qualcomm_xml import QualcommCCDocument
 
 from .test_ccm_persistence import ROOT
+from .materials import CC_XML, d65_dataset
 
 
 class LabViewTests(unittest.TestCase):
@@ -92,16 +93,16 @@ class WindowPlacementTests(unittest.TestCase):
         self.assertEqual(compact.x * 2 + compact.width, 1024)
         self.assertEqual(compact.y * 2 + compact.height, 640)
 
-    def test_fit_uses_native_maximized_work_area_with_full_screen_fallback(self) -> None:
+    def test_fit_uses_a_centered_native_document_window(self) -> None:
         window = mock.Mock()
         window.winfo_screenwidth.return_value = 1512
         window.winfo_screenheight.return_value = 982
         window.winfo_vrootx.return_value = 0
         window.winfo_vrooty.return_value = 0
         placement = fit_window_to_screen(window)
-        self.assertEqual(placement.geometry, "1512x982+0+0")
-        window.geometry.assert_called_once_with("1512x982+0+0")
-        window.state.assert_called_once_with("zoomed")
+        self.assertEqual(placement.geometry, "1464x902+24+40")
+        window.geometry.assert_called_once_with("1464x902+24+40")
+        window.state.assert_not_called()
 
 
 class DesktopUISmokeTests(unittest.TestCase):
@@ -129,9 +130,13 @@ class DesktopUISmokeTests(unittest.TestCase):
             labels,
             [
                 "打开 CC CSV...",
+                "打开测试 ColorChecker...",
+                "使用标准 ColorChecker 目标",
+                "打开自定义目标对比图...",
                 "打开 Qualcomm CC XML...",
                 "保存 XML...",
                 "导出工程报告...",
+                "导出仿真图...",
                 "退出",
             ],
         )
@@ -151,10 +156,10 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertEqual(str(self.app.region_match_button.cget("style")), "RegionMatch.TButton")
         self.assertEqual(str(self.app.optimize_button.cget("text")), "3  自动优化")
         style = ttk.Style(self.root)
-        self.assertEqual(style.lookup("Primary.TButton", "background"), "#2563EB")
+        self.assertEqual(style.lookup("Primary.TButton", "background"), ACTION_BLUE)
         self.assertEqual(
             style.lookup("Primary.TButton", "background", ("active",)),
-            "#1D4ED8",
+            ACTION_BLUE_HOVER,
         )
         self.assertEqual(
             style.lookup("Primary.TButton", "foreground", ("active",)),
@@ -162,7 +167,7 @@ class DesktopUISmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             style.lookup("RegionMatch.TButton", "foreground", ("active",)),
-            "#344054",
+            "#1D1D1F",
         )
         config_labels = [
             self.app.config_menu.entrycget(index, "label")
@@ -171,11 +176,11 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertEqual(config_labels, ["导入配置...", "导出配置..."])
         self.assertEqual(
             [self.app.tools_menu.entrycget(index, "label") for index in range(self.app.tools_menu.index("end") + 1)],
-            ["首页", "Gamma 优化", "ColorChecker 图像校正...", "图像分析器..."],
+            ["首页", "CCM / ColorChecker 校正", "Gamma 优化", "图像分析器..."],
         )
 
     def test_save_xml_defaults_to_confirmed_source_overwrite(self) -> None:
-        document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
+        document = QualcommCCDocument.load(CC_XML)
         self.app.document = document
         self.app.selected_region = document.regions[0]
         self.app.result = SimpleNamespace(matrix_health=SimpleNamespace(status="PASS"))
@@ -201,6 +206,12 @@ class DesktopUISmokeTests(unittest.TestCase):
             self.app.home_help_button.invoke()
         help_dialog.assert_called_once_with(self.root)
 
+    def test_native_file_dialogs_start_in_plural_sources(self) -> None:
+        self.assertEqual(default_sources_directory().resolve(), (ROOT / "sources").resolve())
+        with mock.patch("tunelab.app.filedialog.askopenfilename", return_value="") as chooser:
+            self.app.load_csv()
+        self.assertEqual(Path(chooser.call_args.kwargs["initialdir"]).resolve(), (ROOT / "sources").resolve())
+
     def test_workbench_help_is_module_neutral_and_extensible(self) -> None:
         self.assertIn("当前可用模块以首页和“工具”菜单为准", WORKBENCH_HELP_TEXT)
         self.assertIn("后续新增模块", WORKBENCH_HELP_TEXT)
@@ -208,7 +219,7 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertNotIn("CSV 需要 R/G/B-meas", WORKBENCH_HELP_TEXT)
 
     def test_selected_region_is_always_visible(self) -> None:
-        document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
+        document = QualcommCCDocument.load(CC_XML)
         self.app.document = document
         self.app._select_region(0)
         self.assertIn("当前 Region：#0", self.app.active_region_var.get())
@@ -216,6 +227,7 @@ class DesktopUISmokeTests(unittest.TestCase):
     def test_comparison_tab_contains_plots_and_complete_scrollable_patch_table(self) -> None:
         tabs = [self.app.notebook.tab(tab_id, "text").strip() for tab_id in self.app.notebook.tabs()]
         self.assertEqual(tabs[0], "色差对比")
+        self.assertEqual(tabs[1], "图像对比")
         self.assertNotIn("色块明细", tabs)
         self.assertEqual(int(str(self.app.patch_table_panel.cget("width"))), 460)
         self.assertEqual(self.root.title(), APP_TITLE)
@@ -276,12 +288,14 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertEqual(style.lookup("TNotebook.Tab", "font"), FONT_BODY)
         self.assertEqual(style.lookup("ActiveNav.TButton", "font"), FONT_BODY_BOLD)
         body_family = tkfont.Font(root=self.root, name=FONT_BODY, exists=True).actual("family")
-        for font_name in (FONT_MONO, "TkDefaultFont", "TkHeadingFont", "TkFixedFont", "TkMenuFont"):
+        for font_name in ("TkDefaultFont", "TkHeadingFont", "TkMenuFont"):
             with self.subTest(font_name=font_name):
                 self.assertEqual(
                     body_family,
                     tkfont.Font(root=self.root, name=font_name, exists=True).actual("family"),
                 )
+        mono_family = tkfont.Font(root=self.root, name=FONT_MONO, exists=True).actual("family")
+        self.assertEqual(mono_family, tkfont.Font(root=self.root, name="TkFixedFont", exists=True).actual("family"))
         before_items = self.app.before_plot.canvas.find_withtag("plot-background")
         after_items = self.app.after_plot.canvas.find_withtag("plot-background")
         self.assertTrue(before_items)
@@ -290,9 +304,21 @@ class DesktopUISmokeTests(unittest.TestCase):
         after_colours = [self.app.after_plot.canvas.itemcget(item, "fill") for item in after_items]
         self.assertEqual(before_colours, after_colours)
 
+    def test_windows_font_stack_keeps_the_same_ui_hierarchy(self) -> None:
+        available = (
+            "Segoe UI Variable Text",
+            "Segoe UI Variable Display",
+            "Cascadia Mono",
+        )
+        with mock.patch("tunelab.ui_foundation.tkfont.families", return_value=available):
+            families = select_font_families(self.root, system="Windows")
+        self.assertEqual(families.body, "Segoe UI Variable Text")
+        self.assertEqual(families.display, "Segoe UI Variable Display")
+        self.assertEqual(families.mono, "Cascadia Mono")
+
     def test_plot_and_table_patch_selection_are_bidirectionally_linked(self) -> None:
-        dataset = parse_imatest_csv(ROOT / "source" / "D65_normal_summary.csv")
-        document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
+        dataset = d65_dataset()
+        document = QualcommCCDocument.load(CC_XML)
         region, _mode = document.find_region_for_cct(6500)
         self.app.dataset = dataset
         self.app.document = document
@@ -312,8 +338,8 @@ class DesktopUISmokeTests(unittest.TestCase):
                 self.assertLessEqual(patch_box[3], top + side + 2)
 
     def test_show_motion_hides_only_motion_artists_without_resetting_view(self) -> None:
-        dataset = parse_imatest_csv(ROOT / "source" / "D65_normal_summary.csv")
-        document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
+        dataset = d65_dataset()
+        document = QualcommCCDocument.load(CC_XML)
         region, _mode = document.find_region_for_cct(6500)
         self.app.dataset = dataset
         self.app.document = document
@@ -375,8 +401,8 @@ class DesktopUISmokeTests(unittest.TestCase):
                 self.assertLessEqual(patch_box[3], top + side + 2)
 
     def test_patch_table_sorting_tooltip_and_embedded_gamma_switch(self) -> None:
-        dataset = parse_imatest_csv(ROOT / "source" / "D65_normal_summary.csv")
-        document = QualcommCCDocument.load(ROOT / "source" / "cc13_ipe_v2.xml")
+        dataset = d65_dataset()
+        document = QualcommCCDocument.load(CC_XML)
         region, _mode = document.find_region_for_cct(6500)
         self.app.dataset = dataset
         self.app.document = document
@@ -431,17 +457,17 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.root.update_idletasks()
         self.assertFalse(self.app.home_view.winfo_manager())
         self.assertTrue(self.app.cc_view.winfo_manager())
-        self.assertLessEqual(self.app.controls_panel.winfo_reqwidth(), 992)
-        self.assertLessEqual(self.app.controls_panel.winfo_reqheight(), 50)
-        self.assertLessEqual(self.app.parameters_panel.winfo_reqwidth(), 992)
-        self.assertLessEqual(self.app.parameters_panel.winfo_reqheight(), 82)
+        self.assertLessEqual(self.app.controls_panel.winfo_reqwidth(), 1140)
+        self.assertLessEqual(self.app.controls_panel.winfo_reqheight(), 130)
+        self.assertLessEqual(self.app.parameters_panel.winfo_reqwidth(), 1020)
+        self.assertLessEqual(self.app.parameters_panel.winfo_reqheight(), 105)
         gamma = self.app.open_gamma_optimizer()
         self.root.update_idletasks()
         self.assertTrue(gamma.outer.winfo_manager())
-        self.assertLessEqual(gamma.toolbar_panel.winfo_reqwidth(), 992)
-        self.assertLessEqual(gamma.toolbar_panel.winfo_reqheight(), 50)
-        self.assertLessEqual(gamma.settings_panel.winfo_reqwidth(), 992)
-        self.assertLessEqual(gamma.settings_panel.winfo_reqheight(), 82)
+        self.assertLessEqual(gamma.toolbar_panel.winfo_reqwidth(), 1140)
+        self.assertLessEqual(gamma.toolbar_panel.winfo_reqheight(), 65)
+        self.assertLessEqual(gamma.settings_panel.winfo_reqwidth(), 1100)
+        self.assertLessEqual(gamma.settings_panel.winfo_reqheight(), 105)
         self.assertGreaterEqual(gamma.pair_tree.winfo_reqheight(), 250)
         style = ttk.Style(self.root)
         self.assertEqual(style.lookup("GammaTitle.TLabel", "font"), FONT_TITLE)
@@ -449,6 +475,16 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertFalse(any(isinstance(child, tk.Toplevel) for child in self.root.winfo_children()))
         self.app.show_home_workspace()
         self.assertTrue(self.app.home_view.winfo_manager())
+
+    def test_former_colorchecker_route_reuses_the_unified_ccm_workspace(self) -> None:
+        workspace = self.app.open_colorchecker_optimizer()
+        self.root.update_idletasks()
+        self.assertIs(workspace, self.app)
+        self.assertTrue(self.app.cc_view.winfo_manager())
+        self.assertEqual(self.app.dataset_source, "image")
+        self.assertEqual(self.app.notebook.select(), str(self.app.image_tab))
+        self.assertTrue(self.app.reference_is_standard)
+        self.assertFalse(any(isinstance(child, tk.Toplevel) for child in self.root.winfo_children()))
 
     def test_about_menu_uses_one_tunelab_owned_dialog_on_all_pages(self) -> None:
         self.app.help_menu.invoke("end")
@@ -468,9 +504,11 @@ class DesktopUISmokeTests(unittest.TestCase):
 
         visit(dialog)
         self.assertIn("TuneLab", text)
-        self.assertIn("版本 0.2.0", text)
-        self.assertIn("作者联系邮箱：kaiyi.jiang@thundersoft.com", text)
-        self.assertIn("本地运行 · 模块化工作区 · 持续扩展", text)
+        self.assertIn("版本", text)
+        self.assertIn("0.2.0", text)
+        self.assertIn("联系", text)
+        self.assertIn("kaiyi.jiang@thundersoft.com", text)
+        self.assertIn("所有计算均在本地完成", text)
         self.assertNotIn("CC 校正 · Gamma 优化", text)
         self.assertFalse(any("Python Software Foundation" in value for value in text))
 

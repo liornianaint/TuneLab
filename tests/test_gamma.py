@@ -28,7 +28,7 @@ from tunelab.gamma.qualcomm_xml import QualcommGammaDocument
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "source"
+SOURCE = ROOT / "sources"
 
 
 class GrayStepchartParserTests(unittest.TestCase):
@@ -237,7 +237,7 @@ class CapturedGammaContinuityRegressionTests(unittest.TestCase):
     def _captured_dataset() -> GrayDataset:
         # The July 13 capture had one 12-stage run plus two isolated dark pairs.
         # Keep the measured pixel sequence here so this failure cannot regress
-        # even when local source/ analysis files are unavailable.
+        # even when local sources/ analysis files are unavailable.
         pixels = (
             242.3, 227.5, 212.0, 198.7, 183.6, 169.4, 161.1, 149.1,
             136.4, 124.9, 116.7, 106.1, 96.3, 89.7, 86.3, 83.6,
@@ -669,7 +669,7 @@ class GammaDesktopSmokeTests(unittest.TestCase):
         style = ttk.Style(self.root)
         self.assertEqual(
             style.lookup("Primary.TButton", "background", ("active",)),
-            "#1D4ED8",
+            "#0A84FF",
         )
         self.assertEqual(
             style.lookup("Primary.TButton", "foreground", ("active",)),

@@ -15,14 +15,27 @@ from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
 
 from ..branding import application_icon_path, show_about_dialog, show_workbench_help
 from ..ui_foundation import (
+    ACTION_BLUE,
+    DANGER,
     FONT_BODY,
     FONT_BODY_BOLD,
     FONT_CARD_TITLE,
     FONT_MONO,
+    FONT_NAV_SECTION,
     FONT_SMALL,
     FONT_TITLE,
-    configure_action_styles,
-    configure_typography,
+    INFO_BG,
+    INK,
+    MUTED,
+    PANEL_BG,
+    SEPARATOR,
+    SUBTLE_SEPARATOR,
+    SUCCESS,
+    TERTIARY,
+    WARNING,
+    WINDOW_BG,
+    configure_macos_theme,
+    default_sources_directory,
     fit_window_to_screen,
 )
 from .browser import THUMBNAIL_PREFETCH_ROWS, ImageFolderError, discover_images, load_thumbnail, selected_paths_in_folder_order
@@ -47,17 +60,15 @@ except ImportError as exc:  # Keep the main TuneLab app importable without image
     Image = ImageTk = None  # type: ignore[assignment]
 
 
-WINDOW_TITLE = "TuneLab - 图像分析器"
-BG = "#F3F5F8"
-PANEL = "#FFFFFF"
-INK = "#172033"
-MUTED = "#667085"
-BLUE = "#2563EB"
-GREEN = "#0F9D75"
-AMBER = "#B54708"
-RED = "#D92D20"
-BORDER = "#DDE3EC"
-CANVAS_BG = "#111827"
+WINDOW_TITLE = "TuneLab · 图像分析器"
+BG = WINDOW_BG
+PANEL = PANEL_BG
+BLUE = ACTION_BLUE
+GREEN = SUCCESS
+AMBER = WARNING
+RED = DANGER
+BORDER = SEPARATOR
+CANVAS_BG = "#1C1C1E"
 IMAGE_ROLES = ("before", "after", "compare3", "compare4")
 COMPARISON_ROLES = IMAGE_ROLES[1:]
 THUMBNAIL_CACHE_ITEMS = 128
@@ -112,13 +123,13 @@ class ImageCanvas(ttk.Frame):
         self.pan_x = 0.0
         self.pan_y = 0.0
         self.roi: Optional[ROI] = None
-        self.roi_colour = "#22C55E"
+        self.roi_colour = "#30D158"
         self.sample_point: Optional[Tuple[int, int]] = None
         self._selection_image_start: Optional[Tuple[float, float]] = None
         self._selection_canvas_start: Optional[Tuple[float, float]] = None
         self._pan_start: Optional[Tuple[float, float, float, float]] = None
 
-        header = ttk.Frame(self, padding=(9, 5), style="InspectorCard.TFrame")
+        header = ttk.Frame(self, padding=(11, 8), style="InspectorSurface.TFrame")
         header.grid(row=0, column=0, columnspan=2, sticky="ew")
         header.columnconfigure(0, weight=1)
         self.title_var = tk.StringVar(value=_role_label(role))
@@ -189,7 +200,7 @@ class ImageCanvas(ttk.Frame):
         self.horizontal.set(0.0, 1.0)
         self.vertical.set(0.0, 1.0)
 
-    def set_roi(self, roi: Optional[ROI], *, colour: str = "#22C55E") -> None:
+    def set_roi(self, roi: Optional[ROI], *, colour: str = "#30D158") -> None:
         self.roi = roi
         self.roi_colour = colour
         self._draw_overlays()
@@ -337,8 +348,8 @@ class ImageCanvas(ttk.Frame):
         if self.sample_point is not None:
             x, y = self.image_to_canvas(self.sample_point[0] + 0.5, self.sample_point[1] + 0.5)
             size = 9
-            self.canvas.create_line(x - size, y, x + size, y, fill="#FDE047", width=2, tags=("analysis-overlay",))
-            self.canvas.create_line(x, y - size, x, y + size, fill="#FDE047", width=2, tags=("analysis-overlay",))
+            self.canvas.create_line(x - size, y, x + size, y, fill="#FFD60A", width=2, tags=("analysis-overlay",))
+            self.canvas.create_line(x, y - size, x, y + size, fill="#FFD60A", width=2, tags=("analysis-overlay",))
 
     def _clamp_pan(self) -> None:
         if self.image_data is None:
@@ -454,7 +465,7 @@ class ImageCanvas(ttk.Frame):
             start_y,
             event.x,
             event.y,
-            outline="#60A5FA",
+            outline="#0A84FF",
             width=2,
             dash=(5, 3),
             tags=("selection-preview",),
@@ -551,7 +562,7 @@ class HistogramCanvas(ttk.Frame):
         maximum = float(np.max(values))
         if maximum <= 0:
             return
-        for channel, colour in enumerate(("#EF4444", "#16A34A", "#2563EB")):
+        for channel, colour in enumerate(("#FF453A", "#30D158", "#0A84FF")):
             points = []
             for index in range(256):
                 x = left + index / 255.0 * (right - left)
@@ -638,24 +649,32 @@ class ImageInspectorWorkspace:
         self._poll_after_id = self.root.after(50, self._poll_background)
 
     def _configure_styles(self) -> None:
-        style = configure_typography(self.root)
+        style = configure_macos_theme(self.root)
         style.configure("InspectorRoot.TFrame", background=BG)
-        style.configure("InspectorCard.TFrame", background=PANEL)
+        style.configure(
+            "InspectorCard.TFrame",
+            background=PANEL,
+            relief="solid",
+            borderwidth=1,
+            bordercolor=SUBTLE_SEPARATOR,
+            lightcolor=SUBTLE_SEPARATOR,
+            darkcolor=SUBTLE_SEPARATOR,
+        )
+        style.configure("InspectorSurface.TFrame", background=PANEL)
         style.configure("InspectorCard.TLabel", background=PANEL, foreground=INK, font=FONT_BODY)
         style.configure("InspectorMutedCard.TLabel", background=PANEL, foreground=MUTED, font=FONT_SMALL)
         style.configure("InspectorCardTitle.TLabel", background=PANEL, foreground=INK, font=FONT_CARD_TITLE)
         style.configure("InspectorTitle.TLabel", background=BG, foreground=INK, font=FONT_TITLE)
         style.configure("InspectorSubtitle.TLabel", background=BG, foreground=MUTED, font=FONT_BODY)
-        style.configure("InspectorStatus.TLabel", background="#F8FAFC", foreground=MUTED, padding=(9, 6), font=FONT_SMALL)
+        style.configure("InspectorEyebrow.TLabel", background=BG, foreground=TERTIARY, font=FONT_NAV_SECTION)
+        style.configure("InspectorStatus.TLabel", background=INFO_BG, foreground=MUTED, padding=(12, 8), font=FONT_SMALL)
         style.configure("InspectorMatchHigh.TLabel", background=PANEL, foreground=GREEN, font=FONT_BODY_BOLD)
         style.configure("InspectorMatchMedium.TLabel", background=PANEL, foreground=AMBER, font=FONT_BODY_BOLD)
         style.configure("InspectorMatchLow.TLabel", background=PANEL, foreground=RED, font=FONT_BODY_BOLD)
         style.configure("ImageBrowser.Treeview", rowheight=88, font=FONT_SMALL)
         style.configure("ImageBrowser.Treeview.Heading", font=FONT_SMALL)
-        style.configure("InspectorComparison.Treeview", rowheight=25, font=FONT_BODY)
+        style.configure("InspectorComparison.Treeview", rowheight=30, font=FONT_BODY)
         style.configure("InspectorComparison.Treeview.Heading", font=FONT_BODY_BOLD)
-        style.configure("TButton", font=FONT_BODY)
-        configure_action_styles(style)
 
     def _build_menu(self) -> None:
         menu = tk.Menu(self.root)
@@ -705,11 +724,9 @@ class ImageInspectorWorkspace:
         if self.on_home is not None:
             tools_menu.add_command(label="首页", command=self.on_home)
         if self.on_close is not None:
-            tools_menu.add_command(label="CC 校正", command=self.on_close)
+            tools_menu.add_command(label="CCM / ColorChecker 校正", command=self.on_close)
         if self.on_gamma is not None:
             tools_menu.add_command(label="Gamma 优化", command=self.on_gamma)
-        if self.on_colorchecker is not None:
-            tools_menu.add_command(label="ColorChecker 图像校正", command=self.on_colorchecker)
         if tools_menu.index("end") is not None:
             menu.add_cascade(label="工具", menu=tools_menu)
 
@@ -722,21 +739,26 @@ class ImageInspectorWorkspace:
         self.root.configure(menu=menu)
 
     def _build_ui(self) -> None:
-        self.outer = ttk.Frame(self.root, padding=(14, 10), style="InspectorRoot.TFrame")
+        self.outer = ttk.Frame(self.root, padding=(24, 18), style="InspectorRoot.TFrame")
         self.outer.pack(fill="both", expand=True)
         header = ttk.Frame(self.outer, style="InspectorRoot.TFrame")
-        header.pack(fill="x", pady=(0, 6))
-        ttk.Label(header, text="图像分析器", style="InspectorTitle.TLabel").pack(side="left")
+        header.pack(fill="x", pady=(0, 16))
+        heading = ttk.Frame(header, style="InspectorRoot.TFrame")
+        heading.pack(side="left", fill="x", expand=True)
+        ttk.Label(heading, text="图像工作区", style="InspectorEyebrow.TLabel").pack(anchor="w")
+        ttk.Label(heading, text="图像分析器", style="InspectorTitle.TLabel").pack(anchor="w", pady=(3, 0))
         ttk.Label(
-            header,
-            text="普通 JPG / PNG / BMP / TIFF · 文件夹预览、1–4 图 ROI 与最终输出对比",
+            heading,
+            text="文件夹预览 · 1–4 图并排检查 · 像素、ROI、直方图与匹配置信度",
             style="InspectorSubtitle.TLabel",
-        ).pack(side="left", padx=(12, 0), pady=(6, 0))
+        ).pack(anchor="w", pady=(4, 0))
+        if self.on_home is not None:
+            ttk.Button(header, text="返回首页", command=self.on_home, style="Quiet.TButton").pack(side="right", anchor="n", pady=(7, 0))
 
-        toolbar = ttk.Frame(self.outer, padding=(9, 7), style="InspectorCard.TFrame")
+        toolbar = ttk.Frame(self.outer, padding=(14, 11), style="InspectorCard.TFrame")
         self.toolbar_panel = toolbar
-        toolbar.pack(fill="x", pady=(0, 6))
-        ttk.Button(toolbar, text="打开文件夹", command=self.open_folder).grid(row=0, column=0, padx=(0, 6))
+        toolbar.pack(fill="x", pady=(0, 8))
+        ttk.Button(toolbar, text="打开文件夹", command=self.open_folder, style="Primary.TButton").grid(row=0, column=0, padx=(0, 6))
         ttk.Button(toolbar, text="显示所选（1–4 张）", command=self.load_selected_images).grid(row=0, column=1, padx=(0, 10))
         ttk.Button(toolbar, text="−", command=self.zoom_out, width=3, style="Quiet.TButton").grid(row=0, column=2, padx=(0, 3))
         ttk.Button(toolbar, text="+", command=self.zoom_in, width=3, style="Quiet.TButton").grid(row=0, column=3, padx=(0, 4))
@@ -791,7 +813,7 @@ class ImageInspectorWorkspace:
             style="InspectorMutedCard.TLabel",
             wraplength=235,
         ).pack(fill="x", pady=(3, 6))
-        browser_frame = ttk.Frame(self.folder_panel, style="InspectorCard.TFrame")
+        browser_frame = ttk.Frame(self.folder_panel, style="InspectorSurface.TFrame")
         browser_frame.pack(fill="both", expand=True)
         self.folder_tree = ttk.Treeview(
             browser_frame,
@@ -923,7 +945,7 @@ class ImageInspectorWorkspace:
             style="InspectorMatchLow.TLabel",
         )
         self.comparison_gate_label.pack(side="right", padx=(10, 0))
-        swatches = ttk.Frame(controls, style="InspectorCard.TFrame")
+        swatches = ttk.Frame(controls, style="InspectorSurface.TFrame")
         swatches.pack(side="right", padx=(8, 2))
         ttk.Label(swatches, text="ROI 平均色", style="InspectorMutedCard.TLabel").pack(side="left", padx=(0, 4))
         self.reference_swatch = tk.Canvas(
@@ -1113,7 +1135,7 @@ class ImageInspectorWorkspace:
     def open_folder(self, path: Optional[Union[str, Path]] = None) -> None:
         selected = str(path) if path is not None else filedialog.askdirectory(
             title="打开图片文件夹",
-            initialdir=self.last_directory or None,
+            initialdir=self.last_directory or str(default_sources_directory()),
         )
         if not selected:
             return
@@ -1412,7 +1434,7 @@ class ImageInspectorWorkspace:
             return
         self.rois[role] = named
         view = self.views[role]
-        view.set_roi(named, colour="#22C55E" if role == "before" else "#F59E0B")
+        view.set_roi(named, colour="#30D158" if role == "before" else "#FF9F0A")
         if role == "before":
             for target in COMPARISON_ROLES:
                 self._analysis_tokens[target] += 1
@@ -1509,7 +1531,7 @@ class ImageInspectorWorkspace:
             return
         self.match_results[role] = result
         self.rois[role] = result.after_roi
-        self.views[role].set_roi(result.after_roi, colour="#22C55E" if result.reliable else "#EF4444")
+        self.views[role].set_roi(result.after_roi, colour="#30D158" if result.reliable else "#FF453A")
         self._sync_pair_aliases()
         self._refresh_match_status()
         self._start_analysis(role, result.after_roi)
@@ -1562,7 +1584,7 @@ class ImageInspectorWorkspace:
             assert result is not None
             confirmed = confirm_match(result)
             self.match_results[role] = confirmed
-            self.views[role].set_roi(confirmed.after_roi, colour="#22C55E")
+            self.views[role].set_roi(confirmed.after_roi, colour="#30D158")
         self._sync_pair_aliases()
         self._refresh_match_status()
         self.status_var.set(f"已接受 {len(roles)} 个对比 ROI；结论仍以各 ROI 属于同一物体区域为前提。")
