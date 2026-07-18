@@ -287,22 +287,19 @@ class GammaWorkspace:
 
     def _build_ui(self) -> None:
         self.root.title("TuneLab · Qualcomm Gamma 1.5 LUT 优化")
-        outer = ttk.Frame(self.root, padding=(18, 12), style="GammaRoot.TFrame")
+        outer = ttk.Frame(self.root, padding=(16, 10), style="GammaRoot.TFrame")
         self.outer = outer
         outer.pack(fill="both", expand=True)
         title = ttk.Frame(outer, style="GammaRoot.TFrame")
-        title.pack(fill="x", pady=(0, 10))
-        heading = ttk.Frame(title, style="GammaRoot.TFrame")
-        heading.pack(side="left", fill="x", expand=True)
-        ttk.Label(heading, text="灰阶工作区", style="GammaEyebrow.TLabel").pack(anchor="w")
-        ttk.Label(heading, text="Gamma 优化", style="GammaTitle.TLabel").pack(anchor="w", pady=(2, 0))
+        title.pack(fill="x", pady=(0, 6))
+        ttk.Label(title, text="Gamma 优化", style="GammaTitle.TLabel").pack(side="left")
         ttk.Label(
-            heading,
+            title,
             text="Imatest Stepchart · Qualcomm Gamma LUT，点数与位宽由 XML 自动识别",
             style="GammaMuted.TLabel",
-        ).pack(anchor="w", pady=(2, 0))
+        ).pack(side="left", padx=(14, 0), pady=(5, 0))
         if self.on_home is not None:
-            ttk.Button(title, text="返回首页", command=self.on_home, style="Quiet.TButton").pack(side="right", anchor="n", pady=(4, 0))
+            ttk.Button(title, text="返回首页", command=self.on_home, style="Quiet.TButton").pack(side="right")
 
         toolbar = ttk.Frame(outer, padding=(10, 8), style="GammaCard.TFrame")
         self.toolbar_panel = toolbar

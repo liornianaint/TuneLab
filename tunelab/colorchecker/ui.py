@@ -16,7 +16,7 @@ import numpy as np
 from PIL import Image, ImageTk
 
 from ..image_inspector.types import ImageData
-from ..ui_foundation import FONT_BODY, FONT_SMALL_BOLD, TERTIARY
+from ..ui_foundation import FONT_BODY, FONT_SMALL_BOLD, TERTIARY, elide_canvas_text
 from .engine import PatchPolygon
 
 
@@ -35,16 +35,25 @@ class PreviewPane(ttk.Frame):
         self._photo: Optional[ImageTk.PhotoImage] = None
         self._polygons: tuple[PatchPolygon, ...] = ()
         self._redraw_after: Optional[str] = None
+        self._meta_text = "尚未加载"
         header = ttk.Frame(self, padding=(8, 6), style="CheckerCard.TFrame")
         header.pack(fill="x")
         self.title_var = tk.StringVar(value=title)
         self.meta_var = tk.StringVar(value="尚未加载")
         ttk.Label(header, textvariable=self.title_var, style="CheckerCardTitle.TLabel").pack(anchor="w")
-        ttk.Label(header, textvariable=self.meta_var, style="CheckerMutedCard.TLabel").pack(anchor="w", pady=(1, 0))
+        self.meta_label = ttk.Label(
+            header,
+            textvariable=self.meta_var,
+            style="CheckerMutedCard.TLabel",
+        )
+        self.meta_label.pack(fill="x", anchor="w", pady=(1, 0))
         self.canvas = tk.Canvas(self, background=CANVAS_BG, highlightthickness=0, height=420)
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", self._schedule_redraw)
         self._draw_placeholder()
+
+    def _update_meta(self) -> None:
+        self.meta_var.set(elide_canvas_text(self, self._meta_text, FONT_BODY, 360))
 
     def _draw_placeholder(self) -> None:
         self.canvas.delete("all")
@@ -58,7 +67,8 @@ class PreviewPane(ttk.Frame):
         self._pil = None
         self._photo = None
         self._polygons = ()
-        self.meta_var.set("尚未加载")
+        self._meta_text = "尚未加载"
+        self._update_meta()
         self._draw_placeholder()
 
     def set_image(
@@ -74,7 +84,8 @@ class PreviewPane(ttk.Frame):
         self._pil = Image.fromarray(self._rgb, mode="RGB")
         self._polygons = tuple(polygons)
         suffix = f" · {meta_suffix}" if meta_suffix else ""
-        self.meta_var.set(f"{image.path.name} · {image.width}×{image.height}{suffix}")
+        self._meta_text = f"{image.width}×{image.height}{suffix} · {image.path.name}"
+        self._update_meta()
         self.redraw()
 
     def _schedule_redraw(self, _event: Optional[tk.Event] = None) -> None:

@@ -36,11 +36,18 @@ from ..ui_foundation import (
     WINDOW_BG,
     configure_macos_theme,
     default_sources_directory,
+    elide_canvas_text,
     fit_window_to_screen,
 )
 from .browser import THUMBNAIL_PREFETCH_ROWS, ImageFolderError, discover_images, load_thumbnail, selected_paths_in_folder_order
 from .cache import ImageDataCache
-from .constants import MATCH_SEARCH_RANGES, MIN_ROI_SIDE, MOTION_THROTTLE_MS, RENDER_THROTTLE_MS
+from .constants import (
+    MATCH_SEARCH_RANGES,
+    MIN_ROI_SIDE,
+    MOTION_THROTTLE_MS,
+    RENDER_THROTTLE_MS,
+    SUPPORTED_EXTENSIONS,
+)
 from .settings import ImageInspectorSettings, load_image_inspector_settings, save_image_inspector_settings
 from .types import ComparisonResult, ImageData, MatchResult, PixelMetrics, ROI, ROIStatistics
 
@@ -72,6 +79,10 @@ CANVAS_BG = "#1C1C1E"
 IMAGE_ROLES = ("before", "after", "compare3", "compare4")
 COMPARISON_ROLES = IMAGE_ROLES[1:]
 THUMBNAIL_CACHE_ITEMS = 128
+IMAGE_FILE_TYPES = [
+    ("图片", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.heic *.heif"),
+    ("所有文件", "*.*"),
+]
 
 
 def _role_label(role: str) -> str:
@@ -105,12 +116,16 @@ class ImageCanvas(ttk.Frame):
         pixel_callback: Callable[[str, int, int, bool], None],
         roi_callback: Callable[[str, ROI], None],
         live_enabled: Callable[[], bool],
+        zoom_callback: Optional[
+            Callable[[str, float, float, float, float, float], None]
+        ] = None,
     ) -> None:
         super().__init__(master, style="InspectorImage.TFrame")
         self.role = role
         self.pixel_callback = pixel_callback
         self.roi_callback = roi_callback
         self.live_enabled = live_enabled
+        self.zoom_callback = zoom_callback
         self.image_data: Optional[ImageData] = None
         self._pil_image: Optional[Any] = None
         self._photo: Optional[Any] = None
@@ -129,38 +144,30 @@ class ImageCanvas(ttk.Frame):
         self._selection_canvas_start: Optional[Tuple[float, float]] = None
         self._pan_start: Optional[Tuple[float, float, float, float]] = None
 
-        header = ttk.Frame(self, padding=(9, 6), style="InspectorSurface.TFrame")
-        header.grid(row=0, column=0, columnspan=2, sticky="ew")
-        header.columnconfigure(0, weight=1)
         self.title_var = tk.StringVar(value=_role_label(role))
         self.meta_var = tk.StringVar(value="尚未打开图片")
         self.zoom_var = tk.StringVar(value="缩放 —")
-        ttk.Label(header, textvariable=self.title_var, style="InspectorCardTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(header, textvariable=self.zoom_var, style="InspectorCardTitle.TLabel").grid(row=0, column=1, sticky="e")
-        ttk.Label(header, textvariable=self.meta_var, style="InspectorMutedCard.TLabel").grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(1, 0)
-        )
 
         self.canvas = tk.Canvas(self, background=CANVAS_BG, highlightthickness=0, cursor="crosshair")
-        self.canvas.grid(row=1, column=0, sticky="nsew")
+        self.canvas.grid(row=0, column=0, sticky="nsew")
         self.horizontal = ttk.Scrollbar(
             self,
             orient="horizontal",
             command=self._xview,
             style="Inspector.Horizontal.TScrollbar",
         )
-        self.horizontal.grid(row=2, column=0, sticky="ew")
+        self.horizontal.grid(row=1, column=0, sticky="ew")
         self.vertical = ttk.Scrollbar(
             self,
             orient="vertical",
             command=self._yview,
             style="Inspector.Vertical.TScrollbar",
         )
-        self.vertical.grid(row=1, column=1, sticky="ns")
+        self.vertical.grid(row=0, column=1, sticky="ns")
         self.horizontal.grid_remove()
         self.vertical.grid_remove()
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
 
         self.canvas.bind("<Configure>", self._on_configure)
         self.canvas.bind("<Motion>", self._on_motion)
@@ -176,12 +183,15 @@ class ImageCanvas(ttk.Frame):
             self.canvas.bind(f"<B{button}-Motion>", self._on_pan_drag)
             self.canvas.bind(f"<ButtonRelease-{button}>", self._on_pan_release)
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        if tk.TkVersion >= 9.0:
+            self.canvas.bind("<TouchpadScroll>", self._on_touchpad_scroll)
         self.canvas.bind("<Button-4>", lambda event: self._zoom_at(event.x, event.y, 1.15))
         self.canvas.bind("<Button-5>", lambda event: self._zoom_at(event.x, event.y, 1.0 / 1.15))
         self.canvas.bind("<Destroy>", self._on_destroy)
 
     def set_title(self, title: str) -> None:
         self.title_var.set(title)
+        self._schedule_render()
 
     def set_image(self, image_data: ImageData) -> None:
         self.image_data = image_data
@@ -209,6 +219,7 @@ class ImageCanvas(ttk.Frame):
         self.meta_var.set("尚未打开图片")
         self.zoom_var.set("缩放 —")
         self.canvas.delete("all")
+        self._draw_overlays()
         self.horizontal.set(0.0, 1.0)
         self.vertical.set(0.0, 1.0)
 
@@ -298,7 +309,12 @@ class ImageCanvas(ttk.Frame):
 
     def _render(self) -> None:
         self._render_after_id = None
-        if self.image_data is None or self._pil_image is None or not self.canvas.winfo_exists():
+        if not self.canvas.winfo_exists():
+            return
+        if self.image_data is None or self._pil_image is None:
+            self.canvas.delete("rendered-image")
+            self._draw_overlays()
+            self._update_scrollbars()
             return
         canvas_width = max(1, self.canvas.winfo_width())
         canvas_height = max(1, self.canvas.winfo_height())
@@ -336,6 +352,7 @@ class ImageCanvas(ttk.Frame):
         if not self.canvas.winfo_exists():
             return
         self.canvas.delete("analysis-overlay")
+        self.canvas.delete("viewer-chrome")
         if self.roi is not None:
             left, top = self.image_to_canvas(self.roi.x, self.roi.y)
             right, bottom = self.image_to_canvas(self.roi.right, self.roi.bottom)
@@ -362,6 +379,81 @@ class ImageCanvas(ttk.Frame):
             size = 9
             self.canvas.create_line(x - size, y, x + size, y, fill="#FFD60A", width=2, tags=("analysis-overlay",))
             self.canvas.create_line(x, y - size, x, y + size, fill="#FFD60A", width=2, tags=("analysis-overlay",))
+        self._draw_viewer_chrome()
+
+    def _draw_viewer_chrome(self) -> None:
+        """Paint filename, image metadata and zoom as non-layout overlays."""
+
+        width = max(1, self.canvas.winfo_width())
+        reserved_zoom = 96
+        maximum_text_width = max(40, width - reserved_zoom - 28)
+        title = elide_canvas_text(
+            self.canvas,
+            self.title_var.get(),
+            FONT_CARD_TITLE,
+            maximum_text_width,
+        )
+        meta = elide_canvas_text(
+            self.canvas,
+            self.meta_var.get(),
+            FONT_SMALL,
+            maximum_text_width,
+        )
+        title_item = self.canvas.create_text(
+            12,
+            10,
+            text=title,
+            anchor="nw",
+            fill="white",
+            font=FONT_CARD_TITLE,
+            tags=("viewer-chrome",),
+        )
+        meta_item = self.canvas.create_text(
+            12,
+            30,
+            text=meta,
+            anchor="nw",
+            fill="#D1D1D6",
+            font=FONT_SMALL,
+            tags=("viewer-chrome",),
+        )
+        title_box = self.canvas.bbox(title_item) or (12, 10, 12, 10)
+        meta_box = self.canvas.bbox(meta_item) or (12, 30, 12, 30)
+        info_right = min(width - 8, max(title_box[2], meta_box[2]) + 7)
+        info_background = self.canvas.create_rectangle(
+            7,
+            6,
+            info_right,
+            max(title_box[3], meta_box[3]) + 6,
+            fill="#2C2C2E",
+            outline="#545458",
+            width=1,
+            tags=("viewer-chrome",),
+        )
+        self.canvas.tag_lower(info_background, title_item)
+
+        zoom_item = self.canvas.create_text(
+            width - 12,
+            10,
+            text=self.zoom_var.get(),
+            anchor="ne",
+            fill="white",
+            font=FONT_SMALL,
+            tags=("viewer-chrome",),
+        )
+        zoom_box = self.canvas.bbox(zoom_item) or (width - 12, 10, width - 12, 10)
+        zoom_background = self.canvas.create_rectangle(
+            zoom_box[0] - 7,
+            6,
+            width - 7,
+            zoom_box[3] + 6,
+            fill="#2C2C2E",
+            outline="#545458",
+            width=1,
+            tags=("viewer-chrome",),
+        )
+        self.canvas.tag_lower(zoom_background, zoom_item)
+        self.canvas.tag_raise("viewer-chrome")
 
     def _clamp_pan(self) -> None:
         if self.image_data is None:
@@ -436,11 +528,60 @@ class ImageCanvas(ttk.Frame):
             self._zoom_at(event.x, event.y, factor)
         return "break"
 
+    def _on_touchpad_scroll(self, event: tk.Event) -> str:
+        """Zoom smoothly for Tk 9 trackpad gestures on macOS and Windows."""
+
+        raw_delta = getattr(event, "delta", 0)
+        try:
+            decoded = self.canvas.tk.call("tk::PreciseScrollDeltas", raw_delta)
+            values = tuple(float(value) for value in self.canvas.tk.splitlist(decoded))
+            delta_y = values[1] if len(values) >= 2 else values[0]
+        except (tk.TclError, TypeError, ValueError, IndexError):
+            delta_y = float(raw_delta or 0.0)
+        if abs(delta_y) < 1e-12:
+            return "break"
+        steps = min(4.0, max(0.15, abs(delta_y) / 40.0))
+        factor = 1.15 ** steps if delta_y > 0 else (1.0 / 1.15) ** steps
+        return self._zoom_at(event.x, event.y, factor)
+
     def _zoom_at(self, canvas_x: float, canvas_y: float, factor: float) -> str:
         if self.image_data is None:
             return "break"
         image_x = (canvas_x - self.pan_x) / self.zoom
         image_y = (canvas_y - self.pan_y) / self.zoom
+        normalized_x = min(1.0, max(0.0, image_x / max(1, self.image_data.width)))
+        normalized_y = min(1.0, max(0.0, image_y / max(1, self.image_data.height)))
+        viewport_x = min(1.0, max(0.0, canvas_x / max(1, self.canvas.winfo_width())))
+        viewport_y = min(1.0, max(0.0, canvas_y / max(1, self.canvas.winfo_height())))
+        if self.zoom_callback is not None:
+            self.zoom_callback(
+                self.role,
+                factor,
+                normalized_x,
+                normalized_y,
+                viewport_x,
+                viewport_y,
+            )
+            return "break"
+        self.apply_linked_zoom(factor, normalized_x, normalized_y, viewport_x, viewport_y)
+        return "break"
+
+    def apply_linked_zoom(
+        self,
+        factor: float,
+        normalized_x: float,
+        normalized_y: float,
+        viewport_x: float,
+        viewport_y: float,
+    ) -> None:
+        """Apply one shared zoom gesture using normalized image coordinates."""
+
+        if self.image_data is None:
+            return
+        canvas_x = viewport_x * max(1, self.canvas.winfo_width())
+        canvas_y = viewport_y * max(1, self.canvas.winfo_height())
+        image_x = normalized_x * self.image_data.width
+        image_y = normalized_y * self.image_data.height
         new_zoom = min(32.0, max(0.0001, self.zoom * factor))
         self.pan_x = canvas_x - image_x * new_zoom
         self.pan_y = canvas_y - image_y * new_zoom
@@ -448,7 +589,6 @@ class ImageCanvas(ttk.Frame):
         self._clamp_pan()
         self._update_zoom_label()
         self._schedule_render()
-        return "break"
 
     def _on_motion(self, event: tk.Event) -> None:
         point = self.canvas_to_image(event.x, event.y)
@@ -652,6 +792,7 @@ class ImageInspectorWorkspace:
 
         self._configure_styles()
         self._build_ui()
+        self._install_shortcuts()
         self.root.title(WINDOW_TITLE)
         if self.on_close is None:
             self.window_placement = fit_window_to_screen(self.root, desired_width=1540, desired_height=980)
@@ -713,8 +854,21 @@ class ImageInspectorWorkspace:
     def _build_menu(self) -> None:
         menu = tk.Menu(self.root)
         self.file_menu = tk.Menu(menu, tearoff=False)
-        self.file_menu.add_command(label="打开图片文件夹...", command=self.open_folder)
-        self.file_menu.add_command(label="显示所选图片", command=self.load_selected_images)
+        try:
+            aqua = self.root.tk.call("tk", "windowingsystem") == "aqua"
+        except tk.TclError:
+            aqua = False
+        self.file_menu.add_command(
+            label="打开图片...",
+            command=self.open_images,
+            accelerator="⌘O" if aqua else "Ctrl+O",
+        )
+        self.file_menu.add_command(
+            label="打开图片文件夹...",
+            command=self.open_folder,
+            accelerator="⇧⌘O" if aqua else "Ctrl+Shift+O",
+        )
+        self.file_menu.add_command(label="载入文件夹所选", command=self.load_selected_images)
         self.file_menu.add_separator()
         self.file_menu.add_command(label="导出 CSV...", command=self.export_current)
         self.file_menu.add_separator()
@@ -772,28 +926,46 @@ class ImageInspectorWorkspace:
         menu.add_cascade(label="帮助", menu=self.help_menu)
         self.root.configure(menu=menu)
 
+    def _install_shortcuts(self) -> None:
+        """Install the conventional image-viewer open shortcuts."""
+
+        try:
+            aqua = self.root.tk.call("tk", "windowingsystem") == "aqua"
+        except tk.TclError:
+            aqua = False
+        modifier = "Command" if aqua else "Control"
+
+        def invoke(action: Callable[[], None]) -> Callable[[tk.Event], Optional[str]]:
+            def handler(_event: tk.Event) -> Optional[str]:
+                if not self.outer.winfo_ismapped():
+                    return None
+                action()
+                return "break"
+
+            return handler
+
+        self.root.bind(f"<{modifier}-o>", invoke(self.open_images), add="+")
+        self.root.bind(f"<{modifier}-Shift-O>", invoke(self.open_folder), add="+")
+
     def _build_ui(self) -> None:
-        self.outer = ttk.Frame(self.root, padding=(18, 12), style="InspectorRoot.TFrame")
+        self.outer = ttk.Frame(self.root, padding=(16, 10), style="InspectorRoot.TFrame")
         self.outer.pack(fill="both", expand=True)
         header = ttk.Frame(self.outer, style="InspectorRoot.TFrame")
-        header.pack(fill="x", pady=(0, 10))
-        heading = ttk.Frame(header, style="InspectorRoot.TFrame")
-        heading.pack(side="left", fill="x", expand=True)
-        ttk.Label(heading, text="图像工作区", style="InspectorEyebrow.TLabel").pack(anchor="w")
-        ttk.Label(heading, text="图像分析器", style="InspectorTitle.TLabel").pack(anchor="w", pady=(2, 0))
+        header.pack(fill="x", pady=(0, 6))
+        ttk.Label(header, text="图像分析器", style="InspectorTitle.TLabel").pack(side="left")
         ttk.Label(
-            heading,
+            header,
             text="文件夹预览 · 1–4 图并排检查 · 像素、ROI、直方图与匹配置信度",
             style="InspectorSubtitle.TLabel",
-        ).pack(anchor="w", pady=(2, 0))
+        ).pack(side="left", padx=(14, 0), pady=(5, 0))
         if self.on_home is not None:
-            ttk.Button(header, text="返回首页", command=self.on_home, style="Quiet.TButton").pack(side="right", anchor="n", pady=(4, 0))
+            ttk.Button(header, text="返回首页", command=self.on_home, style="Quiet.TButton").pack(side="right")
 
         toolbar = ttk.Frame(self.outer, padding=(10, 8), style="InspectorCard.TFrame")
         self.toolbar_panel = toolbar
         toolbar.pack(fill="x", pady=(0, 8))
-        ttk.Button(toolbar, text="打开文件夹", command=self.open_folder, style="Primary.TButton").grid(row=0, column=0, padx=(0, 5))
-        ttk.Button(toolbar, text="显示所选（1–4 张）", command=self.load_selected_images).grid(row=0, column=1, padx=(0, 8))
+        ttk.Button(toolbar, text="打开图片…", command=self.open_images, style="Primary.TButton").grid(row=0, column=0, padx=(0, 5))
+        ttk.Button(toolbar, text="打开文件夹…", command=self.open_folder, style="Quiet.TButton").grid(row=0, column=1, padx=(0, 5))
         ttk.Button(toolbar, text="−", command=self.zoom_out, width=3, style="Quiet.TButton").grid(row=0, column=2, padx=(0, 3))
         ttk.Button(toolbar, text="+", command=self.zoom_in, width=3, style="Quiet.TButton").grid(row=0, column=3, padx=(0, 4))
         ttk.Button(toolbar, text="1:1", command=self.one_to_one, style="Quiet.TButton").grid(row=0, column=4, padx=(0, 4))
@@ -882,6 +1054,11 @@ class ImageInspectorWorkspace:
             style="InspectorMutedCard.TLabel",
             wraplength=235,
         ).pack(fill="x", pady=(6, 0))
+        ttk.Button(
+            self.folder_panel,
+            text="载入所选（1–4 张）",
+            command=self.load_selected_images,
+        ).pack(fill="x", pady=(6, 0))
 
         self.image_grid = ttk.Frame(self.viewer_pane, style="InspectorRoot.TFrame")
         self.views: Dict[str, ImageCanvas] = {}
@@ -892,6 +1069,7 @@ class ImageInspectorWorkspace:
                 pixel_callback=self._on_pixel,
                 roi_callback=self._on_roi,
                 live_enabled=self.live_pixel_var.get,
+                zoom_callback=self._zoom_views_from,
             )
         self.before_view = self.views["before"]
         self.after_view = self.views["after"]
@@ -944,7 +1122,7 @@ class ImageInspectorWorkspace:
         status = ttk.Frame(self.outer, style="InspectorRoot.TFrame")
         status.pack(fill="x")
         self.status_var = tk.StringVar(
-            value="请打开图片文件夹并选择 1–4 张图片。左键点击固定像素，拖动框选 ROI；中键/右键或 Shift+左键平移。"
+            value="请直接打开 1–4 张图片，或打开文件夹后载入所选。滚轮联动缩放全部图片；中键/右键或 Shift+左键平移。"
         )
         self.pixel_status_var = tk.StringVar(value="")
         ttk.Label(status, textvariable=self.status_var, style="InspectorStatus.TLabel").pack(side="left", fill="x", expand=True)
@@ -1173,6 +1351,108 @@ class ImageInspectorWorkspace:
             self._thumbnail_requested.add(item_id)
             self._submit("thumbnail", self._folder_token, item_id, load_thumbnail, self._folder_items[item_id])
 
+    def _populate_folder_browser(
+        self,
+        paths: Sequence[Path],
+        *,
+        label: str,
+        selected_paths: Sequence[Path] = (),
+    ) -> bool:
+        """Replace the browser contents while invalidating stale thumbnails."""
+
+        self.folder_paths = list(paths)
+        self.folder_path_var.set(label)
+        self._folder_token += 1
+        for future in tuple(self._thumbnail_futures):
+            future.cancel()
+        self._thumbnail_futures.clear()
+        self._thumbnail_requested.clear()
+        self._visible_thumbnail_items.clear()
+        self._folder_items.clear()
+        self._thumbnail_photos.clear()
+        self._thumbnail_cache.clear()
+        for item in self.folder_tree.get_children():
+            self.folder_tree.delete(item)
+        for index, image_path in enumerate(self.folder_paths):
+            item_id = f"image-{index}"
+            self._folder_items[item_id] = image_path
+            self.folder_tree.insert("", "end", iid=item_id, text=image_path.name, values=("…",))
+        if not self.folder_paths:
+            return False
+
+        wanted = {path.resolve() for path in selected_paths}
+        selected_items = [
+            item_id
+            for item_id, image_path in self._folder_items.items()
+            if image_path.resolve() in wanted
+        ][:4]
+        if not selected_items:
+            selected_items = ["image-0"]
+        self._selection_guard = True
+        self.folder_tree.selection_set(*selected_items)
+        self.folder_tree.focus(selected_items[0])
+        self._selection_guard = False
+        self.folder_selection_var.set(
+            f"共 {len(self.folder_paths)} 张 · 已选 {len(selected_items)} 张 · 第 1 张作为参考图"
+        )
+        self.root.after_idle(self._schedule_visible_thumbnails)
+        return True
+
+    def open_images(
+        self,
+        paths: Optional[Sequence[Union[str, Path]]] = None,
+    ) -> None:
+        """Open one to four images directly, mirroring desktop image viewers."""
+
+        chosen = list(paths) if paths is not None else list(
+            filedialog.askopenfilenames(
+                title="打开 1–4 张图片",
+                initialdir=self.last_directory or str(default_sources_directory()),
+                filetypes=IMAGE_FILE_TYPES,
+            )
+        )
+        if not chosen:
+            return
+        selected_paths = [Path(item).expanduser().resolve() for item in chosen]
+        unsupported = [path.name for path in selected_paths if path.suffix.casefold() not in SUPPORTED_EXTENSIONS]
+        if unsupported:
+            messagebox.showerror(
+                "不支持的图片",
+                "以下文件格式不受支持：\n" + "\n".join(unsupported),
+                parent=self.root,
+            )
+            return
+        if len(selected_paths) > 4:
+            messagebox.showinfo(
+                "最多打开 4 张图片",
+                "一次最多比较 4 张图片，本次将载入前 4 张。",
+                parent=self.root,
+            )
+            selected_paths = selected_paths[:4]
+
+        parents = {path.resolve().parent for path in selected_paths}
+        if len(parents) == 1:
+            parent = next(iter(parents))
+            try:
+                browser_paths = discover_images(parent)
+            except ImageFolderError:
+                browser_paths = selected_paths
+            ordered_paths = selected_paths_in_folder_order(browser_paths, selected_paths)
+            if ordered_paths:
+                selected_paths = ordered_paths
+            self.last_directory = str(parent)
+            label = str(parent)
+        else:
+            browser_paths = selected_paths
+            self.last_directory = str(selected_paths[0].resolve().parent)
+            label = f"直接打开 · 来自 {len(parents)} 个文件夹"
+        self._populate_folder_browser(
+            browser_paths,
+            label=label,
+            selected_paths=selected_paths,
+        )
+        self.load_selected_images(selected_paths)
+
     def open_folder(self, path: Optional[Union[str, Path]] = None) -> None:
         selected = str(path) if path is not None else filedialog.askdirectory(
             title="打开图片文件夹",
@@ -1186,24 +1466,7 @@ class ImageInspectorWorkspace:
             messagebox.showerror("无法打开图片文件夹", str(exc), parent=self.root)
             return
         self.last_directory = str(Path(selected).expanduser())
-        self.folder_paths = paths
-        self.folder_path_var.set(self.last_directory)
-        self._folder_token += 1
-        for future in tuple(self._thumbnail_futures):
-            future.cancel()
-        self._thumbnail_futures.clear()
-        self._thumbnail_requested.clear()
-        self._visible_thumbnail_items.clear()
-        self._folder_items.clear()
-        self._thumbnail_photos.clear()
-        self._thumbnail_cache.clear()
-        for item in self.folder_tree.get_children():
-            self.folder_tree.delete(item)
-        for index, image_path in enumerate(paths):
-            item_id = f"image-{index}"
-            self._folder_items[item_id] = image_path
-            self.folder_tree.insert("", "end", iid=item_id, text=image_path.name, values=("…",))
-        if not paths:
+        if not self._populate_folder_browser(paths, label=self.last_directory):
             for role in IMAGE_ROLES:
                 self._invalidate_role(role, clear_image=True, refresh=False)
             self._set_image_count(1)
@@ -1211,15 +1474,9 @@ class ImageInspectorWorkspace:
             self.folder_selection_var.set("该文件夹没有支持的 JPG、PNG、BMP 或 TIFF 图片")
             self.status_var.set("所选文件夹中没有可预览图片。")
             return
-        first_item = "image-0"
-        self._selection_guard = True
-        self.folder_tree.selection_set(first_item)
-        self.folder_tree.focus(first_item)
-        self._selection_guard = False
         self.folder_selection_var.set(f"共 {len(paths)} 张 · 已选 1 张 · 第 1 张作为参考图")
         self.status_var.set(f"已打开文件夹，共发现 {len(paths)} 张图片。")
         self.load_selected_images()
-        self.root.after_idle(self._schedule_visible_thumbnails)
 
     def _on_folder_selection(self, _event: Optional[tk.Event] = None) -> None:
         if self._selection_guard:
@@ -1928,13 +2185,37 @@ class ImageInspectorWorkspace:
         for role in self.active_roles:
             self.views[role].one_to_one()
 
-    def zoom_in(self) -> None:
+    def _zoom_views_from(
+        self,
+        _source_role: str,
+        factor: float,
+        normalized_x: float,
+        normalized_y: float,
+        viewport_x: float,
+        viewport_y: float,
+    ) -> None:
+        """Apply one wheel/trackpad gesture to every displayed comparison."""
+
         for role in self.active_roles:
-            self.views[role].zoom_by(1.25)
+            self.views[role].apply_linked_zoom(
+                factor,
+                normalized_x,
+                normalized_y,
+                viewport_x,
+                viewport_y,
+            )
+
+    def _zoom_active(self, factor: float) -> None:
+        for role in self.active_roles:
+            if self.views[role].image_data is not None:
+                self.views[role].zoom_by(factor)
+                return
+
+    def zoom_in(self) -> None:
+        self._zoom_active(1.25)
 
     def zoom_out(self) -> None:
-        for role in self.active_roles:
-            self.views[role].zoom_by(1.0 / 1.25)
+        self._zoom_active(1.0 / 1.25)
 
     def _on_neutral_mode_changed(self) -> None:
         self._settings_changed()
@@ -2078,9 +2359,13 @@ class ImageInspectorWorkspace:
             future.cancel()
         self._image_cache.clear()
         self._thumbnail_cache.clear()
-        self._executor.shutdown(wait=False, cancel_futures=True)
-        self._load_executor.shutdown(wait=False, cancel_futures=True)
-        self._thumbnail_executor.shutdown(wait=False, cancel_futures=True)
+        # Future callbacks capture the workspace in order to enqueue results.
+        # Let running workers release those callbacks before Tk widgets and
+        # PhotoImages are destroyed; otherwise Tcl objects can be finalized by
+        # a worker thread during rapid close/reopen or a test-suite teardown.
+        self._executor.shutdown(wait=True, cancel_futures=True)
+        self._load_executor.shutdown(wait=True, cancel_futures=True)
+        self._thumbnail_executor.shutdown(wait=True, cancel_futures=True)
 
     def close(self) -> None:
         if self.on_close is not None:

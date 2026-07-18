@@ -664,6 +664,7 @@ class GammaDesktopSmokeTests(unittest.TestCase):
         )
         self.assertEqual(str(self.app.region_match_button.cget("text")), "自动匹配 Region")
         self.assertEqual(str(self.app.region_match_button.cget("style")), "RegionMatch.TButton")
+        self.assertEqual(int(self.app.toolbar_panel.grid_columnconfigure(5)["weight"]), 1)
         self.assertEqual(str(self.app.optimize_button.cget("text")), "3  自动优化")
         self.assertEqual(str(self.app.optimize_button.cget("style")), "Primary.TButton")
         style = ttk.Style(self.root)

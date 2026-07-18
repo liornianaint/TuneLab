@@ -26,9 +26,9 @@ Qualcomm XML ───────> Trigger Tree ─> Selected CCT Region ─> O
 - `ccm/reporting.py`、`ccm/settings.py`、`ccm/history.py`：CCM 报告、配置与历史记录
 - `ccm/cli.py`：CCM 批处理入口
 - `gamma/`：Gamma 数据模型、Imatest 解析、Qualcomm XML、优化、报告、配置、历史与页面
-- `colorchecker/engine.py`：图片输入适配器，包括 MCC24/几何后备检测、标准/自定义目标取样与统一 dataset 构造
-- `colorchecker/ui.py`：统一页面复用的测试图/目标图预览组件；不拥有独立工作区、优化状态或 XML 写回
-- `image_inspector/`：普通场景 1–4 图浏览、像素/ROI 分析、匹配与 CSV 导出
+- `colorchecker/engine.py`：图片输入适配器，包括 MCC24/几何后备检测、标准/自定义目标取样、统一 dataset 构造与改后整图近似模拟
+- `colorchecker/ui.py`：统一页面复用的原图/改后模拟图/目标图预览组件；不拥有独立工作区、优化状态或 XML 写回
+- `image_inspector/`：普通场景 1–4 图直接打开/文件夹浏览、画布内信息浮层、联动缩放、像素/ROI 分析、匹配与 CSV 导出
 - `regression.py`：跨 CCM/Gamma 的 Golden Dataset 发现、验收和汇总
 
 ## 2. 为什么不直接用 CSV 求一个新绝对 CCM
@@ -53,7 +53,9 @@ M_new = A × M_old               # CC13 行主序/列向量
 
 图片输入与 CSV 输入不再拥有两套页面或两套优化生命周期。MCC24 自动识别测试图的 24 个中心色块；目标默认由引擎生成 ColorChecker Classic 24 标准 8-bit sRGB 色块及确定几何，也可切换为自动识别的自定义目标图。目标色块的 linear-sRGB 亮度逐块匹配到测试图，再构造与 Imatest 完全相同的 measured/ideal dataset，交给同一个 `optimize_ccm()`。内置目标没有 CCT 语义；自定义目标文件名也不参与 Region 推断，CCT 只来自测试图或用户输入。
 
-图片与 CSV 都只调用统一的 ΔE/ΔC/Δh `optimize_ccm()` 路径，并固定使用 `M_new = A × M_old`。ColorChecker 页面只预览测试图与目标图，以便核对 24 色块定位；不执行整图 Ideal–Camera 仿真，也不提供 3000K/4000K 实拍 Profile 求解。
+CSV 固定调用统一的 ΔE/ΔC/Δh `optimize_ccm()` 路径。图片模式在 2800K–4500K 内先以 3000K/4000K 实拍 Profile 的 Delta CCM 作为候选方向，再通过 `evaluate_protected_ccm_correction()` 执行与通用优化一致的 Patch Regression、Neutral、Pass Rate 和 Matrix 门禁；候选可确定性回退强度，完全不适用或无安全点时才调用 `optimize_ccm()`。两条路径都固定使用 `M_new = A × M_old`。
+
+ColorChecker 页签只在图片输入时存在，并显示原图、改后仿真和目标图；CSV 输入只显示色差对比页签。接受实拍 Profile 时，整图预览使用由 3000K/4000K Before/After 样本拟合并按 mired 插值的响应模型；通用优化使用 linear-sRGB Delta CCM 近似。预览从不参与求解或安全门禁。
 
 ## 3. 约束与稳健性
 

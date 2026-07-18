@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 try:
@@ -63,6 +64,8 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         self.assertLessEqual(self.app.toolbar_panel.winfo_reqwidth(), 1160)
         self.assertLessEqual(self.app.toolbar_panel.winfo_reqheight(), 96)
         self.assertTrue(self.app.before_view.canvas.bind("<MouseWheel>"))
+        if tk.TkVersion >= 9.0:
+            self.assertTrue(self.app.before_view.canvas.bind("<TouchpadScroll>"))
         self.assertTrue(self.app.before_view.canvas.bind("<B2-Motion>"))
         self.app.fit_images()
         self.app.one_to_one()
@@ -78,6 +81,7 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
             for index in range(self.app.file_menu.index("end") + 1)
             if self.app.file_menu.type(index) != "separator"
         ]
+        self.assertIn("打开图片...", menu_labels)
         self.assertIn("打开图片文件夹...", menu_labels)
         self.assertNotIn("打开 Before...", menu_labels)
         self.assertNotIn("打开 After...", menu_labels)
@@ -141,6 +145,28 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
             self.app.load_selected_images([paths[0]])
             self.assertIs(self.app.images["before"], cached_reference)
 
+    def test_direct_open_populates_browser_and_loads_up_to_four_images(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            paths = []
+            for index in range(3):
+                path = folder / f"direct{index + 1}.png"
+                Image.new("RGB", (80, 60), (40 + index * 30, 90, 130)).save(path)
+                paths.append(path)
+            with mock.patch(
+                "tunelab.image_inspector.ui.filedialog.askopenfilenames",
+                return_value=tuple(str(path) for path in paths),
+            ):
+                self.app.open_images()
+            self.wait_until(lambda: all(self.app.images[role] is not None for role in self.app.active_roles))
+
+        self.assertEqual(len(self.app.active_roles), 3)
+        self.assertEqual(len(self.app.folder_tree.selection()), 3)
+        self.assertEqual(
+            [self.app.images[role].path.name for role in self.app.active_roles],
+            [path.name for path in paths],
+        )
+
     def test_canvas_coordinate_mapping_is_independent_of_render_resize(self) -> None:
         rgb = np.zeros((50, 100, 3), dtype=np.float32)
         data = ImageData(
@@ -159,11 +185,59 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         self.app.before_view.zoom_by(1.25)
         self.assertAlmostEqual(self.app.before_view.zoom, 1.25)
         self.assertEqual(self.app.before_view.zoom_var.get(), "缩放 125%")
+        self.app.before_view.zoom = 1.0
+        self.app.before_view._on_mousewheel(SimpleNamespace(delta=120, x=50, y=25))
+        self.assertGreater(self.app.before_view.zoom, 1.0)
+        if tk.TkVersion >= 9.0:
+            self.app.before_view.zoom = 1.0
+            self.app.before_view._on_touchpad_scroll(SimpleNamespace(delta=120, x=50, y=25))
+            self.assertGreater(self.app.before_view.zoom, 1.0)
         self.app.before_view.zoom = 2.0
         self.app.before_view.pan_x = 10.0
         self.app.before_view.pan_y = 20.0
         self.assertEqual(self.app.before_view.canvas_to_image(30.0, 40.0), (10.0, 10.0))
         self.assertEqual(self.app.before_view.image_to_canvas(10.0, 10.0), (30.0, 40.0))
+
+    def test_wheel_zoom_is_linked_and_image_info_is_inside_each_canvas(self) -> None:
+        rgb = np.zeros((60, 80, 3), dtype=np.uint8)
+        first = ImageData(
+            path=Path("first.png"),
+            width=80,
+            height=60,
+            bit_depth=8,
+            source_mode="RGB",
+            rgb=rgb,
+            display_rgb=rgb,
+        )
+        second = ImageData(
+            path=Path("second.png"),
+            width=80,
+            height=60,
+            bit_depth=8,
+            source_mode="RGB",
+            rgb=rgb,
+            display_rgb=rgb,
+        )
+        self.app._set_image_count(2)
+        self.app.views["before"].set_image(first)
+        self.app.views["after"].set_image(second)
+        for role in self.app.active_roles:
+            view = self.app.views[role]
+            view.zoom = 1.0
+            view.pan_x = 0.0
+            view.pan_y = 0.0
+        self.app.views["before"]._on_mousewheel(SimpleNamespace(delta=120, x=40, y=30))
+        self.assertAlmostEqual(self.app.views["before"].zoom, 1.15)
+        self.assertAlmostEqual(self.app.views["after"].zoom, 1.15)
+
+        self.root.deiconify()
+        self.root.update_idletasks()
+        for role in self.app.active_roles:
+            view = self.app.views[role]
+            view._render()
+            self.assertEqual(int(view.canvas.grid_info()["row"]), 0)
+            self.assertTrue(view.canvas.find_withtag("viewer-chrome"))
+            self.assertFalse(any(child.winfo_class() == "TLabel" for child in view.winfo_children()))
 
     def test_fit_view_hides_scrollbars_between_multiple_images(self) -> None:
         rgb = np.zeros((50, 100, 3), dtype=np.float32)
