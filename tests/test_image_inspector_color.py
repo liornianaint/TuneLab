@@ -7,7 +7,13 @@ try:
 except ImportError as exc:  # pragma: no cover - optional test environment
     raise unittest.SkipTest(f"NumPy unavailable: {exc}")
 
-from tunelab.image_inspector.color import rgb_to_hsv, rgb_to_lab, relative_luminance, srgb_to_linear
+from tunelab.image_inspector.color import (
+    display_luminance,
+    rgb_to_hsv,
+    rgb_to_lab,
+    relative_luminance,
+    srgb_to_linear,
+)
 
 
 class ImageInspectorColorTests(unittest.TestCase):
@@ -41,6 +47,12 @@ class ImageInspectorColorTests(unittest.TestCase):
         self.assertAlmostEqual(float(relative_luminance((255, 0, 0))), 0.2126, places=6)
         self.assertAlmostEqual(float(relative_luminance((0, 255, 0))), 0.7152, places=6)
         self.assertAlmostEqual(float(relative_luminance((0, 0, 255))), 0.0722, places=6)
+
+    def test_display_luminance_uses_an_intuitive_zero_to_255_scale(self) -> None:
+        self.assertAlmostEqual(float(display_luminance((0, 0, 0))), 0.0, places=8)
+        self.assertAlmostEqual(float(display_luminance((128, 128, 128))), 128.0, places=8)
+        self.assertAlmostEqual(float(display_luminance((255, 255, 255))), 255.0, places=8)
+        self.assertAlmostEqual(float(display_luminance((255, 0, 0))), 255.0 * 0.2126, places=6)
 
     def test_hsv_primaries_and_gray(self) -> None:
         self.assert_triplet_close(rgb_to_hsv((255, 0, 0)), (0.0, 1.0, 1.0), places=5)

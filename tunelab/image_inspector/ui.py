@@ -3182,6 +3182,13 @@ class ImageInspectorWorkspace:
         for index, label in enumerate(("Lab L*", "Lab a*", "Lab b*")):
             add(label, result.before.lab_mean[index], result.after.lab_mean[index], result.delta_lab[index], digits=3)
         add(
+            "绝对亮度（0–255）",
+            result.before.display_luminance,
+            result.after.display_luminance,
+            result.delta_display_luminance,
+            digits=2,
+        )
+        add(
             "相对亮度",
             result.before.relative_luminance,
             result.after.relative_luminance,

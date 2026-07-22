@@ -8,6 +8,7 @@ import numpy as np
 
 
 D65_WHITE = np.array((0.95047, 1.0, 1.08883), dtype=np.float64)
+DISPLAY_LUMINANCE_WEIGHTS = np.array((0.2126, 0.7152, 0.0722), dtype=np.float64)
 SRGB_TO_XYZ = np.array(
     (
         (0.4124564, 0.3575761, 0.1804375),
@@ -70,7 +71,16 @@ def rgb_to_lab(rgb: Any, *, scale: float = 255.0) -> np.ndarray:
 
 def relative_luminance(rgb: Any, *, scale: float = 255.0) -> np.ndarray:
     linear = srgb_to_linear(rgb, scale=scale)
-    return np.matmul(linear, np.array((0.2126, 0.7152, 0.0722), dtype=np.float64))
+    return np.matmul(linear, DISPLAY_LUMINANCE_WEIGHTS)
+
+
+def display_luminance(rgb: Any, *, scale: float = 255.0) -> np.ndarray:
+    """Return gamma-encoded display luminance Y' on an intuitive 0–255 scale."""
+
+    if scale <= 0:
+        raise ValueError("scale 必须大于 0。")
+    values = np.clip(_as_rgb_array(rgb), 0.0, scale)
+    return np.matmul(values, DISPLAY_LUMINANCE_WEIGHTS) * (255.0 / scale)
 
 
 def rgb_to_hsv(rgb: Any, *, scale: float = 255.0) -> np.ndarray:
