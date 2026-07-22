@@ -10,7 +10,7 @@ from typing import Any, Iterable, Optional, Tuple, Union
 
 import numpy as np
 
-from .color import rgb_to_hsv, rgb_to_lab, relative_luminance
+from .color import display_luminance, rgb_to_hsv, rgb_to_lab, relative_luminance
 from .constants import (
     COLOR_CONVERSION_CHUNK_PIXELS,
     DARK_PIXEL_VALUE,
@@ -182,7 +182,6 @@ def histogram_luminance(display_rgb: np.ndarray) -> np.ndarray:
 
     pixels = np.asarray(display_rgb, dtype=np.uint8).reshape(-1, 3)
     histogram = np.zeros(256, dtype=np.int64)
-    weights = np.array((0.2126, 0.7152, 0.0722), dtype=np.float64)
     # Process large camera frames in bounded chunks.  The previous float64
     # matrix multiply briefly allocated several full-frame buffers, which
     # could add hundreds of megabytes for high-resolution images.
@@ -190,7 +189,7 @@ def histogram_luminance(display_rgb: np.ndarray) -> np.ndarray:
         chunk = pixels[start : start + COLOR_CONVERSION_CHUNK_PIXELS]
         # Keep the established floating-point result exactly, but bound the
         # temporary float64 conversion to one small chunk.
-        levels = np.rint(chunk.astype(np.float64) @ weights).astype(np.uint8)
+        levels = np.rint(display_luminance(chunk)).astype(np.uint8)
         histogram += np.bincount(levels, minlength=256).astype(np.int64)
     return histogram
 
@@ -546,6 +545,7 @@ def pixel_metrics(image: ImageData, x: int, y: int) -> PixelMetrics:
         b_over_g=_safe_ratio(rgb[2], rgb[1]),
         hsv=hsv,  # type: ignore[arg-type]
         lab=lab,  # type: ignore[arg-type]
+        display_luminance=float(display_luminance(rgb)),
         relative_luminance=float(relative_luminance(rgb)),
         maximum_channel=maximum_channel,
         minimum_channel=minimum_channel,
@@ -661,6 +661,7 @@ def analyse_roi(image: ImageData, roi: ROI) -> ROIStatistics:
         normalized_rgb=_normalised_rgb(mean),
         hsv_mean=hsv_mean,
         lab_mean=lab_mean,
+        display_luminance=float(display_luminance(mean)),
         relative_luminance=luminance,
         saturation=saturation,
         maximum_channel=maximum_channel,
@@ -704,6 +705,7 @@ def compare_statistics(
     hue_delta = (after.hsv_mean[0] - before.hsv_mean[0] + 180.0) % 360.0 - 180.0
     delta_hsv = (hue_delta, after.hsv_mean[1] - before.hsv_mean[1], after.hsv_mean[2] - before.hsv_mean[2])
     delta_lab = tuple(after.lab_mean[index] - before.lab_mean[index] for index in range(3))
+    delta_display_luminance = after.display_luminance - before.display_luminance
     delta_luminance = after.relative_luminance - before.relative_luminance
     delta_saturation = after.saturation - before.saturation
 
@@ -756,6 +758,7 @@ def compare_statistics(
         delta_b_over_g=_optional_delta(before.b_over_g, after.b_over_g),
         delta_hsv=delta_hsv,
         delta_lab=delta_lab,  # type: ignore[arg-type]
+        delta_display_luminance=delta_display_luminance,
         delta_luminance=delta_luminance,
         delta_saturation=delta_saturation,
         conclusions=tuple(conclusions),

@@ -78,6 +78,7 @@ class PixelMetrics:
     b_over_g: Optional[float]
     hsv: Float3
     lab: Float3
+    display_luminance: float
     relative_luminance: float
     maximum_channel: str
     minimum_channel: str
@@ -101,6 +102,7 @@ class ROIStatistics:
     normalized_rgb: Float3
     hsv_mean: Float3
     lab_mean: Float3
+    display_luminance: float
     relative_luminance: float
     saturation: float
     maximum_channel: str
@@ -140,6 +142,7 @@ class ComparisonResult:
     delta_b_over_g: Optional[float]
     delta_hsv: Float3
     delta_lab: Float3
+    delta_display_luminance: float
     delta_luminance: float
     delta_saturation: float
     conclusions: Tuple[str, ...]

@@ -85,6 +85,7 @@ class ImageInspectorModelTests(unittest.TestCase):
         self.assertAlmostEqual(stats.r_over_g, 0.5)
         self.assertAlmostEqual(stats.b_over_g, 2.0)
         self.assertEqual(stats.stability, "高")
+        self.assertAlmostEqual(stats.display_luminance, 0.2126 * 20 + 0.7152 * 40 + 0.0722 * 80)
         expected_luminance = round(0.2126 * 20 + 0.7152 * 40 + 0.0722 * 80)
         self.assertEqual(int(stats.luminance_histogram[expected_luminance]), 30)
         self.assertEqual(int(np.sum(stats.luminance_histogram)), 30)
@@ -149,6 +150,10 @@ class ImageInspectorModelTests(unittest.TestCase):
         self.assertGreater(darker_red.normalized_rgb[0], bright_neutral.normalized_rgb[0])
         self.assertGreater(darker_red.r_over_g, bright_neutral.r_over_g)
         self.assertGreater(darker_red.lab_mean[1], bright_neutral.lab_mean[1])
+        self.assertAlmostEqual(
+            comparison.delta_display_luminance,
+            darker_red.display_luminance - bright_neutral.display_luminance,
+        )
         self.assertGreater(comparison.delta_normalized_rgb[0], 0.0)
         self.assertTrue(any("R 通道在 RGB 总量中的占比增加" in item for item in comparison.conclusions))
 

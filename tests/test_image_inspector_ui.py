@@ -765,9 +765,13 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
             for item in self.app.compare_tree.get_children()
         }
         self.assertIn("Mean R（0–255）", metrics)
+        self.assertIn("绝对亮度（0–255）", metrics)
         self.assertIn("R 占比 %", metrics)
         self.assertIn("Lab b*", metrics)
         self.assertTrue(any(str(values[4]).startswith(("↑", "↓", "≈")) for values in metrics.values()))
+        absolute_luminance = metrics["绝对亮度（0–255）"]
+        self.assertTrue(0.0 <= float(absolute_luminance[1]) <= 255.0)
+        self.assertTrue(0.0 <= float(absolute_luminance[2]) <= 255.0)
         change_values = [str(values[4]) for values in metrics.values()]
         self.assertTrue(all(value == "—" or value.endswith("%") for value in change_values))
         self.assertFalse(any("上升" in value or "下降" in value or "基本不变" in value for value in change_values))
