@@ -201,8 +201,8 @@ class GammaWorkspace:
         if self.on_close is None:
             self.window_placement = fit_window_to_screen(
                 self.root,
-                desired_width=1540,
-                desired_height=980,
+                desired_width=1320,
+                desired_height=820,
             )
             try:
                 self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -262,8 +262,8 @@ class GammaWorkspace:
         style.configure(
             "GammaCard.TFrame",
             background=PANEL,
-            relief="solid",
-            borderwidth=1,
+            relief="flat",
+            borderwidth=0,
             bordercolor=SUBTLE_SEPARATOR,
             lightcolor=SUBTLE_SEPARATOR,
             darkcolor=SUBTLE_SEPARATOR,

@@ -25,6 +25,7 @@ from tunelab.gamma.reporting import save_gamma_html_report
 from tunelab.gamma.settings import load_gamma_settings, save_gamma_settings
 from tunelab.gamma.imatest import analyze_gray_range, parse_gray_csv, select_fit_zones
 from tunelab.gamma.qualcomm_xml import QualcommGammaDocument
+from tunelab.ui_foundation import ACTION_BLUE
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -672,10 +673,8 @@ class GammaDesktopSmokeTests(unittest.TestCase):
             style.lookup("Primary.TButton", "background", ("active",)),
             "#0A84FF",
         )
-        self.assertEqual(
-            style.lookup("Primary.TButton", "foreground", ("active",)),
-            "white",
-        )
+        expected_primary_ink = ACTION_BLUE if style.theme_use() == "aqua" else "white"
+        self.assertEqual(style.lookup("Primary.TButton", "foreground", ("active",)), expected_primary_ink)
         self.assertEqual(
             [self.app.notebook.tab(tab, "text").strip() for tab in self.app.notebook.tabs()],
             ["曲线对比", "工程统计", "诊断与解释", "History / XML Diff"],

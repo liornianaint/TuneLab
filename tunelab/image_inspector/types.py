@@ -61,6 +61,8 @@ class ImageData:
     histogram: Optional[Any] = None
     luminance_histogram: Optional[Any] = None
     exif: Tuple[Tuple[str, str], ...] = ()
+    render_preview: Optional[Any] = None
+    render_preview_scale: float = 1.0
 
     @property
     def filename(self) -> str:

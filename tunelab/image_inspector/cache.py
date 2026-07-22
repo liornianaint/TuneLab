@@ -10,8 +10,13 @@ from typing import Any, Optional, Union
 from .types import ImageData
 
 
-DEFAULT_IMAGE_CACHE_ITEMS = 8
-DEFAULT_IMAGE_CACHE_BYTES = 512 * 1024 * 1024
+# Four 19 MP RGB camera frames already occupy about 217 MiB.  Retaining eight
+# of them made an ordinary browse session compete with the active views for
+# more than half a gigabyte.  The active images are referenced independently,
+# so this smaller LRU still gives instant back-navigation without retaining an
+# unseen second set of full-resolution groups.
+DEFAULT_IMAGE_CACHE_ITEMS = 4
+DEFAULT_IMAGE_CACHE_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -32,6 +37,7 @@ def image_data_byte_size(image: ImageData) -> int:
         image.alpha,
         image.histogram,
         image.luminance_histogram,
+        image.render_preview,
     ):
         if value is None or id(value) in seen:
             continue
