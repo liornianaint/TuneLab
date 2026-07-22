@@ -25,6 +25,16 @@ from .materials import CC_XML, SOURCES, d65_dataset
 
 
 SOURCE = SOURCES
+CURRENT_COLORCHECKER_IMAGES = (
+    "A.jpg",
+    "CWF.jpg",
+    "D65_300lux.jpg",
+    "D65_30lux.jpg",
+    "D65_normal.jpg",
+    "TL84_700lux.jpg",
+    "TL84_70lux.jpg",
+    "TL84_normal.jpg",
+)
 
 
 class OptimizerRuleTests(unittest.TestCase):
@@ -62,7 +72,7 @@ class OptimizerRuleTests(unittest.TestCase):
 
     def test_neutral_19_to_24_are_protected_in_current_colorchecker_cases(self) -> None:
         reference = standard_colorchecker_reference()
-        for name in ("D65_normal.jpg", "4000K_Before.jpg", "4000K_After.jpg"):
+        for name in CURRENT_COLORCHECKER_IMAGES:
             path = SOURCE / name
             with self.subTest(path=path.name):
                 dataset = build_comparison_dataset(detect_colorchecker(path), reference)
@@ -74,14 +84,12 @@ class OptimizerRuleTests(unittest.TestCase):
 
     def test_all_current_source_colorchecker_images_are_openable(self) -> None:
         names = []
-        for path in sorted(SOURCE.glob("*.jpg")):
+        for name in CURRENT_COLORCHECKER_IMAGES:
+            path = SOURCE / name
             detection = detect_colorchecker(path)
             self.assertEqual(len(detection.patches), 24, path.name)
             names.append(path.name)
-        self.assertEqual(
-            names,
-            ["3000K_After.jpg", "3000K_Before.jpg", "4000K_After.jpg", "4000K_Before.jpg", "D65_normal.jpg"],
-        )
+        self.assertEqual(names, list(CURRENT_COLORCHECKER_IMAGES))
 
     def test_d65_focus_13_14_finds_a_protected_engineering_candidate(self) -> None:
         dataset = d65_dataset()

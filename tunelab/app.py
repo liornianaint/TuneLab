@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tkinter as tk
 import math
+import os
 import platform
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -49,7 +50,6 @@ from .ui_foundation import (
     FONT_BODY,
     FONT_BODY_BOLD,
     FONT_CARD_TITLE,
-    FONT_HERO,
     FONT_KPI,
     FONT_MONO,
     FONT_NAV_SECTION,
@@ -184,7 +184,7 @@ def optimized_application_icon_path(source: Path) -> Path:
     try:
         from PIL import Image
 
-        destination = application_data_dir() / "cache" / "app-dock-1024-v3.png"
+        destination = application_data_dir() / "cache" / "app-dock-512-v4.png"
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists() and destination.stat().st_mtime_ns >= source.stat().st_mtime_ns:
             return destination
@@ -198,7 +198,10 @@ def optimized_application_icon_path(source: Path) -> Path:
             left = max(0, min(image.width - crop_side, round(centre_x - crop_side / 2)))
             top = max(0, min(image.height - crop_side, round(centre_y - crop_side / 2)))
             cropped = image.crop((left, top, left + crop_side, top + crop_side))
-            cropped.resize((1024, 1024), Image.Resampling.LANCZOS).save(destination)
+            # 512px covers a 256pt Retina Dock tile.  Larger runtime images make
+            # AppKit retain an unnecessarily large representation family; the
+            # bundle builder still creates its own 1024px installation icon.
+            cropped.resize((512, 512), Image.Resampling.LANCZOS).save(destination)
         return destination
     except (ImportError, OSError, ValueError):
         return source
@@ -238,6 +241,66 @@ def configure_macos_dock_icon(icon_path: Path) -> None:
         image = message(message(objc_class("NSImage"), "alloc"), "initWithContentsOfFile:", argument_types=(ctypes.c_void_p,), arguments=(path_string,))
         application = message(objc_class("NSApplication"), "sharedApplication")
         message(application, "setApplicationIconImage:", result=None, argument_types=(ctypes.c_void_p,), arguments=(image,))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return
+
+
+def configure_macos_light_appearance() -> None:
+    """Keep native Aqua controls aligned with TuneLab's light plot palette.
+
+    This must run *after* ``tk.Tk()`` has created Tk's NSApplication subclass;
+    creating a plain NSApplication earlier prevents Tk from installing methods
+    required by its Cocoa bridge.
+    """
+
+    if platform.system() != "Darwin":
+        return
+    try:
+        import ctypes
+        import ctypes.util
+
+        objc = ctypes.CDLL(ctypes.util.find_library("objc"))
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        def selector(value: str) -> int:
+            return objc.sel_registerName(value.encode())
+
+        def message(
+            receiver: int,
+            method: str,
+            *,
+            result: object = ctypes.c_void_p,
+            argument_types: tuple[object, ...] = (),
+            arguments: tuple[object, ...] = (),
+        ) -> object:
+            function = ctypes.CFUNCTYPE(result, ctypes.c_void_p, ctypes.c_void_p, *argument_types)(
+                ("objc_msgSend", objc)
+            )
+            return function(receiver, selector(method), *arguments)
+
+        string = message(
+            objc.objc_getClass(b"NSString"),
+            "stringWithUTF8String:",
+            argument_types=(ctypes.c_char_p,),
+            arguments=(b"NSAppearanceNameAqua",),
+        )
+        appearance = message(
+            objc.objc_getClass(b"NSAppearance"),
+            "appearanceNamed:",
+            argument_types=(ctypes.c_void_p,),
+            arguments=(string,),
+        )
+        application = message(objc.objc_getClass(b"NSApplication"), "sharedApplication")
+        message(
+            application,
+            "setAppearance:",
+            result=None,
+            argument_types=(ctypes.c_void_p,),
+            arguments=(appearance,),
+        )
     except (AttributeError, OSError, TypeError, ValueError):
         return
 
@@ -756,6 +819,7 @@ class TuneLabApp:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
+        configure_macos_light_appearance()
         self.dataset: Optional[ImatestDataset] = None
         self.csv_dataset: Optional[ImatestDataset] = None
         self.image_dataset: Optional[ImatestDataset] = None
@@ -784,6 +848,8 @@ class TuneLabApp:
         self._history_sort_reverse = True
         self.gamma_workspace = None
         self.image_inspector_workspace = None
+        self.cc_view: Optional[ttk.Frame] = None
+        self._cc_workspace_built = False
         self.update_controller = update_controller_for(root)
 
         root.title(APP_TITLE)
@@ -795,17 +861,10 @@ class TuneLabApp:
             pass
         self._configure_styles()
         self._install_app_icon()
-        self._build_menu()
-        self._build_ui()
-        self.use_standard_reference(initial=True)
         self._build_home()
         self.show_home_workspace()
-        self._install_settings_autosave()
         root.protocol("WM_DELETE_WINDOW", self.close)
-        root.after_idle(self._install_app_icon)
-        root.after_idle(self._persist_settings)
         self.update_controller.schedule_startup_check()
-        self._set_status("请选择 CC CSV 或 ColorChecker 图片作为输入，再打开 Qualcomm CC XML。")
 
     def _configure_styles(self) -> None:
         style = configure_macos_theme(
@@ -821,8 +880,8 @@ class TuneLabApp:
         style.configure(
             "Card.TFrame",
             background=PANEL,
-            relief="solid",
-            borderwidth=1,
+            relief="flat",
+            borderwidth=0,
             bordercolor=SUBTLE_SEPARATOR,
             lightcolor=SUBTLE_SEPARATOR,
             darkcolor=SUBTLE_SEPARATOR,
@@ -830,14 +889,14 @@ class TuneLabApp:
         # ColorChecker previews share the same typography and colour tokens as
         # every other TuneLab card.  The aliases keep the reusable preview
         # widget compatible with its former standalone workspace.
-        style.configure("CheckerCard.TFrame", background=PANEL, relief="solid", borderwidth=1)
+        style.configure("CheckerCard.TFrame", background=PANEL, relief="flat", borderwidth=0)
         style.configure("CheckerCardTitle.TLabel", background=PANEL, foreground=INK, font=FONT_CARD_TITLE)
         style.configure("CheckerMutedCard.TLabel", background=PANEL, foreground=MUTED, font=FONT_SMALL)
         style.configure(
             "HomeCard.TFrame",
             background=PANEL,
-            relief="solid",
-            borderwidth=1,
+            relief="flat",
+            borderwidth=0,
             bordercolor=SUBTLE_SEPARATOR,
             lightcolor=SUBTLE_SEPARATOR,
             darkcolor=SUBTLE_SEPARATOR,
@@ -850,11 +909,10 @@ class TuneLabApp:
         style.configure("CardTitle.TLabel", background=PANEL, foreground=INK, font=FONT_CARD_TITLE)
         style.configure("Title.TLabel", background=BG, foreground=INK, font=FONT_TITLE)
         style.configure("Eyebrow.TLabel", background=BG, foreground=TERTIARY, font=FONT_NAV_SECTION)
-        style.configure("HomeBrand.TLabel", background=CONTENT_BG, foreground=INK, font=FONT_HERO)
         style.configure("HomeSection.TLabel", background=CONTENT_BG, foreground=INK, font=FONT_CARD_TITLE)
-        style.configure("HomeMuted.TLabel", background=CONTENT_BG, foreground=MUTED, font=FONT_BODY)
-        style.configure("HomeEyebrow.TLabel", background=CONTENT_BG, foreground=TERTIARY, font=FONT_NAV_SECTION)
         style.configure("HomeToolTitle.TLabel", background=PANEL, foreground=INK, font=FONT_KPI)
+        style.configure("HomeCardMuted.TLabel", background=PANEL, foreground=MUTED, font=FONT_BODY)
+        style.configure("HomeCardMeta.TLabel", background=PANEL, foreground=TERTIARY, font=FONT_NAV_SECTION)
         style.configure("Subtitle.TLabel", background=BG, foreground=MUTED, font=FONT_BODY)
         style.configure("ActiveRegion.TLabel", background=BG, foreground=BLUE, font=FONT_SMALL_BOLD)
         style.configure("Status.TLabel", background=INFO_BG, foreground=MUTED, padding=(10, 6), font=FONT_SMALL)
@@ -877,10 +935,17 @@ class TuneLabApp:
         icon_path = optimized_application_icon_path(source_icon_path)
         self.app_icon_source_path = source_icon_path
         self.app_icon_path = icon_path
+        # A bundled macOS application already receives its icon through
+        # Info.plist.  For source launches, setting NSApplication's image is
+        # sufficient.  Feeding the same 1024px bitmap to Tk's ``iconphoto`` on
+        # Aqua creates a surprisingly large family of Retina backing images.
+        if platform.system() == "Darwin":
+            self._app_icon = None
+            configure_macos_dock_icon(icon_path)
+            return
         try:
             self._app_icon = tk.PhotoImage(file=str(icon_path))
             self.root.iconphoto(True, self._app_icon)
-            configure_macos_dock_icon(icon_path)
         except tk.TclError:
             # Keep startup reliable for rare Tk builds without PNG support.
             self._app_icon = None
@@ -954,84 +1019,128 @@ class TuneLabApp:
         home.columnconfigure(1, weight=1)
         home.rowconfigure(0, weight=1)
 
-        sidebar = ttk.Frame(home, width=218, padding=(14, 16), style="Sidebar.TFrame")
+        sidebar = tk.Frame(home, width=236, padx=16, pady=18, background=SIDEBAR_BG, borderwidth=0)
         sidebar.grid(row=0, column=0, sticky="nsew")
         sidebar.grid_propagate(False)
-        identity = ttk.Frame(sidebar, style="Sidebar.TFrame")
-        identity.pack(fill="x", pady=(0, 20))
+        identity = tk.Frame(sidebar, background=SIDEBAR_BG, borderwidth=0)
+        identity.pack(fill="x", pady=(0, 26))
         try:
             with Image.open(self.app_icon_source_path) as source:
                 icon = source.convert("RGBA")
                 bounds = icon.getchannel("A").getbbox()
                 if bounds is not None:
                     icon = icon.crop(bounds)
-                icon.thumbnail((42, 42), Image.Resampling.LANCZOS)
+                icon.thumbnail((38, 38), Image.Resampling.LANCZOS)
                 self._home_icon = ImageTk.PhotoImage(icon, master=self.root)
-            ttk.Label(identity, image=self._home_icon, style="SidebarMeta.TLabel").pack(side="left", padx=(0, 10))
+            tk.Label(identity, image=self._home_icon, background=SIDEBAR_BG, borderwidth=0).pack(side="left", padx=(0, 10))
         except (OSError, ValueError, tk.TclError):
             self._home_icon = None
-        identity_text = ttk.Frame(identity, style="Sidebar.TFrame")
+        identity_text = tk.Frame(identity, background=SIDEBAR_BG, borderwidth=0)
         identity_text.pack(side="left", fill="x", expand=True)
-        ttk.Label(identity_text, text="TuneLab", style="SidebarBrand.TLabel").pack(anchor="w")
-        ttk.Label(identity_text, text="Camera Tuning", style="SidebarMeta.TLabel").pack(anchor="w", pady=(1, 0))
+        tk.Label(identity_text, text="TuneLab", background=SIDEBAR_BG, foreground=INK, font=FONT_CARD_TITLE, borderwidth=0).pack(anchor="w")
+        tk.Label(identity_text, text="Camera Tuning", background=SIDEBAR_BG, foreground=MUTED, font=FONT_SMALL, borderwidth=0).pack(anchor="w", pady=(1, 0))
 
-        ttk.Label(sidebar, text="工作区", style="SidebarSection.TLabel").pack(anchor="w", padx=10, pady=(0, 5))
-        ttk.Button(sidebar, text="首页", command=self.show_home_workspace, style="ActiveNav.TButton").pack(fill="x", pady=1)
-        ttk.Button(sidebar, text="CCM / ColorChecker", command=self.show_cc_workspace, style="Nav.TButton").pack(fill="x", pady=1)
-        ttk.Button(sidebar, text="Gamma 优化", command=self.open_gamma_optimizer, style="Nav.TButton").pack(fill="x", pady=1)
-        ttk.Button(sidebar, text="图像分析器", command=self.open_image_inspector, style="Nav.TButton").pack(fill="x", pady=1)
+        tk.Label(sidebar, text="工作区", background=SIDEBAR_BG, foreground=TERTIARY, font=FONT_NAV_SECTION, borderwidth=0).pack(anchor="w", padx=11, pady=(0, 6))
+        def navigation_button(
+            glyph: str,
+            text: str,
+            command: Callable[[], object],
+            *,
+            selected: bool = False,
+        ) -> None:
+            background = "#DDE8F6" if selected else SIDEBAR_BG
+            foreground = "#0057B8" if selected else INK
+            row = tk.Frame(
+                sidebar,
+                borderwidth=0,
+                highlightthickness=0,
+                background=background,
+                height=36,
+                takefocus=True,
+                cursor="hand2",
+            )
+            row.pack(fill="x", pady=1)
+            row.pack_propagate(False)
+            icon_label = tk.Label(
+                row,
+                text=glyph,
+                width=2,
+                anchor="center",
+                background=background,
+                foreground=foreground,
+                font=FONT_BODY_BOLD,
+                borderwidth=0,
+                cursor="hand2",
+            )
+            icon_label.pack(side="left", padx=(7, 2), fill="y")
+            text_label = tk.Label(
+                row,
+                text=text,
+                anchor="w",
+                background=background,
+                foreground=foreground,
+                font=FONT_BODY_BOLD if selected else FONT_BODY,
+                borderwidth=0,
+                cursor="hand2",
+            )
+            text_label.pack(side="left", fill="both", expand=True, padx=(2, 8))
+            widgets = (row, icon_label, text_label)
 
-        sidebar_footer = ttk.Frame(sidebar, style="Sidebar.TFrame")
+            def activate(_event: Optional[tk.Event] = None) -> str:
+                command()
+                return "break"
+
+            def recolour(value: str) -> None:
+                if selected:
+                    return
+                for widget in widgets:
+                    widget.configure(background=value)
+
+            for widget in widgets:
+                widget.bind("<Button-1>", activate)
+                widget.bind("<Enter>", lambda _event: recolour(HOVER_BG))
+                widget.bind("<Leave>", lambda _event: recolour(SIDEBAR_BG))
+            row.bind("<Return>", activate)
+            row.bind("<space>", activate)
+
+        navigation_button("⌂", "首页", self.show_home_workspace, selected=True)
+        navigation_button("▦", "CCM / 色彩校正", self.show_cc_workspace)
+        navigation_button("γ", "Gamma 优化", self.open_gamma_optimizer)
+        navigation_button("⌕", "图像分析器", self.open_image_inspector)
+
+        sidebar_footer = tk.Frame(sidebar, background=SIDEBAR_BG, borderwidth=0)
         sidebar_footer.pack(side="bottom", fill="x")
         ttk.Separator(sidebar_footer).pack(fill="x", pady=(0, 10))
-        ttk.Label(sidebar_footer, text="●  本地处理", style="SidebarStatus.TLabel").pack(anchor="w", padx=8)
-        ttk.Label(sidebar_footer, text="图片与参数不会离开此设备", style="SidebarMeta.TLabel").pack(anchor="w", padx=8, pady=(4, 0))
+        tk.Label(sidebar_footer, text="●  本地处理", background=SIDEBAR_BG, foreground=GREEN, font=FONT_SMALL, borderwidth=0).pack(anchor="w", padx=8)
+        tk.Label(sidebar_footer, text=f"TuneLab {APP_VERSION}", background=SIDEBAR_BG, foreground=MUTED, font=FONT_SMALL, borderwidth=0).pack(anchor="w", padx=8, pady=(4, 0))
+        tk.Label(sidebar_footer, text="图片与参数不会离开此设备", background=SIDEBAR_BG, foreground=MUTED, font=FONT_SMALL, borderwidth=0).pack(anchor="w", padx=8, pady=(2, 0))
 
-        content = ttk.Frame(home, padding=(28, 22), style="Home.TFrame")
+        content = ttk.Frame(home, padding=(30, 26), style="Home.TFrame")
         content.grid(row=0, column=1, sticky="nsew")
         content.columnconfigure(0, weight=1)
-        content.rowconfigure(4, weight=1)
+        content.rowconfigure(2, weight=1)
 
-        hero = ttk.Frame(content, style="Home.TFrame")
-        hero.grid(row=0, column=0, sticky="ew", pady=(0, 18))
-        hero.columnconfigure(0, weight=1)
-        brand = ttk.Frame(hero, style="Home.TFrame")
-        brand.grid(row=0, column=0, sticky="w")
-        ttk.Label(brand, text="CAMERA TUNING ENGINEERING", style="HomeEyebrow.TLabel").pack(anchor="w")
-        ttk.Label(brand, text="TuneLab 相机调校工程工作台", style="HomeBrand.TLabel").pack(anchor="w", pady=(4, 0))
-        hero_description = ttk.Label(
-            brand,
-            text="面向 CCM、Gamma 与图像质量分析的本地工程工具，统一管理输入、诊断、参数验证与结果导出。",
-            style="HomeMuted.TLabel",
-            justify="left",
-        )
-        hero_description.pack(anchor="w", pady=(6, 0))
-        bind_responsive_wrap(hero_description, minimum=520)
-        hero_actions = ttk.Frame(hero, style="Home.TFrame")
-        hero_actions.grid(row=0, column=1, sticky="ne", padx=(20, 0), pady=(13, 0))
-        self.home_help_button = ttk.Button(hero_actions, text="帮助", command=self.show_help, style="Quiet.TButton")
-        self.home_help_button.pack(side="left")
-
-        ttk.Separator(content).grid(row=1, column=0, sticky="ew", pady=(0, 14))
         section_header = ttk.Frame(content, style="Home.TFrame")
-        section_header.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(section_header, text="工程模块", style="HomeSection.TLabel").pack(side="left")
-        ttk.Label(section_header, text="按当前任务进入对应工作区", style="HomeMuted.TLabel").pack(side="left", padx=(8, 0), pady=(1, 0))
+        section_header.grid(row=0, column=0, sticky="ew", pady=(2, 14))
+        ttk.Label(section_header, text="工作区", style="HomeSection.TLabel").pack(side="left")
+        self.home_help_button = ttk.Button(section_header, text="帮助", command=self.show_help, style="Quiet.TButton")
+        self.home_help_button.pack(side="right")
         tools = ttk.Frame(content, style="Home.TFrame")
-        tools.grid(row=3, column=0, sticky="new")
-        tools.columnconfigure(0, weight=1, uniform="home-tools")
+        tools.grid(row=1, column=0, sticky="new")
+        for column in range(3):
+            tools.columnconfigure(column, weight=1, uniform="home-tools")
         self._build_home_tool_card(
             tools, 0, 0, "CC", "CCM / ColorChecker", "色彩校正",
             "导入 Imatest CSV 或 ColorChecker，完成 Delta CCM 优化、色差保护与 XML 安全回写。",
             self.show_cc_workspace, BLUE,
         )
         self._build_home_tool_card(
-            tools, 1, 0, "γ", "Gamma 优化", "灰阶与 LUT",
+            tools, 0, 1, "γ", "Gamma 优化", "灰阶与 LUT",
             "分析 Stepchart 连续阶数与曲线健康，生成受高光、暗部和硬件格式约束的 Gamma LUT。",
             self.open_gamma_optimizer, GREEN,
         )
         self._build_home_tool_card(
-            tools, 2, 0, "ROI", "图像分析器", "像素与多图",
+            tools, 0, 2, "ROI", "图像分析器", "像素与多图",
             "浏览文件夹并并排查看 1–4 张图片，以像素、ROI、直方图与匹配置信度解释变化。",
             self.open_image_inspector, "#7A5AF8",
         )
@@ -1059,37 +1168,72 @@ class TuneLabApp:
         *,
         columnspan: int = 1,
     ) -> None:
-        card = ttk.Frame(parent, padding=(16, 13), style="HomeCard.TFrame")
+        card = tk.Frame(
+            parent,
+            padx=18,
+            pady=17,
+            background=PANEL,
+            highlightbackground=SUBTLE_SEPARATOR,
+            highlightthickness=1,
+            borderwidth=0,
+        )
         card.grid(
             row=row,
             column=column,
             columnspan=columnspan,
-            sticky="ew",
-            pady=(0, 7) if row < 2 else 0,
+            sticky="nsew",
+            padx=((0, 6) if column == 0 else ((6, 0) if column == 2 else 6)),
         )
-        icon = tk.Canvas(card, width=42, height=42, background=PANEL, highlightthickness=0)
-        icon.pack(side="left", padx=(0, 14))
-        icon.create_oval(1, 1, 41, 41, fill=colour, outline="")
-        icon.create_text(21, 21, text=glyph, fill="white", font=FONT_SMALL_BOLD)
-        copy = ttk.Frame(card, style="Surface.TFrame")
-        copy.pack(side="left", fill="x", expand=True)
-        heading = ttk.Frame(copy, style="Surface.TFrame")
-        heading.pack(fill="x")
-        ttk.Label(heading, text=title, style="HomeToolTitle.TLabel").pack(side="left")
-        ttk.Label(heading, text=subtitle, foreground=TERTIARY, background=PANEL, font=FONT_NAV_SECTION).pack(side="left", padx=(8, 0), pady=(2, 0))
+        card.columnconfigure(0, weight=1)
+        card.rowconfigure(3, weight=1)
+        icon = tk.Canvas(card, width=44, height=44, background=PANEL, highlightthickness=0)
+        icon.grid(row=0, column=0, sticky="w", pady=(0, 14))
+        icon.create_oval(1, 1, 43, 43, fill=colour, outline="")
+        icon.create_text(22, 22, text=glyph, fill="white", font=FONT_SMALL_BOLD)
+        ttk.Label(card, text=subtitle.upper(), style="HomeCardMeta.TLabel").grid(row=1, column=0, sticky="w")
+        ttk.Label(card, text=title, style="HomeToolTitle.TLabel").grid(row=2, column=0, sticky="w", pady=(4, 0))
         description_label = ttk.Label(
-            copy,
+            card,
             text=description,
-            style="Card.TLabel",
+            style="HomeCardMuted.TLabel",
             justify="left",
         )
-        description_label.pack(fill="x", anchor="w", pady=(5, 0))
-        bind_responsive_wrap(description_label, minimum=320)
-        ttk.Button(card, text="打开", command=command, style="Quiet.TButton").pack(side="right", padx=(16, 0))
+        description_label.grid(row=3, column=0, sticky="new", pady=(9, 16))
+        bind_responsive_wrap(description_label, horizontal_padding=8, minimum=220)
+        ttk.Button(card, text="打开工作区  ›", command=command, style="Link.TButton").grid(row=4, column=0, sticky="w")
 
     def _run_cc_action(self, action: Callable[[], None]) -> None:
         self.show_cc_workspace()
         self.root.after_idle(action)
+
+    def _ensure_cc_workspace(self) -> None:
+        """Create the large CCM view only when the user actually opens it.
+
+        The former startup path constructed every plot, table and preview
+        behind the home page.  Besides delaying the first window, those hidden
+        Retina surfaces accounted for most of the application's idle memory.
+        Keeping the workspace lazy changes no CCM state or algorithm; it only
+        defers widget construction until navigation requests it.
+        """
+
+        if self._cc_workspace_built:
+            return
+        self._cc_workspace_built = True
+        try:
+            self._build_ui()
+            self.use_standard_reference(initial=True)
+            self._install_settings_autosave()
+            self._set_status("请选择 CC CSV 或 ColorChecker 图片作为输入，再打开 Qualcomm CC XML。")
+            self.root.after_idle(self._persist_settings)
+        except Exception:
+            self._cc_workspace_built = False
+            if self.cc_view is not None:
+                try:
+                    self.cc_view.destroy()
+                except tk.TclError:
+                    pass
+                self.cc_view = None
+            raise
 
     def _show_cc_history(self) -> None:
         self.show_cc_workspace()
@@ -1662,7 +1806,8 @@ class TuneLabApp:
         if self.gamma_workspace is None or not self.gamma_workspace.is_alive():
             from .gamma.ui import GammaWorkspace
 
-            self.cc_view.pack_forget()
+            if self.cc_view is not None:
+                self.cc_view.pack_forget()
             self.gamma_workspace = GammaWorkspace(
                 self.root,
                 on_close=self.show_cc_workspace,
@@ -1672,7 +1817,8 @@ class TuneLabApp:
                 on_about=self.show_about,
             )
         else:
-            self.cc_view.pack_forget()
+            if self.cc_view is not None:
+                self.cc_view.pack_forget()
             # show() performs a Tcl-level existence check.  Recreate the tool
             # if a native window close invalidated the previous frame.
             if not self.gamma_workspace.show():
@@ -1708,7 +1854,8 @@ class TuneLabApp:
             )
             return None
         self.home_view.pack_forget()
-        self.cc_view.pack_forget()
+        if self.cc_view is not None:
+            self.cc_view.pack_forget()
         if self.gamma_workspace is not None and self.gamma_workspace.is_alive():
             self.gamma_workspace.hide()
         try:
@@ -1737,6 +1884,7 @@ class TuneLabApp:
         return self.image_inspector_workspace
 
     def show_cc_workspace(self) -> None:
+        self._ensure_cc_workspace()
         self.home_view.pack_forget()
         if self.gamma_workspace is not None:
             if self.gamma_workspace.is_alive():
@@ -1748,10 +1896,12 @@ class TuneLabApp:
         self.root.title(CCM_WORKSPACE_TITLE)
         self._configure_styles()
         self._build_menu()
+        assert self.cc_view is not None
         self.cc_view.pack(fill="both", expand=True)
 
     def show_home_workspace(self) -> None:
-        self.cc_view.pack_forget()
+        if self.cc_view is not None:
+            self.cc_view.pack_forget()
         if self.gamma_workspace is not None and self.gamma_workspace.is_alive():
             self.gamma_workspace.hide()
         if self.image_inspector_workspace is not None and self.image_inspector_workspace.is_alive():
@@ -1766,8 +1916,11 @@ class TuneLabApp:
         if self._settings_save_after_id is not None:
             self.root.after_cancel(self._settings_save_after_id)
             self._settings_save_after_id = None
-        # settings.json is internal state: save once more on every normal exit.
-        self._persist_settings(show_error=False)
+        # settings.json is internal state: save once more on every normal exit,
+        # but do not instantiate the still-unused CCM view merely to read its
+        # controls.
+        if self._cc_workspace_built:
+            self._persist_settings(show_error=False)
         try:
             save_history(self.history)
         except OSError:
@@ -2834,7 +2987,9 @@ class TuneLabApp:
 def main() -> None:
     configure_macos_application_identity()
     root = tk.Tk()
-    TuneLabApp(root)
+    application = TuneLabApp(root)
+    if os.environ.get("TUNELAB_SMOKE_TEST") == "1":
+        root.after_idle(application.close)
     root.mainloop()
 
 

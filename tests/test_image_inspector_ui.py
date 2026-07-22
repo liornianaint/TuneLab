@@ -89,6 +89,9 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         if tk.TkVersion >= 9.0:
             self.assertTrue(self.app.before_view.canvas.bind("<TouchpadScroll>"))
         self.assertTrue(self.app.before_view.canvas.bind("<B2-Motion>"))
+        self.assertTrue(self.app.before_view.canvas.bind("<ButtonPress-2>"))
+        self.assertTrue(self.app.before_view.canvas.bind("<ButtonPress-3>"))
+        self.assertTrue(self.app.before_view.canvas.bind("<Control-ButtonPress-1>"))
         self.app.fit_images()
         self.app.one_to_one()
         self.app.zoom_in()
@@ -112,7 +115,7 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         self.assertTrue(self.app.folder_thumbnail_strip.winfo_exists())
         self.assertFalse(hasattr(self.app, "folder_tree"))
         self.assertFalse(hasattr(self.app, "open_comparison_button"))
-        self.assertEqual(str(self.app.sidebar_toggle_button.cget("text")), "收起信息")
+        self.assertEqual(str(self.app.sidebar_toggle_button.cget("text")), "收起检查器")
         self.assertEqual(str(self.app.sidebar_header_toggle_button.cget("text")), "›")
         self.assertEqual(str(self.app.sidebar_header_toggle_button.cget("style")), "Icon.TButton")
         self.assertEqual(self.app.toolbar_panel.grid_slaves(row=1), [])
@@ -121,7 +124,7 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         self.assertEqual(self.app.group_status_var.get(), "")
         self.assertFalse(self.app.metrics_grid.winfo_manager())
         self.app.before_view._render()
-        self.assertFalse(self.app.before_view.canvas.find_withtag("viewer-chrome"))
+        self.assertTrue(self.app.before_view.canvas.find_withtag("viewer-chrome"))
         self.assertTrue(all(not variable.get() for variable in self.app.metric_vars.values()))
         label_texts = []
         widget_texts = []
@@ -242,7 +245,7 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
                 [str(pane) for pane in self.app.main_pane.panes()],
                 [str(self.app.folder_thumbnail_strip), str(self.app.viewer_container)],
             )
-            self.assertEqual(str(self.app.sidebar_toggle_button.cget("text")), "显示信息")
+            self.assertEqual(str(self.app.sidebar_toggle_button.cget("text")), "显示检查器")
 
             self.app.folder_sidebar_toggle_button.invoke()
             self.root.update_idletasks()
@@ -250,7 +253,7 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
                 [str(pane) for pane in self.app.main_pane.panes()],
                 [str(self.app.viewer_container)],
             )
-            self.assertEqual(str(self.app.sidebar_toggle_button.cget("text")), "显示信息")
+            self.assertEqual(str(self.app.sidebar_toggle_button.cget("text")), "显示检查器")
 
             self.app.folder_sidebar_toggle_button.invoke()
             self.root.update_idletasks()
@@ -440,13 +443,13 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
             self.app.sidebar_header_toggle_button.invoke()
             self.root.update_idletasks()
             self.assertFalse(self.app._analysis_sidebar_is_visible())
-            self.assertEqual(str(self.app.sidebar_toggle_button.cget("text")), "显示信息")
+            self.assertEqual(str(self.app.sidebar_toggle_button.cget("text")), "显示检查器")
             self.assertEqual([str(pane) for pane in self.app.main_pane.panes()], [str(self.app.viewer_container)])
 
             self.app.sidebar_toggle_button.invoke()
             self.root.update_idletasks()
             self.assertTrue(self.app._analysis_sidebar_is_visible())
-            self.assertEqual(str(self.app.sidebar_toggle_button.cget("text")), "收起信息")
+            self.assertEqual(str(self.app.sidebar_toggle_button.cget("text")), "收起检查器")
             self.assertEqual(
                 [str(pane) for pane in self.app.main_pane.panes()],
                 [str(self.app.viewer_container), str(self.app.sidebar_frame)],
@@ -926,7 +929,16 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
             ]
             self.assertEqual(
                 labels,
-                ["向左旋转 90°", "向右旋转 90°", "水平镜像", "垂直镜像", "还原图片方向"],
+                [
+                    "orientation.png",
+                    "在图库中显示",
+                    "向左旋转 90°",
+                    "向右旋转 90°",
+                    "水平镜像",
+                    "垂直镜像",
+                    "还原图片方向",
+                    "重命名此图片...",
+                ],
             )
 
             self.app._apply_image_orientation("before", "rotate_right")
@@ -965,6 +977,56 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
             strip.apply_thumbnail(index, ThumbnailData(path, thumbnail, (640, 480)))
         self.assertEqual(len(strip._photos), strip.MAX_CACHED_THUMBNAILS)
 
+    def test_batch_rename_preview_commits_and_refreshes_loaded_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            originals = [root / "capture-1.png", root / "capture-2.png"]
+            for index, path in enumerate(originals):
+                Image.new("RGB", (48, 32), (40 + index * 20, 80, 120)).save(path)
+
+            self.app.open_folder(root)
+            self.wait_until(lambda: self.app._pending == 0 and self.app.images["before"] is not None)
+            self.app.batch_rename_folder()
+            dialog = self.app._batch_rename_dialog
+            self.assertIsNotNone(dialog)
+            assert dialog is not None
+            self.assertEqual(dialog.template_var.get(), "{n}_{name}")
+            initial_preview = [dialog.preview.item(item, "values") for item in dialog.preview.get_children()]
+            self.assertEqual(
+                initial_preview,
+                [("✓", "capture-1.png", "01_capture-1.png"), ("", "capture-2.png", "不重命名")],
+            )
+            dialog.select_all()
+            dialog.template_var.set("Frame_{n}")
+            dialog.start_var.set("7")
+            dialog.digits_var.set("2")
+            dialog.refresh()
+            preview = [dialog.preview.item(item, "values") for item in dialog.preview.get_children()]
+            self.assertEqual(
+                preview,
+                [("✓", "capture-1.png", "Frame_07.png"), ("✓", "capture-2.png", "Frame_08.png")],
+            )
+            dialog.toggle_path(originals[0])
+            preview = [dialog.preview.item(item, "values") for item in dialog.preview.get_children()]
+            self.assertEqual(
+                preview,
+                [("", "capture-1.png", "不重命名"), ("✓", "capture-2.png", "Frame_07.png")],
+            )
+
+            with mock.patch("tunelab.image_inspector.ui.messagebox.askyesno", return_value=True):
+                dialog.apply()
+
+            renamed = root / "Frame_07.png"
+            self.assertTrue(originals[0].exists())
+            self.assertTrue(renamed.exists())
+            self.assertFalse(originals[1].exists())
+            self.assertEqual(self.app.folder_paths, [originals[0].resolve(), renamed.resolve()])
+            self.assertEqual(self.app.current_paths, [originals[0].resolve()])
+            image_data = self.app.images["before"]
+            assert image_data is not None
+            self.assertEqual(image_data.path, originals[0].resolve())
+            self.assertIn("已安全重命名 1 张图片", self.app.status_var.get())
+
     def test_idle_hidden_and_shutdown_paths_release_render_and_image_objects(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "memory.png"
@@ -977,16 +1039,16 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
             )
             self.root.deiconify()
             self.app.before_view._render()
-            self.assertIsNotNone(self.app.before_view._pil_image)
+            self.assertIsNotNone(self.app.before_view._render_pixels)
             image_data = self.app.images["before"]
             assert image_data is not None
             reference = weakref.ref(image_data)
 
             self.app.hide()
-            self.assertIsNone(self.app.before_view._pil_image)
+            self.assertIsNone(self.app.before_view._render_pixels)
             self.assertIsNone(self.app.before_view._photo)
             self.app.show()
-            self.assertIsNotNone(self.app.before_view._pil_image)
+            self.assertIsNotNone(self.app.before_view._render_pixels)
 
             self.app.shutdown()
             del image_data

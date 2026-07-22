@@ -81,6 +81,8 @@ except ImportError as exc:  # Keep the main TuneLab app importable without image
     np = None  # type: ignore[assignment]
     Image = ImageTk = None  # type: ignore[assignment]
 
+from .renaming import BatchRenameError, RenameItem, build_rename_plan, execute_rename_plan
+
 
 WINDOW_TITLE = "TuneLab · 图像分析器"
 BG = WINDOW_BG
@@ -147,7 +149,10 @@ class ImageCanvas(ttk.Frame):
         self.zoom_callback = zoom_callback
         self.context_callback = context_callback
         self.image_data: Optional[ImageData] = None
-        self._pil_image: Optional[Any] = None
+        # Keep only the shared NumPy pixels as a render source.  A full Pillow
+        # RGB image is a second full-resolution allocation (about 57 MB for one
+        # 4928×3840 frame) and multiplied that cost by every visible viewport.
+        self._render_pixels: Optional[Any] = None
         self._photo: Optional[Any] = None
         self._photo_key: Optional[Tuple[Any, ...]] = None
         self._render_after_id: Optional[str] = None
@@ -202,21 +207,14 @@ class ImageCanvas(ttk.Frame):
         self.canvas.bind("<Shift-ButtonPress-1>", self._on_pan_press)
         self.canvas.bind("<Shift-B1-Motion>", self._on_pan_drag)
         self.canvas.bind("<Shift-ButtonRelease-1>", self._on_pan_release)
-        try:
-            aqua = self.canvas.tk.call("tk", "windowingsystem") == "aqua"
-        except tk.TclError:
-            aqua = False
-        # Aqua reports a secondary click as button 2; Windows/Linux use 3.
-        # A click opens the image menu while a drag keeps the established
-        # smooth pan interaction.
-        context_button = 2 if aqua else 3
-        pan_button = 3 if aqua else 2
-        self.canvas.bind(f"<ButtonPress-{context_button}>", self._on_context_press)
-        self.canvas.bind(f"<B{context_button}-Motion>", self._on_context_drag)
-        self.canvas.bind(f"<ButtonRelease-{context_button}>", self._on_context_release)
-        self.canvas.bind(f"<ButtonPress-{pan_button}>", self._on_pan_press)
-        self.canvas.bind(f"<B{pan_button}-Motion>", self._on_pan_drag)
-        self.canvas.bind(f"<ButtonRelease-{pan_button}>", self._on_pan_release)
+        # Tk/Aqua has reported a physical secondary click as either button 2
+        # or 3 across Tk and macOS releases.  Treat both identically: a click
+        # opens the image menu and a drag pans.  This also preserves middle- or
+        # right-drag panning on Windows/Linux.
+        for context_button in (2, 3):
+            self.canvas.bind(f"<ButtonPress-{context_button}>", self._on_context_press)
+            self.canvas.bind(f"<B{context_button}-Motion>", self._on_context_drag)
+            self.canvas.bind(f"<ButtonRelease-{context_button}>", self._on_context_release)
         self.canvas.bind("<Control-ButtonPress-1>", self._on_context_press)
         self.canvas.bind("<Control-B1-Motion>", self._on_context_drag)
         self.canvas.bind("<Control-ButtonRelease-1>", self._on_context_release)
@@ -233,8 +231,9 @@ class ImageCanvas(ttk.Frame):
 
     def set_image(self, image_data: ImageData) -> None:
         self.image_data = image_data
-        assert Image is not None
-        self._pil_image = Image.fromarray(image_data.display_rgb, mode="RGB")
+        self._render_pixels = (
+            image_data.render_preview if image_data.render_preview is not None else image_data.display_rgb
+        )
         self._photo_key = None
         precision = "保留原始精度" if image_data.precision_preserved else "解码后为 8-bit"
         exif = " · EXIF 已转正" if image_data.orientation_applied else ""
@@ -249,7 +248,7 @@ class ImageCanvas(ttk.Frame):
     def clear_image(self) -> None:
         self._cancel_initial_fit()
         self.image_data = None
-        self._pil_image = None
+        self._render_pixels = None
         self._photo = None
         self._photo_key = None
         self.roi = None
@@ -277,17 +276,20 @@ class ImageCanvas(ttk.Frame):
             self._render_after_id = None
         self._cancel_initial_fit()
         self._photo = None
-        self._pil_image = None
+        self._render_pixels = None
         self._photo_key = None
         self.canvas.delete("rendered-image")
 
     def resume_rendering(self) -> None:
         """Recreate a render source from the retained analysis pixels."""
 
-        if self.image_data is None or self._pil_image is not None:
+        if self.image_data is None or self._render_pixels is not None:
             return
-        assert Image is not None
-        self._pil_image = Image.fromarray(self.image_data.display_rgb, mode="RGB")
+        self._render_pixels = (
+            self.image_data.render_preview
+            if self.image_data.render_preview is not None
+            else self.image_data.display_rgb
+        )
         self.request_initial_fit()
 
     def _cancel_initial_fit(self) -> None:
@@ -384,6 +386,10 @@ class ImageCanvas(ttk.Frame):
         return self.pan_x + image_x * self.zoom, self.pan_y + image_y * self.zoom
 
     def _on_configure(self, _event: tk.Event) -> None:
+        if self.image_data is None:
+            self._draw_overlays()
+            self._update_scrollbars()
+            return
         if self._needs_initial_fit or self._fit_mode:
             self.request_initial_fit()
         else:
@@ -408,7 +414,7 @@ class ImageCanvas(ttk.Frame):
         self._render_after_id = None
         if not self.canvas.winfo_exists():
             return
-        if self.image_data is None or self._pil_image is None:
+        if self.image_data is None or self._render_pixels is None:
             self.canvas.delete("rendered-image")
             self._draw_overlays()
             self._update_scrollbars()
@@ -420,11 +426,47 @@ class ImageCanvas(ttk.Frame):
         x1 = min(self.image_data.width, int(math.ceil((canvas_width - self.pan_x) / self.zoom)))
         y1 = min(self.image_data.height, int(math.ceil((canvas_height - self.pan_y) / self.zoom)))
         if x1 > x0 and y1 > y0:
-            target_width = max(1, int(round((x1 - x0) * self.zoom)))
-            target_height = max(1, int(round((y1 - y0) * self.zoom)))
-            photo_key = (id(self.image_data), x0, y0, x1, y1, target_width, target_height)
+            preview = self.image_data.render_preview
+            preview_scale = max(1e-9, float(self.image_data.render_preview_scale))
+            use_preview = (
+                preview is not None
+                and preview is not self.image_data.display_rgb
+                and self.zoom <= preview_scale * 1.15
+            )
+            render_pixels = preview if use_preview else self.image_data.display_rgb
+            source_scale = preview_scale if use_preview else 1.0
+            self._render_pixels = render_pixels
+            source_height, source_width = render_pixels.shape[:2]
+            source_x0 = max(0, min(source_width, int(math.floor(x0 * source_scale))))
+            source_y0 = max(0, min(source_height, int(math.floor(y0 * source_scale))))
+            source_x1 = max(source_x0, min(source_width, int(math.ceil(x1 * source_scale))))
+            source_y1 = max(source_y0, min(source_height, int(math.ceil(y1 * source_scale))))
+            original_x0 = source_x0 / source_scale
+            original_y0 = source_y0 / source_scale
+            original_x1 = source_x1 / source_scale
+            original_y1 = source_y1 / source_scale
+            target_width = max(1, int(round((original_x1 - original_x0) * self.zoom)))
+            target_height = max(1, int(round((original_y1 - original_y0) * self.zoom)))
+            photo_key = (
+                id(self.image_data),
+                id(render_pixels),
+                source_x0,
+                source_y0,
+                source_x1,
+                source_y1,
+                target_width,
+                target_height,
+            )
             if photo_key != self._photo_key or self._photo is None:
-                crop = self._pil_image.crop((x0, y0, x1, y1))
+                assert Image is not None and np is not None
+                # Convert only the currently visible source rectangle to
+                # Pillow.  At 1:1 or while panning this is bounded by the
+                # viewport instead of duplicating the entire camera frame.
+                crop_pixels = np.ascontiguousarray(
+                    render_pixels[source_y0:source_y1, source_x0:source_x1],
+                    dtype=np.uint8,
+                )
+                crop = Image.fromarray(crop_pixels, mode="RGB")
                 if crop.size != (target_width, target_height):
                     assert Image is not None
                     resampling = Image.Resampling.NEAREST if self.zoom >= 4.0 else Image.Resampling.BILINEAR
@@ -432,7 +474,7 @@ class ImageCanvas(ttk.Frame):
                 assert ImageTk is not None
                 self._photo = ImageTk.PhotoImage(crop, master=self.canvas)
                 self._photo_key = photo_key
-            left, top = self.image_to_canvas(x0, y0)
+            left, top = self.image_to_canvas(original_x0, original_y0)
             rendered = self.canvas.find_withtag("rendered-image")
             if rendered:
                 self.canvas.coords(rendered[0], left, top)
@@ -450,6 +492,46 @@ class ImageCanvas(ttk.Frame):
             return
         self.canvas.delete("analysis-overlay")
         self.canvas.delete("viewer-chrome")
+        if self.image_data is None:
+            width = max(1, self.canvas.winfo_width())
+            height = max(1, self.canvas.winfo_height())
+            centre_x = width / 2.0
+            centre_y = height / 2.0
+            self.canvas.create_oval(
+                centre_x - 24,
+                centre_y - 46,
+                centre_x + 24,
+                centre_y + 2,
+                fill="#2C2C2E",
+                outline="#48484A",
+                width=1,
+                tags=("viewer-chrome",),
+            )
+            self.canvas.create_text(
+                centre_x,
+                centre_y - 22,
+                text="＋",
+                fill="#D1D1D6",
+                font=FONT_TITLE,
+                tags=("viewer-chrome",),
+            )
+            self.canvas.create_text(
+                centre_x,
+                centre_y + 22,
+                text="打开图片开始检查",
+                fill="#D1D1D6",
+                font=FONT_BODY_BOLD,
+                tags=("viewer-chrome",),
+            )
+            self.canvas.create_text(
+                centre_x,
+                centre_y + 44,
+                text="也可以打开文件夹后从图库选择",
+                fill="#8E8E93",
+                font=FONT_SMALL,
+                tags=("viewer-chrome",),
+            )
+            return
         if self.roi is not None:
             left, top = self.image_to_canvas(self.roi.x, self.roi.y)
             right, bottom = self.image_to_canvas(self.roi.right, self.roi.bottom)
@@ -832,7 +914,7 @@ class ImageCanvas(ttk.Frame):
         # dead PhotoImage on a workspace cycle lets a later worker-thread GC
         # trigger Tcl_AsyncDelete on macOS during rapid close/reopen.
         self._photo = None
-        self._pil_image = None
+        self._render_pixels = None
         self._photo_key = None
 
 
@@ -851,12 +933,15 @@ class FolderThumbnailStrip(ttk.Frame):
         select_callback: Callable[[Path, bool, bool], None],
         request_callback: Callable[[Sequence[Tuple[int, Path]]], None],
         collapse_callback: Callable[[], None],
+        context_callback: Optional[Callable[[Path, int, int], None]] = None,
     ) -> None:
         super().__init__(master, padding=(8, 8), style="InspectorSidebar.TFrame")
         self.select_callback = select_callback
         self.request_callback = request_callback
         self.collapse_callback = collapse_callback
+        self.context_callback = context_callback
         self.paths: list[Path] = []
+        self.active_paths: set[Path] = set()
         self.cards: list[tk.Canvas] = []
         self._photos: "OrderedDict[int, Any]" = OrderedDict()
         self._requested: set[int] = set()
@@ -997,6 +1082,15 @@ class FolderThumbnailStrip(ttk.Frame):
                 "<Button-1>",
                 lambda event, selected=path: self._select_path(event, selected),
             )
+            for button in (2, 3):
+                card.bind(
+                    f"<ButtonRelease-{button}>",
+                    lambda event, selected=path: self._show_context(event, selected),
+                )
+            card.bind(
+                "<Control-ButtonRelease-1>",
+                lambda event, selected=path: self._show_context(event, selected),
+            )
             card.bind("<MouseWheel>", self._on_mousewheel)
             card.bind("<Button-4>", lambda _event: self._scroll_units(-2))
             card.bind("<Button-5>", lambda _event: self._scroll_units(2))
@@ -1015,8 +1109,16 @@ class FolderThumbnailStrip(ttk.Frame):
         self.select_callback(path, additive, shift)
         return "break"
 
+    def _show_context(self, event: tk.Event, path: Path) -> str:
+        if path not in self.active_paths:
+            self.select_callback(path, False, False)
+        if self.context_callback is not None:
+            self.context_callback(path, int(event.x_root), int(event.y_root))
+        return "break"
+
     def set_active_paths(self, paths: Sequence[Path]) -> None:
         active = {Path(path) for path in paths}
+        self.active_paths = active
         first_active: Optional[int] = None
         for index, card in enumerate(self.cards):
             selected = self.paths[index] in active
@@ -1198,6 +1300,7 @@ class FolderThumbnailStrip(ttk.Frame):
             child.destroy()
         self.cards.clear()
         self.paths.clear()
+        self.active_paths.clear()
 
 
 class HistogramCanvas(ttk.Frame):
@@ -1252,6 +1355,250 @@ class HistogramCanvas(ttk.Frame):
         self.canvas.create_text(right, bottom + 7, text="255", anchor="ne", fill=MUTED, font=FONT_SMALL)
 
 
+class BatchRenameDialog:
+    """Live-preview batch rename sheet modelled after Finder's rename panel."""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        paths: Sequence[Path],
+        *,
+        initially_selected: Optional[Sequence[Path]] = None,
+        on_complete: Callable[[dict[Path, Path]], None],
+    ) -> None:
+        self.parent = parent
+        self.paths: list[Path] = []
+        seen: set[Path] = set()
+        for path in paths:
+            resolved = Path(path).resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            self.paths.append(resolved)
+        selected = self.paths if initially_selected is None else [Path(path).resolve() for path in initially_selected]
+        self.selected_paths = {path for path in selected if path in seen}
+        self.on_complete = on_complete
+        self.plan: list[RenameItem] = []
+
+        dialog = tk.Toplevel(parent)
+        self.dialog = dialog
+        dialog.title("批量重命名")
+        dialog.transient(parent)
+        dialog.resizable(True, True)
+        dialog.minsize(680, 480)
+        dialog.protocol("WM_DELETE_WINDOW", self.close)
+
+        outer = ttk.Frame(dialog, padding=(22, 18), style="InspectorRoot.TFrame")
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text="批量重命名", style="InspectorTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            outer,
+            text="先选择要重命名的图片；使用 {n} 插入序号，使用 {name} 保留原名。扩展名始终保留。",
+            style="InspectorSubtitle.TLabel",
+        ).pack(anchor="w", pady=(4, 14))
+
+        form = ttk.Frame(outer, padding=(14, 12), style="InspectorCard.TFrame")
+        form.pack(fill="x", pady=(0, 12))
+        form.columnconfigure(1, weight=1)
+        ttk.Label(form, text="命名格式", style="InspectorCard.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10))
+        self.template_var = tk.StringVar(value="{n}_{name}")
+        template_entry = ttk.Entry(form, textvariable=self.template_var)
+        template_entry.grid(row=0, column=1, columnspan=3, sticky="ew")
+        ttk.Label(form, text="起始序号", style="InspectorCard.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=(10, 0))
+        self.start_var = tk.StringVar(value="1")
+        ttk.Spinbox(form, from_=0, to=999999, textvariable=self.start_var, width=8).grid(
+            row=1, column=1, sticky="w", pady=(10, 0)
+        )
+        ttk.Label(form, text="序号位数", style="InspectorCard.TLabel").grid(
+            row=1, column=2, sticky="e", padx=(18, 8), pady=(10, 0)
+        )
+        self.digits_var = tk.StringVar(value=str(max(2, len(str(len(self.paths))))))
+        ttk.Spinbox(form, from_=1, to=9, textvariable=self.digits_var, width=6).grid(
+            row=1, column=3, sticky="e", pady=(10, 0)
+        )
+
+        preview_frame = ttk.Frame(outer, style="InspectorCard.TFrame")
+        preview_frame.pack(fill="both", expand=True)
+        preview_frame.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(1, weight=1)
+        selection_bar = ttk.Frame(preview_frame, style="InspectorCard.TFrame")
+        selection_bar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(9, 2))
+        selection_bar.columnconfigure(0, weight=1)
+        self.selection_var = tk.StringVar(value="")
+        ttk.Label(selection_bar, textvariable=self.selection_var, style="InspectorMutedCard.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Button(selection_bar, text="全选", command=self.select_all, style="Quiet.TButton").grid(
+            row=0, column=1, padx=(8, 4)
+        )
+        ttk.Button(selection_bar, text="清除选择", command=self.clear_selection, style="Quiet.TButton").grid(
+            row=0, column=2
+        )
+        self.preview = ttk.Treeview(
+            preview_frame,
+            columns=("selected", "before", "after"),
+            show="headings",
+            selectmode="none",
+            style="InspectorComparison.Treeview",
+        )
+        self.preview.heading("selected", text="选择")
+        self.preview.heading("before", text="原文件名")
+        self.preview.heading("after", text="新文件名")
+        self.preview.column("selected", width=52, minwidth=52, stretch=False, anchor="center")
+        self.preview.column("before", width=255, minwidth=150, anchor="w")
+        self.preview.column("after", width=255, minwidth=150, anchor="w")
+        self.preview.tag_configure("included", foreground=INK)
+        self.preview.tag_configure("excluded", foreground=MUTED)
+        self.preview.bind("<Button-1>", self._on_preview_click, add="+")
+        scroll = ttk.Scrollbar(preview_frame, orient="vertical", command=self.preview.yview)
+        self.preview.configure(yscrollcommand=scroll.set)
+        self.preview.grid(row=1, column=0, sticky="nsew", padx=(10, 0), pady=(4, 10))
+        scroll.grid(row=1, column=1, sticky="ns", padx=(0, 8), pady=(4, 10))
+
+        footer = ttk.Frame(outer, style="InspectorRoot.TFrame")
+        footer.pack(fill="x", pady=(12, 0))
+        self.validation_var = tk.StringVar(value="")
+        ttk.Label(footer, textvariable=self.validation_var, style="InspectorSubtitle.TLabel").pack(
+            side="left", fill="x", expand=True
+        )
+        ttk.Button(footer, text="取消", command=self.close, style="Quiet.TButton").pack(side="right")
+        self.rename_button = ttk.Button(footer, text="重命名", command=self.apply, style="Primary.TButton")
+        self.rename_button.pack(side="right", padx=(0, 8))
+
+        for variable in (self.template_var, self.start_var, self.digits_var):
+            variable.trace_add("write", lambda *_args: self.refresh())
+        dialog.bind("<Escape>", lambda _event: self.close())
+        dialog.bind("<Return>", lambda _event: self.apply())
+        self.refresh()
+        template_entry.focus_set()
+        dialog.after_idle(self._centre)
+        try:
+            dialog.grab_set()
+        except tk.TclError:
+            pass
+
+    def _centre(self) -> None:
+        try:
+            self.dialog.update_idletasks()
+            width = max(680, self.dialog.winfo_reqwidth())
+            height = max(480, self.dialog.winfo_reqheight())
+            parent_x = self.parent.winfo_rootx()
+            parent_y = self.parent.winfo_rooty()
+            parent_width = self.parent.winfo_width()
+            parent_height = self.parent.winfo_height()
+            x = parent_x + max(0, (parent_width - width) // 2)
+            y = parent_y + max(0, (parent_height - height) // 2)
+            self.dialog.geometry(f"{width}x{height}+{x}+{y}")
+        except tk.TclError:
+            return
+
+    def select_all(self) -> None:
+        self.selected_paths = set(self.paths)
+        self.refresh()
+
+    def clear_selection(self) -> None:
+        self.selected_paths.clear()
+        self.refresh()
+
+    def toggle_path(self, path: Path) -> None:
+        resolved = Path(path).resolve()
+        if resolved not in self.paths:
+            return
+        if resolved in self.selected_paths:
+            self.selected_paths.remove(resolved)
+        else:
+            self.selected_paths.add(resolved)
+        self.refresh()
+
+    def _on_preview_click(self, event: tk.Event) -> Optional[str]:
+        row = self.preview.identify_row(event.y)
+        if not row:
+            return None
+        try:
+            path = self.paths[int(row)]
+        except (ValueError, IndexError):
+            return None
+        self.toggle_path(path)
+        return "break"
+
+    def _populate_preview(self, destinations: Optional[dict[Path, str]] = None, *, invalid: bool = False) -> None:
+        position = self.preview.yview()[0] if self.preview.get_children() else 0.0
+        for item in self.preview.get_children():
+            self.preview.delete(item)
+        destinations = destinations or {}
+        for index, path in enumerate(self.paths):
+            included = path in self.selected_paths
+            if included:
+                after = destinations.get(path, "命名格式有误" if invalid else path.name)
+            else:
+                after = "不重命名"
+            self.preview.insert(
+                "",
+                "end",
+                iid=str(index),
+                values=("✓" if included else "", path.name, after),
+                tags=("included" if included else "excluded",),
+            )
+        if position:
+            self.preview.yview_moveto(position)
+
+    def refresh(self) -> None:
+        selected = [path for path in self.paths if path in self.selected_paths]
+        self.selection_var.set(f"已选择 {len(selected)} / {len(self.paths)} 张 · 点击列表行勾选或取消")
+        if not selected:
+            self.plan = []
+            self.validation_var.set("请至少选择一张图片。")
+            self.rename_button.configure(state="disabled")
+            self._populate_preview()
+            return
+        try:
+            start = int(self.start_var.get())
+            digits = int(self.digits_var.get())
+            plan = build_rename_plan(selected, self.template_var.get(), start=start, digits=digits)
+        except (BatchRenameError, ValueError) as exc:
+            self.plan = []
+            self.validation_var.set(str(exc))
+            self.rename_button.configure(state="disabled")
+            self._populate_preview(invalid=True)
+            return
+        self.plan = plan
+        self.validation_var.set(f"将更改 {sum(item.changed for item in plan)} 个文件名")
+        self.rename_button.configure(state="normal" if any(item.changed for item in plan) else "disabled")
+        destinations = {item.source.resolve(): item.destination.name for item in plan}
+        self._populate_preview(destinations)
+
+    def apply(self) -> None:
+        if not self.plan:
+            return
+        changed = sum(item.changed for item in self.plan)
+        if changed == 0:
+            return
+        if not messagebox.askyesno(
+            "确认批量重命名",
+            f"将重命名 {changed} 张图片。图片内容和扩展名不会改变。\n\n是否继续？",
+            parent=self.dialog,
+        ):
+            return
+        try:
+            mapping = execute_rename_plan(self.plan)
+        except BatchRenameError as exc:
+            messagebox.showerror("批量重命名失败", str(exc), parent=self.dialog)
+            self.refresh()
+            return
+        self.close()
+        self.on_complete(mapping)
+
+    def close(self) -> None:
+        try:
+            self.dialog.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            self.dialog.destroy()
+        except tk.TclError:
+            pass
+
+
 class ImageInspectorWorkspace:
     def __init__(
         self,
@@ -1304,7 +1651,11 @@ class ImageInspectorWorkspace:
         self.image_transform_ops: Dict[str, list[str]] = {role: [] for role in IMAGE_ROLES}
         self._closed = False
         self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="TuneLabImage")
-        self._load_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="TuneLabDecode")
+        # Decoding two 19 MP JPEGs concurrently briefly doubles codec,
+        # histogram and channel-conversion buffers.  One dedicated decoder is
+        # fast enough for the supplied camera frames and keeps first-open memory
+        # comfortably below the system pressure threshold.
+        self._load_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="TuneLabDecode")
         self._result_queue: "queue.Queue[Tuple[str, int, str, Future[Any], Dict[str, Any]]]" = queue.Queue()
         self._futures = set()
         self._pending = 0
@@ -1316,13 +1667,17 @@ class ImageInspectorWorkspace:
         self._polling_background = False
         self._fit_after_id: Optional[str] = None
         self._image_cache = ImageDataCache()
+        self._batch_rename_dialog: Optional[BatchRenameDialog] = None
+        self.status_var = tk.StringVar(
+            value="请打开 1–4 张图片，或从左侧图库选择；滚轮联动缩放，右键图片可旋转或镜像。"
+        )
 
         self._configure_styles()
         self._build_ui()
         self._install_shortcuts()
         self.root.title(WINDOW_TITLE)
         if self.on_close is None:
-            self.window_placement = fit_window_to_screen(self.root, desired_width=1540, desired_height=980)
+            self.window_placement = fit_window_to_screen(self.root, desired_width=1320, desired_height=820)
             try:
                 self.root.protocol("WM_DELETE_WINDOW", self.close)
             except tk.TclError:
@@ -1341,8 +1696,8 @@ class ImageInspectorWorkspace:
         style.configure(
             "InspectorCard.TFrame",
             background=PANEL,
-            relief="solid",
-            borderwidth=1,
+            relief="flat",
+            borderwidth=0,
             bordercolor=SUBTLE_SEPARATOR,
             lightcolor=SUBTLE_SEPARATOR,
             darkcolor=SUBTLE_SEPARATOR,
@@ -1424,6 +1779,7 @@ class ImageInspectorWorkspace:
             accelerator="⇧⌘O" if aqua else "Ctrl+Shift+O",
         )
         self.file_menu.add_command(label="重新载入当前组", command=self.load_selected_images)
+        self.file_menu.add_command(label="批量重命名当前文件夹...", command=self.batch_rename_folder)
         self.file_menu.add_separator()
         self.file_menu.add_command(label="导出 CSV...", command=self.export_current)
         self.file_menu.add_separator()
@@ -1498,29 +1854,41 @@ class ImageInspectorWorkspace:
 
         self.root.bind(f"<{modifier}-o>", invoke(self.open_images), add="+")
         self.root.bind(f"<{modifier}-Shift-O>", invoke(self.open_folder), add="+")
+        self.root.bind(f"<{modifier}-Shift-R>", invoke(self.batch_rename_folder), add="+")
         self.root.bind("<Alt-Left>", invoke(self.show_previous_group), add="+")
         self.root.bind("<Alt-Right>", invoke(self.show_next_group), add="+")
 
     def _build_ui(self) -> None:
-        self.outer = ttk.Frame(self.root, padding=(16, 10), style="InspectorRoot.TFrame")
+        self.outer = ttk.Frame(self.root, padding=(18, 14), style="InspectorRoot.TFrame")
         self.outer.pack(fill="both", expand=True)
         header = ttk.Frame(self.outer, style="InspectorRoot.TFrame")
-        header.pack(fill="x", pady=(0, 6))
-        ttk.Label(header, text="图像分析器", style="InspectorTitle.TLabel").pack(side="left")
+        header.pack(fill="x", pady=(0, 10))
+        heading = ttk.Frame(header, style="InspectorRoot.TFrame")
+        heading.pack(side="left", fill="x", expand=True)
+        ttk.Label(heading, text="IMAGE INSPECTOR", style="InspectorEyebrow.TLabel").pack(anchor="w")
+        ttk.Label(heading, text="图像分析器", style="InspectorTitle.TLabel").pack(anchor="w", pady=(2, 0))
+        ttk.Label(
+            heading,
+            text="并排检查像素、选区、直方图与 EXIF",
+            style="InspectorSubtitle.TLabel",
+        ).pack(anchor="w", pady=(2, 0))
         if self.on_home is not None:
-            ttk.Button(header, text="返回首页", command=self.on_home, style="Quiet.TButton").pack(side="right")
+            ttk.Button(header, text="⌂  首页", command=self.on_home, style="Quiet.TButton").pack(side="right", anchor="n")
 
-        toolbar = ttk.Frame(self.outer, padding=(10, 8), style="InspectorCard.TFrame")
+        toolbar = ttk.Frame(self.outer, padding=(10, 7), style="InspectorSurface.TFrame")
         self.toolbar_panel = toolbar
-        toolbar.pack(fill="x", pady=(0, 8))
-        ttk.Button(toolbar, text="打开图片…", command=self.open_images, style="Primary.TButton").grid(row=0, column=0, padx=(0, 5))
-        ttk.Button(toolbar, text="打开文件夹…", command=self.open_folder, style="Quiet.TButton").grid(row=0, column=1, padx=(0, 5))
-        ttk.Button(toolbar, text="−", command=self.zoom_out, width=3, style="Quiet.TButton").grid(row=0, column=2, padx=(0, 3))
-        ttk.Button(toolbar, text="+", command=self.zoom_in, width=3, style="Quiet.TButton").grid(row=0, column=3, padx=(0, 4))
-        ttk.Button(toolbar, text="1:1", command=self.one_to_one, style="Quiet.TButton").grid(row=0, column=4, padx=(0, 4))
-        ttk.Button(toolbar, text="适应窗口", command=self.fit_images, style="Quiet.TButton").grid(row=0, column=5, padx=(0, 4))
-        ttk.Button(toolbar, text="清除选区", command=self.clear_roi, style="Quiet.TButton").grid(row=0, column=6, padx=(0, 8))
-        ttk.Label(toolbar, text="搜索", style="InspectorCard.TLabel").grid(row=0, column=7, padx=(0, 4))
+        toolbar.pack(fill="x", pady=(0, 7))
+        ttk.Button(toolbar, text="打开…", command=self.open_images, style="Primary.TButton").grid(row=0, column=0, padx=(0, 4))
+        ttk.Button(toolbar, text="文件夹…", command=self.open_folder, style="Quiet.TButton").grid(row=0, column=1, padx=(0, 4))
+        ttk.Button(toolbar, text="批量重命名…", command=self.batch_rename_folder, style="Quiet.TButton").grid(row=0, column=2, padx=(0, 10))
+        ttk.Separator(toolbar, orient="vertical").grid(row=0, column=3, sticky="ns", padx=(0, 9))
+        ttk.Button(toolbar, text="−", command=self.zoom_out, width=3, style="Quiet.TButton").grid(row=0, column=4, padx=(0, 2))
+        ttk.Button(toolbar, text="1:1", command=self.one_to_one, style="Quiet.TButton").grid(row=0, column=5, padx=2)
+        ttk.Button(toolbar, text="+", command=self.zoom_in, width=3, style="Quiet.TButton").grid(row=0, column=6, padx=2)
+        ttk.Button(toolbar, text="适应", command=self.fit_images, style="Quiet.TButton").grid(row=0, column=7, padx=(2, 10))
+        ttk.Separator(toolbar, orient="vertical").grid(row=0, column=8, sticky="ns", padx=(0, 9))
+        ttk.Button(toolbar, text="清除选区", command=self.clear_roi, style="Quiet.TButton").grid(row=0, column=9, padx=(0, 8))
+        ttk.Label(toolbar, text="匹配范围", style="InspectorCard.TLabel").grid(row=0, column=10, padx=(0, 4))
         self.search_range_var = tk.StringVar(value=f"±{self.settings.search_range}")
         self.search_combo = ttk.Combobox(
             toolbar,
@@ -1529,7 +1897,7 @@ class ImageInspectorWorkspace:
             width=6,
             state="readonly",
         )
-        self.search_combo.grid(row=0, column=8, padx=(0, 8))
+        self.search_combo.grid(row=0, column=11, padx=(0, 8))
         self.search_combo.bind("<<ComboboxSelected>>", lambda _event: self._settings_changed())
         self.live_pixel_var = tk.BooleanVar(value=self.settings.live_pixel)
         self.show_histogram_var = tk.BooleanVar(value=self.settings.show_histogram)
@@ -1542,22 +1910,22 @@ class ImageInspectorWorkspace:
         # cannot be created safely before _build_ui.
         self._build_menu()
         self.match_status_var = tk.StringVar(value="匹配：—")
-        toolbar.columnconfigure(9, weight=1)
+        toolbar.columnconfigure(12, weight=1)
         self.progress = ttk.Progressbar(toolbar, mode="indeterminate", length=80)
-        self.progress.grid(row=0, column=9, sticky="e")
+        self.progress.grid(row=0, column=12, sticky="e")
         self.progress.grid_remove()
 
-        location_bar = ttk.Frame(self.outer, padding=(9, 7), style="InspectorCard.TFrame")
+        location_bar = ttk.Frame(self.outer, padding=(8, 6), style="InspectorSurface.TFrame")
         self.location_bar = location_bar
         location_bar.pack(fill="x", pady=(0, 8))
-        ttk.Label(location_bar, text="位置", style="InspectorCard.TLabel").grid(row=0, column=0, padx=(0, 6))
+        ttk.Label(location_bar, text="⌂", style="InspectorCard.TLabel").grid(row=0, column=0, padx=(0, 6))
         self.folder_path_var = tk.StringVar(value=self.last_directory or "")
         self.folder_address_entry = ttk.Entry(location_bar, textvariable=self.folder_path_var)
         self.folder_address_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8))
         self.folder_address_entry.bind("<Return>", self._open_folder_from_address)
         self.folder_sidebar_toggle_button = ttk.Button(
             location_bar,
-            text="图库",
+            text="显示图库",
             command=self.toggle_folder_sidebar,
             state="disabled",
             style="Quiet.TButton",
@@ -1589,12 +1957,28 @@ class ImageInspectorWorkspace:
         self.next_group_button.grid(row=0, column=5, padx=(4, 4))
         self.sidebar_toggle_button = ttk.Button(
             location_bar,
-            text="收起信息",
+            text="收起检查器",
             command=self.toggle_analysis_sidebar,
             style="Quiet.TButton",
         )
         self.sidebar_toggle_button.grid(row=0, column=6, padx=(6, 0))
         location_bar.columnconfigure(1, weight=1)
+
+        status_bar = ttk.Frame(self.outer, padding=(8, 5), style="InspectorSurface.TFrame")
+        self.status_bar = status_bar
+        status_bar.pack(side="bottom", fill="x", pady=(7, 0))
+        ttk.Label(
+            status_bar,
+            textvariable=self.status_var,
+            style="InspectorSubtitle.TLabel",
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True)
+        ttk.Label(
+            status_bar,
+            textvariable=self.match_status_var,
+            style="InspectorSubtitle.TLabel",
+            anchor="e",
+        ).pack(side="right", padx=(12, 0))
 
         self.main_pane = ttk.Panedwindow(self.outer, orient="horizontal")
         self.main_pane.pack(fill="both", expand=True)
@@ -1641,10 +2025,16 @@ class ImageInspectorWorkspace:
             select_callback=self._on_thumbnail_selected,
             request_callback=self._request_folder_thumbnails,
             collapse_callback=lambda: self._set_folder_sidebar_visible(False),
+            context_callback=self._show_thumbnail_context_menu,
         )
         self.main_pane.add(self.viewer_container, weight=4)
 
-        self.sidebar_frame = ttk.Frame(self.main_pane, padding=(8, 0, 0, 0), style="InspectorSurface.TFrame")
+        self.sidebar_frame = ttk.Frame(
+            self.main_pane,
+            width=350,
+            padding=(10, 0, 0, 0),
+            style="InspectorSurface.TFrame",
+        )
         sidebar_header = ttk.Frame(self.sidebar_frame, style="InspectorSurface.TFrame")
         sidebar_header.pack(fill="x", pady=(0, 4))
         ttk.Label(sidebar_header, text="检查器", style="InspectorCardTitle.TLabel").pack(side="left")
@@ -1662,7 +2052,7 @@ class ImageInspectorWorkspace:
         self.compare_tab = ttk.Frame(self.notebook, padding=6, style="InspectorRoot.TFrame")
         self.notebook.add(self.info_tab, text="直方图 / EXIF")
         self.notebook.add(self.compare_tab, text="对比")
-        self.main_pane.add(self.sidebar_frame, weight=1)
+        self.main_pane.add(self.sidebar_frame, weight=0)
         self._sidebar_visible = True
         self._folder_sidebar_requested = False
         self._sidebar_ratio = self.settings.panel_ratio
@@ -1671,9 +2061,7 @@ class ImageInspectorWorkspace:
         self._build_comparison_panel()
         self._set_image_count(1)
         self.root.after_idle(self._restore_panel_ratio)
-        self.status_var = tk.StringVar(
-            value="请打开 1–4 张图片，或从左侧图库选择；滚轮联动缩放，右键图片可旋转或镜像。"
-        )
+        self.root.after(140, self._restore_panel_ratio)
 
     def _build_information_panel(self) -> None:
         controls = ttk.Frame(self.info_tab, padding=(9, 8), style="InspectorCard.TFrame")
@@ -1791,7 +2179,7 @@ class ImageInspectorWorkspace:
                 style="InspectorMutedCard.TLabel",
                 justify="left",
                 anchor="nw",
-                wraplength=330,
+                wraplength=300,
             )
             exif_label.pack(fill="x")
             self.info_sections[role] = section
@@ -1875,7 +2263,7 @@ class ImageInspectorWorkspace:
             controls,
             textvariable=self.comparison_base_var,
             state="readonly",
-            width=9,
+            width=7,
         )
         self.comparison_base_combo.grid(row=0, column=1, sticky="w", padx=(5, 8))
         self.comparison_base_combo.bind(
@@ -1887,7 +2275,7 @@ class ImageInspectorWorkspace:
             controls,
             textvariable=self.comparison_role_var,
             state="readonly",
-            width=9,
+            width=7,
         )
         self.comparison_role_combo.grid(row=0, column=3, sticky="w", padx=(5, 6))
         self.comparison_role_combo.bind(
@@ -1905,14 +2293,14 @@ class ImageInspectorWorkspace:
             controls,
             textvariable=self.comparison_files_var,
             style="InspectorMutedCard.TLabel",
-            wraplength=390,
+            wraplength=315,
         ).grid(row=1, column=0, columnspan=6, sticky="ew", pady=(6, 3))
         self.comparison_gate_var = tk.StringVar(value="匹配置信度：—")
         self.comparison_gate_label = ttk.Label(
             controls,
             textvariable=self.comparison_gate_var,
             style="InspectorMatchLow.TLabel",
-            wraplength=390,
+            wraplength=315,
         )
         self.comparison_gate_label.grid(row=3, column=0, columnspan=6, sticky="w", pady=(4, 0))
         swatches = ttk.Frame(controls, style="InspectorSurface.TFrame")
@@ -1955,14 +2343,14 @@ class ImageInspectorWorkspace:
             "delta": "Delta",
             "change": "变化方向",
         }
-        widths = {"metric": 126, "reference": 88, "target": 88, "delta": 88, "change": 112}
+        widths = {"metric": 80, "reference": 58, "target": 58, "delta": 58, "change": 80}
         for column in columns:
             alignment = "w" if column == "metric" else "e"
             self.compare_tree.heading(column, text=headings[column], anchor=alignment)
             self.compare_tree.column(
                 column,
                 width=widths[column],
-                minwidth=widths[column],
+                minwidth=52,
                 anchor=alignment,
                 stretch=False,
             )
@@ -2176,7 +2564,7 @@ class ImageInspectorWorkspace:
                 left_width = min(286, max(256, int(width * 0.18)))
                 self.main_pane.sashpos(0, left_width)
             if right_visible:
-                ratio = min(0.36, max(0.20, float(self._sidebar_ratio)))
+                ratio = min(0.32, max(0.22, float(self._sidebar_ratio)))
                 right_width = int(width * ratio)
                 right_sash = len(panes) - 2
                 self.main_pane.sashpos(right_sash, width - right_width)
@@ -2199,19 +2587,19 @@ class ImageInspectorWorkspace:
         visible = bool(visible)
         current = self._analysis_sidebar_is_visible()
         if visible and not current:
-            self.main_pane.add(self.sidebar_frame, weight=1)
+            self.main_pane.add(self.sidebar_frame, weight=0)
         elif not visible and current:
             width = self.main_pane.winfo_width()
             if width > 10 and len(self.main_pane.panes()) > 1:
                 try:
                     sash_index = len(self.main_pane.panes()) - 2
                     sash = self.main_pane.sashpos(sash_index)
-                    self._sidebar_ratio = min(0.42, max(0.20, (width - sash) / width))
+                    self._sidebar_ratio = min(0.32, max(0.22, (width - sash) / width))
                 except tk.TclError:
                     pass
             self.main_pane.forget(self.sidebar_frame)
         self._sidebar_visible = visible
-        self.sidebar_toggle_button.configure(text="收起信息" if visible else "显示信息")
+        self.sidebar_toggle_button.configure(text="收起检查器" if visible else "显示检查器")
         if visible:
             try:
                 self.root.update_idletasks()
@@ -2266,7 +2654,7 @@ class ImageInspectorWorkspace:
             self._folder_browser_available = False
             self.folder_selection_anchor = None
             self.folder_thumbnail_strip.set_paths(())
-            self.folder_sidebar_toggle_button.configure(text="图库", state="disabled")
+            self.folder_sidebar_toggle_button.configure(text="显示图库", state="disabled")
 
     def _request_folder_thumbnails(self, items: Sequence[Tuple[int, Path]]) -> None:
         generation = self._folder_thumbnail_generation
@@ -3258,7 +3646,8 @@ class ImageInspectorWorkspace:
     def _show_image_context_menu(self, role: str, x_root: int, y_root: int) -> None:
         """Open native image-orientation actions for the clicked viewport."""
 
-        if role not in self.active_roles or self.images.get(role) is None:
+        image_data = self.images.get(role)
+        if role not in self.active_roles or image_data is None:
             return
         menu = getattr(self, "_image_context_menu", None)
         try:
@@ -3270,6 +3659,18 @@ class ImageInspectorWorkspace:
             self._image_context_menu = menu
         else:
             menu.delete(0, "end")
+        menu.add_command(label=image_data.filename, state="disabled")
+        if len(self.active_roles) > 1:
+            menu.add_command(
+                label="设为对比基准",
+                command=lambda selected=role: self._set_comparison_base(selected),
+            )
+        if image_data.path in self.folder_paths:
+            menu.add_command(
+                label="在图库中显示",
+                command=lambda path=image_data.path: self._reveal_in_gallery(path),
+            )
+        menu.add_separator()
         menu.add_command(
             label=ORIENTATION_LABELS["rotate_left"],
             command=lambda selected=role: self._apply_image_orientation(selected, "rotate_left"),
@@ -3293,6 +3694,16 @@ class ImageInspectorWorkspace:
             command=lambda selected=role: self._reset_image_orientation(selected),
             state="normal" if self.image_transform_ops[role] else "disabled",
         )
+        menu.add_separator()
+        menu.add_command(
+            label="重命名此图片...",
+            command=lambda path=image_data.path: self.batch_rename_paths([path]),
+        )
+        if len(self.current_paths) > 1:
+            menu.add_command(
+                label=f"重命名当前所选 {len(self.current_paths)} 张...",
+                command=lambda: self.batch_rename_paths(self.current_paths),
+            )
         try:
             menu.tk_popup(int(x_root), int(y_root))
         finally:
@@ -3300,6 +3711,143 @@ class ImageInspectorWorkspace:
                 menu.grab_release()
             except tk.TclError:
                 pass
+
+    def _set_comparison_base(self, role: str) -> None:
+        if role not in self.active_roles or not hasattr(self, "comparison_base_var"):
+            return
+        label = _role_label(role)
+        self.comparison_base_var.set(label)
+        if self.comparison_role_var.get() == label:
+            alternative = next((_role_label(item) for item in self.active_roles if item != role), "")
+            self.comparison_role_var.set(alternative)
+        self._refresh_comparison_table()
+
+    def _reveal_in_gallery(self, path: Path) -> None:
+        if path not in self.folder_paths:
+            return
+        self._set_folder_sidebar_visible(True)
+        self.folder_thumbnail_strip.set_active_paths(self.current_paths)
+
+    def _show_thumbnail_context_menu(self, path: Path, x_root: int, y_root: int) -> None:
+        menu = getattr(self, "_thumbnail_context_menu", None)
+        try:
+            menu_alive = menu is not None and bool(menu.winfo_exists())
+        except tk.TclError:
+            menu_alive = False
+        if not menu_alive:
+            menu = tk.Menu(self.root, tearoff=False)
+            self._thumbnail_context_menu = menu
+        else:
+            menu.delete(0, "end")
+        menu.add_command(label=path.name, state="disabled")
+        menu.add_command(
+            label="只查看此图片",
+            command=lambda selected=path: self._on_thumbnail_selected(selected, False, False),
+        )
+        selected_paths = self.current_paths if path in self.current_paths else [path]
+        menu.add_command(
+            label=f"重命名所选 {len(selected_paths)} 张...",
+            command=lambda values=tuple(selected_paths): self.batch_rename_paths(values),
+        )
+        if self.folder_paths:
+            menu.add_command(label="批量重命名当前文件夹...", command=self.batch_rename_folder)
+        role = next(
+            (
+                active_role
+                for active_role in self.active_roles
+                if self.images.get(active_role) is not None
+                and self.images[active_role].path == path  # type: ignore[union-attr]
+            ),
+            None,
+        )
+        if role is not None:
+            menu.add_separator()
+            menu.add_command(
+                label=ORIENTATION_LABELS["rotate_left"],
+                command=lambda selected=role: self._apply_image_orientation(selected, "rotate_left"),
+            )
+            menu.add_command(
+                label=ORIENTATION_LABELS["rotate_right"],
+                command=lambda selected=role: self._apply_image_orientation(selected, "rotate_right"),
+            )
+            menu.add_command(
+                label=ORIENTATION_LABELS["flip_horizontal"],
+                command=lambda selected=role: self._apply_image_orientation(selected, "flip_horizontal"),
+            )
+            menu.add_command(
+                label=ORIENTATION_LABELS["flip_vertical"],
+                command=lambda selected=role: self._apply_image_orientation(selected, "flip_vertical"),
+            )
+        try:
+            menu.tk_popup(int(x_root), int(y_root))
+        finally:
+            try:
+                menu.grab_release()
+            except tk.TclError:
+                pass
+
+    def batch_rename_folder(self) -> None:
+        paths = self.folder_paths or self.current_paths
+        if not paths:
+            messagebox.showinfo("尚无图片", "请先打开图片或图片文件夹。", parent=self.root)
+            return
+        initially_selected = self.current_paths if self.folder_paths else paths
+        self.batch_rename_paths(paths, initially_selected=initially_selected)
+
+    def batch_rename_paths(
+        self,
+        paths: Sequence[Path],
+        *,
+        initially_selected: Optional[Sequence[Path]] = None,
+    ) -> None:
+        unique_paths = selected_paths_in_folder_order(self.folder_paths, paths) if self.folder_paths else [
+            Path(path) for path in paths
+        ]
+        if not unique_paths:
+            unique_paths = [Path(path) for path in paths]
+        existing = self._batch_rename_dialog
+        if existing is not None:
+            try:
+                if existing.dialog.winfo_exists():
+                    existing.dialog.lift()
+                    existing.dialog.focus_force()
+                    return
+            except tk.TclError:
+                pass
+        self._batch_rename_dialog = BatchRenameDialog(
+            self.root,
+            unique_paths,
+            initially_selected=initially_selected,
+            on_complete=self._apply_renamed_paths,
+        )
+
+    def _apply_renamed_paths(self, mapping: dict[Path, Path]) -> None:
+        self._batch_rename_dialog = None
+        resolved = {Path(source).resolve(): Path(destination).resolve() for source, destination in mapping.items()}
+
+        def renamed(path: Path) -> Path:
+            return resolved.get(Path(path).resolve(), Path(path).resolve())
+
+        self.folder_paths = [renamed(path) for path in self.folder_paths]
+        self.folder_groups = [[renamed(path) for path in group] for group in self.folder_groups]
+        self.current_paths = [renamed(path) for path in self.current_paths]
+        if self.folder_selection_anchor is not None:
+            self.folder_selection_anchor = renamed(self.folder_selection_anchor)
+        self._image_cache.clear()
+        for role in self.active_roles:
+            image_data = self.images.get(role)
+            if image_data is None:
+                continue
+            image_data.path = renamed(image_data.path)
+            self._image_cache.put(image_data)
+            self.views[role].set_title(f"{_role_label(role)} · {image_data.filename}")
+        if self.folder_paths:
+            self.folder_thumbnail_strip.set_paths(self.folder_paths)
+            self.folder_thumbnail_strip.set_active_paths(self.current_paths)
+        self._refresh_information_sidebar()
+        self._update_group_navigation()
+        changed = sum(source != destination for source, destination in resolved.items())
+        self.status_var.set(f"已安全重命名 {changed} 张图片；图片内容与扩展名未改变。")
 
     def _replace_oriented_image(
         self,
@@ -3558,11 +4106,17 @@ class ImageInspectorWorkspace:
         ):
             histogram.histogram = None
         context_menu = getattr(self, "_image_context_menu", None)
-        if context_menu is not None:
+        thumbnail_menu = getattr(self, "_thumbnail_context_menu", None)
+        for menu in (context_menu, thumbnail_menu):
+            if menu is None:
+                continue
             try:
-                context_menu.destroy()
+                menu.destroy()
             except tk.TclError:
                 pass
+        if self._batch_rename_dialog is not None:
+            self._batch_rename_dialog.close()
+            self._batch_rename_dialog = None
 
     def close(self) -> None:
         if self.on_close is not None:

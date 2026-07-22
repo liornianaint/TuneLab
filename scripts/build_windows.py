@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import os
 import platform
 import subprocess
@@ -8,6 +9,17 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_MODULES = ("numpy", "PIL", "cv2", "reportlab", "pillow_heif")
+
+
+def missing_build_modules() -> list[str]:
+    missing: list[str] = []
+    for module in ("PyInstaller", *RUNTIME_MODULES):
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            missing.append(module)
+    return missing
 
 
 def prepare_icon() -> Path:
@@ -36,10 +48,17 @@ def main() -> int:
     if platform.system() != "Windows":
         print("Windows EXE 必须在 Windows 上构建；PyInstaller 不支持跨系统生成 EXE。", file=sys.stderr)
         return 2
-    try:
-        import PyInstaller  # noqa: F401
-    except ImportError:
-        print("请先在工程虚拟环境运行: python -m pip install -e . pyinstaller", file=sys.stderr)
+    expected_environment = ROOT / ".venv"
+    if expected_environment.is_dir() and Path(sys.prefix).resolve() != expected_environment.resolve():
+        print("请使用 .venv\\Scripts\\python scripts\\build_windows.py 构建。", file=sys.stderr)
+        return 2
+    missing = missing_build_modules()
+    if missing:
+        print(
+            "构建环境缺少运行模块：" + ", ".join(missing)
+            + "\n请先运行: .venv\\Scripts\\python -m pip install -e . pyinstaller",
+            file=sys.stderr,
+        )
         return 2
     icon = prepare_icon()
     command = [
@@ -56,6 +75,12 @@ def main() -> int:
         str(icon),
         "--add-data",
         f"{ROOT / 'tunelab' / 'assets' / 'tunelab.png'}{os.pathsep}tunelab/assets",
+        "--hidden-import",
+        "numpy",
+        "--hidden-import",
+        "cv2",
+        "--hidden-import",
+        "pillow_heif",
         "--paths",
         str(ROOT),
         str(ROOT / "run_tunelab.py"),

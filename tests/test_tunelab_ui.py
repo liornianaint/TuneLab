@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tkinter as tk
 import tkinter.font as tkfont
+import platform
 import unittest
 from pathlib import Path
 from tkinter import ttk
@@ -122,7 +123,12 @@ class DesktopUISmokeTests(unittest.TestCase):
             except tk.TclError:
                 pass
 
+    def open_cc_workspace(self) -> None:
+        self.app.show_cc_workspace()
+        self.root.update_idletasks()
+
     def test_file_menu_and_primary_actions_are_not_duplicated(self) -> None:
+        self.open_cc_workspace()
         labels = [
             self.app.file_menu.entrycget(index, "label")
             for index in range(self.app.file_menu.index("end") + 1)
@@ -162,10 +168,8 @@ class DesktopUISmokeTests(unittest.TestCase):
             style.lookup("Primary.TButton", "background", ("active",)),
             ACTION_BLUE_HOVER,
         )
-        self.assertEqual(
-            style.lookup("Primary.TButton", "foreground", ("active",)),
-            "white",
-        )
+        expected_primary_ink = ACTION_BLUE if style.theme_use() == "aqua" else "white"
+        self.assertEqual(style.lookup("Primary.TButton", "foreground", ("active",)), expected_primary_ink)
         self.assertEqual(
             style.lookup("RegionMatch.TButton", "foreground", ("active",)),
             "#1D1D1F",
@@ -181,6 +185,7 @@ class DesktopUISmokeTests(unittest.TestCase):
         )
 
     def test_save_xml_defaults_to_confirmed_source_overwrite(self) -> None:
+        self.open_cc_workspace()
         document = QualcommCCDocument.load(CC_XML)
         self.app.document = document
         self.app.selected_region = document.regions[0]
@@ -243,12 +248,14 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertNotIn("CSV 需要 R/G/B-meas", WORKBENCH_HELP_TEXT)
 
     def test_selected_region_is_always_visible(self) -> None:
+        self.open_cc_workspace()
         document = QualcommCCDocument.load(CC_XML)
         self.app.document = document
         self.app._select_region(0)
         self.assertIn("当前 Region：#0", self.app.active_region_var.get())
 
     def test_comparison_tab_contains_plots_and_complete_scrollable_patch_table(self) -> None:
+        self.open_cc_workspace()
         tabs = [self.app.notebook.tab(tab_id, "text").strip() for tab_id in self.app.notebook.tabs()]
         self.assertEqual(tabs[0], "色差对比")
         self.assertNotIn("ColorChecker 输入", tabs)
@@ -258,11 +265,14 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertFalse(self.app.advanced_parameters.winfo_manager())
         self.assertEqual(self.app.before_plot.title, "改前：Camera / Ideal")
         self.assertEqual(self.app.after_plot.title, "改后模拟：Camera / Ideal")
-        self.assertEqual(self.root.title(), APP_TITLE)
-        self.assertIsNotNone(self.app._app_icon)
+        self.assertEqual(self.root.title(), f"{APP_TITLE} · CCM / ColorChecker 校正")
         self.assertEqual(self.app.app_icon_source_path.resolve(), (ROOT / "tunelab" / "assets" / "tunelab.png").resolve())
         self.assertTrue(self.app.app_icon_path.exists())
-        self.assertGreaterEqual(self.app._app_icon.width(), 512)
+        if platform.system() == "Darwin":
+            self.assertIsNone(self.app._app_icon)
+        else:
+            self.assertIsNotNone(self.app._app_icon)
+            self.assertGreaterEqual(self.app._app_icon.width(), 512)
         from PIL import Image
 
         with Image.open(self.app.app_icon_path) as icon:
@@ -307,6 +317,7 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertFalse(any("CIEDE2000" in text for text in visible_text))
 
     def test_comparison_fonts_and_plot_colours_are_consistent(self) -> None:
+        self.open_cc_workspace()
         style = ttk.Style(self.root)
         self.assertEqual(style.lookup("Kpi.TLabel", "font"), FONT_KPI)
         self.assertEqual(style.lookup("KpiCompact.TLabel", "font"), FONT_KPI)
@@ -348,6 +359,7 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertEqual(families.mono, "Cascadia Mono")
 
     def test_plot_and_table_patch_selection_are_bidirectionally_linked(self) -> None:
+        self.open_cc_workspace()
         dataset = d65_dataset()
         document = QualcommCCDocument.load(CC_XML)
         region, _mode = document.find_region_for_cct(6500)
@@ -369,6 +381,7 @@ class DesktopUISmokeTests(unittest.TestCase):
                 self.assertLessEqual(patch_box[3], top + side + 2)
 
     def test_show_motion_hides_only_motion_artists_without_resetting_view(self) -> None:
+        self.open_cc_workspace()
         dataset = d65_dataset()
         document = QualcommCCDocument.load(CC_XML)
         region, _mode = document.find_region_for_cct(6500)
@@ -432,6 +445,7 @@ class DesktopUISmokeTests(unittest.TestCase):
                 self.assertLessEqual(patch_box[3], top + side + 2)
 
     def test_patch_table_sorting_tooltip_and_embedded_gamma_switch(self) -> None:
+        self.open_cc_workspace()
         dataset = d65_dataset()
         document = QualcommCCDocument.load(CC_XML)
         region, _mode = document.find_region_for_cct(6500)
@@ -471,7 +485,8 @@ class DesktopUISmokeTests(unittest.TestCase):
 
     def test_home_is_default_and_module_switches_do_not_create_toplevels(self) -> None:
         self.assertTrue(self.app.home_view.winfo_manager())
-        self.assertFalse(self.app.cc_view.winfo_manager())
+        self.assertIsNone(self.app.cc_view)
+        self.assertFalse(self.app._cc_workspace_built)
         visible_text: list[str] = []
 
         def visit(widget: tk.Misc) -> None:
@@ -485,19 +500,23 @@ class DesktopUISmokeTests(unittest.TestCase):
         self.assertNotIn("快捷操作", visible_text)
         self.assertNotIn("Qualcomm CC13", visible_text)
         self.assertNotIn("把调校工作，收进一个窗口。", visible_text)
-        self.assertIn("TuneLab 相机调校工程工作台", visible_text)
+        self.assertNotIn("让每一次调校都有依据", visible_text)
+        self.assertNotIn("CAMERA TUNING WORKBENCH", visible_text)
+        self.assertNotIn("工程入口", visible_text)
+        self.assertNotIn("素材目录已就绪", visible_text)
+        self.assertIn("工作区", visible_text)
         self.app.show_cc_workspace()
         self.root.update_idletasks()
         self.assertFalse(self.app.home_view.winfo_manager())
         self.assertTrue(self.app.cc_view.winfo_manager())
-        self.assertLessEqual(self.app.controls_panel.winfo_reqwidth(), 1140)
+        self.assertLessEqual(self.app.controls_panel.winfo_reqwidth(), 1240)
         self.assertLessEqual(self.app.controls_panel.winfo_reqheight(), 130)
         self.assertLessEqual(self.app.parameters_panel.winfo_reqwidth(), 1020)
         self.assertLessEqual(self.app.parameters_panel.winfo_reqheight(), 105)
         gamma = self.app.open_gamma_optimizer()
         self.root.update_idletasks()
         self.assertTrue(gamma.outer.winfo_manager())
-        self.assertLessEqual(gamma.toolbar_panel.winfo_reqwidth(), 1140)
+        self.assertLessEqual(gamma.toolbar_panel.winfo_reqwidth(), 1240)
         self.assertLessEqual(gamma.toolbar_panel.winfo_reqheight(), 65)
         self.assertLessEqual(gamma.settings_panel.winfo_reqwidth(), 1100)
         self.assertLessEqual(gamma.settings_panel.winfo_reqheight(), 105)

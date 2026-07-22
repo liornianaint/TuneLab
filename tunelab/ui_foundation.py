@@ -88,11 +88,20 @@ class WindowPlacement:
 def default_sources_directory() -> Path:
     """Return the current plural ``sources`` folder for native file dialogs."""
 
-    candidates = (
+    candidates = [
         Path.cwd() / "sources",
         Path(__file__).resolve().parents[1] / "sources",
-        Path(getattr(sys, "_MEIPASS", Path.cwd())) / "sources",
-    )
+    ]
+    # A locally built macOS bundle lives at
+    # ``<project>/dist/TuneLab.app/Contents/MacOS/TuneLab``.  Finder does not
+    # preserve the project's working directory when it launches the bundle, so
+    # also look beside the bundle's ancestors.  This keeps the canonical
+    # project ``sources`` folder discoverable without copying or renaming it.
+    try:
+        executable = Path(sys.executable).resolve()
+        candidates.extend(parent / "sources" for parent in executable.parents[:6])
+    except (OSError, RuntimeError):
+        pass
     for candidate in candidates:
         if candidate.is_dir():
             return candidate
@@ -315,7 +324,17 @@ def configure_macos_theme(
     """Apply the shared macOS-inspired control language on every platform."""
 
     selected_style = style or ttk.Style(root)
-    if "clam" in selected_style.theme_names():
+    themes = set(selected_style.theme_names())
+    # Aqua is the only ttk theme that delegates controls to AppKit.  Forcing
+    # "clam" on macOS made buttons, tabs, checkboxes and focus rings look like
+    # a themed Linux application.  Keep the true native renderer on macOS and
+    # use the best native-ish renderer available elsewhere.
+    current_system = platform.system()
+    if current_system == "Darwin" and "aqua" in themes:
+        selected_style.theme_use("aqua")
+    elif current_system == "Windows" and "vista" in themes:
+        selected_style.theme_use("vista")
+    elif "clam" in themes:
         selected_style.theme_use("clam")
     selected_style = configure_typography(
         root,
@@ -336,8 +355,8 @@ def configure_macos_theme(
     selected_style.configure(
         "Card.TFrame",
         background=PANEL_BG,
-        borderwidth=1,
-        relief="solid",
+        borderwidth=0,
+        relief="flat",
         bordercolor=SUBTLE_SEPARATOR,
         lightcolor=SUBTLE_SEPARATOR,
         darkcolor=SUBTLE_SEPARATOR,
@@ -496,10 +515,12 @@ def elide_canvas_text(
 def configure_action_styles(style: ttk.Style) -> ttk.Style:
     """Install identical primary and Region-match button states in every module."""
 
+    aqua = style.theme_use() == "aqua"
+    primary_foreground = ACTION_BLUE if aqua else "white"
     style.configure(
         "Primary.TButton",
         background=ACTION_BLUE,
-        foreground="white",
+        foreground=primary_foreground,
         padding=(12, 6),
         borderwidth=0,
         font=FONT_BODY_BOLD,
@@ -514,9 +535,9 @@ def configure_action_styles(style: ttk.Style) -> ttk.Style:
             ("active", ACTION_BLUE_HOVER),
         ],
         foreground=[
-            ("disabled", "#F5F5F7"),
-            ("pressed", "white"),
-            ("active", "white"),
+            ("disabled", ACTION_DISABLED),
+            ("pressed", primary_foreground),
+            ("active", primary_foreground),
         ],
     )
     style.configure(
@@ -542,7 +563,7 @@ def configure_action_styles(style: ttk.Style) -> ttk.Style:
     style.configure(
         "Danger.TButton",
         background=DANGER,
-        foreground="white",
+        foreground=DANGER if aqua else "white",
         padding=(14, 7),
         borderwidth=0,
         font=FONT_BODY_BOLD,
@@ -550,6 +571,10 @@ def configure_action_styles(style: ttk.Style) -> ttk.Style:
     style.map(
         "Danger.TButton",
         background=[("disabled", ACTION_DISABLED), ("pressed", "#A90011"), ("active", "#E10A20")],
-        foreground=[("disabled", "#F5F5F7"), ("pressed", "white"), ("active", "white")],
+        foreground=[
+            ("disabled", ACTION_DISABLED),
+            ("pressed", DANGER if aqua else "white"),
+            ("active", DANGER if aqua else "white"),
+        ],
     )
     return style

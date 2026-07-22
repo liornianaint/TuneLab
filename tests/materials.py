@@ -9,7 +9,7 @@ from tunelab.ccm.models import ImatestDataset
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = ROOT / "sources"
-CC_XML = SOURCES / "cc13_ipe_v2_改前.xml"
+CC_XML = SOURCES / "cc13_ipe_v2.xml"
 D65_IMAGE = SOURCES / "D65_normal.jpg"
 D65_CSV = SOURCES / "D65_normal_summary.csv"
 

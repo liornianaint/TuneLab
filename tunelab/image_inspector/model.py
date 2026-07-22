@@ -194,6 +194,23 @@ def histogram_luminance(display_rgb: np.ndarray) -> np.ndarray:
     return histogram
 
 
+def build_render_preview(display_rgb: np.ndarray, max_side: int = 2048) -> tuple[np.ndarray, float]:
+    """Return a small shared display pyramid level for fit-to-window rendering.
+
+    The full-resolution pixels remain the only analysis source.  This bounded
+    view exists solely to prevent Tk/Pillow from materialising an entire
+    19-megapixel RGB copy when the image is displayed at roughly 1,000 pixels.
+    """
+
+    values = np.asarray(display_rgb, dtype=np.uint8)
+    height, width = values.shape[:2]
+    step = max(1, int(math.ceil(max(height, width) / max(1, int(max_side)))))
+    if step == 1:
+        return values, 1.0
+    preview = np.ascontiguousarray(values[::step, ::step], dtype=np.uint8)
+    return preview, 1.0 / float(step)
+
+
 IMAGE_ORIENTATION_OPERATIONS = frozenset(
     {"rotate_left", "rotate_right", "flip_horizontal", "flip_vertical"}
 )
@@ -225,6 +242,7 @@ def reorient_image(image: ImageData, operation: str) -> ImageData:
     rgb = transformed(image.rgb)
     display_rgb = rgb if image.display_rgb is image.rgb else transformed(image.display_rgb)
     alpha = transformed(image.alpha)
+    render_preview = transformed(image.render_preview)
     height, width = np.asarray(rgb).shape[:2]
     return replace(
         image,
@@ -233,6 +251,7 @@ def reorient_image(image: ImageData, operation: str) -> ImageData:
         rgb=rgb,
         display_rgb=display_rgb,
         alpha=alpha,
+        render_preview=render_preview,
     )
 
 
@@ -427,6 +446,7 @@ def load_image(path: Union[str, Path]) -> ImageData:
                     else np.ascontiguousarray(np.clip(alpha, 0.0, 255.0), dtype=np.float32)
                 )
             actual_height, actual_width = rgb.shape[:2]
+            render_preview, render_preview_scale = build_render_preview(display)
             return ImageData(
                 path=source_path.resolve(),
                 width=actual_width,
@@ -442,6 +462,8 @@ def load_image(path: Union[str, Path]) -> ImageData:
                 histogram=histogram_rgb(display),
                 luminance_histogram=histogram_luminance(display),
                 exif=exif,
+                render_preview=render_preview,
+                render_preview_scale=render_preview_scale,
             )
     except ImageLoadError:
         raise
