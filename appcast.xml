@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><!-- sparkle-sign-warning:
+IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
+--><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>TuneLab</title>
+        <item>
+            <title>1.2.0</title>
+            <pubDate>Thu, 23 Jul 2026 23:09:40 +0800</pubDate>
+            <link>https://github.com/liornianaint/TuneLab/releases/tag/v1.2.0</link>
+            <sparkle:version>1.2.0</sparkle:version>
+            <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/liornianaint/TuneLab/releases/download/v1.2.0/TuneLab-1.2.0-macOS-arm64.zip" length="74747089" type="application/octet-stream" sparkle:edSignature="kZD0EqObKl+WDpdJfOigMlLd5OTGBqHX7+GgSpBGucAiVkdHcK7mnCh/UbNAqOqQWpWhdzMV0Oxggyr//JxfAA=="></enclosure>
+        </item>
+        <item>
+            <title>1.1.0</title>
+            <pubDate>Thu, 23 Jul 2026 22:53:35 +0800</pubDate>
+            <link>https://github.com/liornianaint/TuneLab/releases/tag/v1.1.0</link>
+            <sparkle:version>1.1.0</sparkle:version>
+            <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/liornianaint/TuneLab/releases/download/v1.1.0/TuneLab-1.1.0-macOS-arm64.zip" length="73726157" type="application/octet-stream" sparkle:edSignature="8eRBiXKslMtAC8idWSCR2jECU1qTGNV1hEBjYO83IIf7HhpJPmBdHMklXtgqYURDG1tDfakIRlrpGSmKxiiGAA=="></enclosure>
+        </item>
+    </channel>
+</rss><!-- sparkle-signatures:
+edSignature: d99px2YJQLizd87NnMGfruOrDG+oRmdyjkPCzuw3YAelBXiKgXiHmQBtI4HYu65x4DsFKx4F0svtayNWnzVgAw==
+length: 2035
+-->

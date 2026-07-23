@@ -1,4 +1,4 @@
-"""GitHub Release update checks and their small native Tk controller."""
+"""Native macOS updates with a portable GitHub Release fallback."""
 
 from __future__ import annotations
 
@@ -18,9 +18,14 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from . import __version__
+from .macos_updater import (
+    SparkleUnavailable,
+    SparkleUpdater,
+    create_sparkle_updater,
+)
+from .update_config import GITHUB_REPOSITORY
 
 
-GITHUB_REPOSITORY = "liornianaint/TuneLab"
 LATEST_RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{GITHUB_REPOSITORY}/releases"
 MAX_RELEASE_RESPONSE_BYTES = 1_000_000
@@ -202,9 +207,13 @@ class UpdateController:
         root: tk.Misc,
         *,
         checker: Callable[[], UpdateCheckResult] = check_for_updates,
+        native_updater_factory: Callable[
+            [], Optional[SparkleUpdater]
+        ] = create_sparkle_updater,
     ) -> None:
         self.root = root
         self.checker = checker
+        self.native_updater_factory = native_updater_factory
         self._results: "queue.Queue[tuple[int, object]]" = queue.Queue()
         self._check_id = 0
         self._checking = False
@@ -214,6 +223,28 @@ class UpdateController:
         self._startup_scheduled = False
         self._startup_satisfied = False
         self._closed = False
+        self._native_updater: Optional[SparkleUpdater] = None
+        self._native_updater_attempted = False
+
+    def _ensure_native_updater(self) -> bool:
+        if self._native_updater is not None:
+            return True
+        if self._native_updater_attempted:
+            return False
+        self._native_updater_attempted = True
+        try:
+            updater = self.native_updater_factory()
+        except (SparkleUnavailable, OSError, RuntimeError):
+            return False
+        if updater is None:
+            return False
+        self._native_updater = updater
+        return True
+
+    def start_native_updater(self) -> bool:
+        """Start the packaged macOS updater and report whether it is active."""
+
+        return self._ensure_native_updater()
 
     def schedule_startup_check(self, delay_ms: int = 900) -> None:
         if self._closed or self._startup_scheduled:
@@ -234,6 +265,12 @@ class UpdateController:
                 return
         except tk.TclError:
             return
+        if self.start_native_updater():
+            # Starting SPUStandardUpdaterController activates Sparkle's own
+            # persisted 24-hour schedule. Calling a second background check
+            # here would reset or compete with that schedule.
+            self._startup_satisfied = True
+            return
         self.check(manual=False)
 
     def check(self, *, manual: bool) -> None:
@@ -242,6 +279,18 @@ class UpdateController:
         if manual:
             self._manual_requested = True
             self._startup_satisfied = True
+        if self._ensure_native_updater():
+            if manual:
+                try:
+                    self._native_updater.check_for_updates()
+                except (SparkleUnavailable, OSError, RuntimeError):
+                    self._native_updater.shutdown()
+                    self._native_updater = None
+                else:
+                    self._manual_requested = False
+                    return
+            else:
+                return
         if self._checking:
             return
         self._checking = True
@@ -343,6 +392,9 @@ class UpdateController:
                 pass
         self._startup_after_id = None
         self._poll_after_id = None
+        if self._native_updater is not None:
+            self._native_updater.shutdown()
+            self._native_updater = None
 
 
 def update_controller_for(root: tk.Misc) -> UpdateController:

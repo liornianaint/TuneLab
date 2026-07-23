@@ -52,7 +52,7 @@ class UpdateModelTests(unittest.TestCase):
         self.assertEqual(release.version, "1.2.0")
         self.assertEqual(release.name, "TuneLab 1.2")
         self.assertEqual(captured["timeout"], 3.0)
-        self.assertIn("TuneLab/1.1.0", captured["request"].get_header("User-agent"))
+        self.assertIn("TuneLab/1.2.0", captured["request"].get_header("User-agent"))
 
         payload["html_url"] = "https://example.com/untrusted-download"
         release = fetch_latest_release(
@@ -68,10 +68,10 @@ class UpdateModelTests(unittest.TestCase):
             fetch_latest_release(opener=opener)
 
     def test_check_result_uses_the_formal_local_version(self) -> None:
-        release = ReleaseInfo("1.1.1", "v1.1.1", "TuneLab 1.1.1", RELEASES_PAGE_URL)
+        release = ReleaseInfo("1.2.1", "v1.2.1", "TuneLab 1.2.1", RELEASES_PAGE_URL)
         with mock.patch("tunelab.updates.fetch_latest_release", return_value=release):
             result = check_for_updates()
-        self.assertEqual(result.current_version, "1.1.0")
+        self.assertEqual(result.current_version, "1.2.0")
         self.assertTrue(result.update_available)
 
 
@@ -112,6 +112,38 @@ class UpdateControllerTests(unittest.TestCase):
             info.assert_not_called()
             controller._present(missing, manual=True)
             info.assert_called_once()
+
+    def test_packaged_macos_uses_native_updater_for_manual_checks(self) -> None:
+        native_updater = mock.Mock()
+        checker = mock.Mock()
+        controller = UpdateController(
+            self.root,
+            checker=checker,
+            native_updater_factory=lambda: native_updater,
+        )
+
+        controller.check(manual=True)
+
+        native_updater.check_for_updates.assert_called_once_with()
+        checker.assert_not_called()
+        controller.shutdown()
+        native_updater.shutdown.assert_called_once_with()
+
+    def test_native_updater_owns_automatic_schedule(self) -> None:
+        native_updater = mock.Mock()
+        checker = mock.Mock()
+        self.root.winfo_toplevel.return_value.state.return_value = "normal"
+        controller = UpdateController(
+            self.root,
+            checker=checker,
+            native_updater_factory=lambda: native_updater,
+        )
+
+        controller._run_scheduled_startup_check()
+
+        checker.assert_not_called()
+        native_updater.check_for_updates.assert_not_called()
+        self.assertTrue(controller._startup_satisfied)
 
 
 if __name__ == "__main__":
