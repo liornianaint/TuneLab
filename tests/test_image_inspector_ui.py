@@ -639,11 +639,13 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         self.assertFalse(self.app.exif_frames["before"].winfo_manager())
 
     def test_right_drag_moves_existing_render_immediately_and_coalesces_refresh(self) -> None:
-        rgb = np.zeros((100, 100, 3), dtype=np.uint8)
+        # Keep the synthetic image larger than the canvas at 2× so the pan
+        # remains inside the valid range regardless of compact-layout changes.
+        rgb = np.zeros((1000, 1000, 3), dtype=np.uint8)
         data = ImageData(
             path=Path("pan.png"),
-            width=100,
-            height=100,
+            width=1000,
+            height=1000,
             bit_depth=8,
             source_mode="RGB",
             rgb=rgb,
