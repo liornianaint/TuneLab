@@ -19,7 +19,7 @@ except ImportError as exc:  # pragma: no cover
 from tunelab.image_inspector.settings import ImageInspectorSettings
 from tunelab.image_inspector.browser import ThumbnailData
 from tunelab.image_inspector.types import ImageData, ROI
-from tunelab.image_inspector.ui import ImageInspectorWorkspace, WINDOW_TITLE
+from tunelab.image_inspector.ui import EMPTY_WORKSPACE_STATUS, ImageInspectorWorkspace, WINDOW_TITLE
 
 
 class ImageInspectorUISmokeTests(unittest.TestCase):
@@ -83,8 +83,12 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         self.assertEqual(self.app.views["before"].winfo_manager(), "grid")
         self.assertFalse(self.app.views["after"].winfo_manager())
         self.root.update_idletasks()
+        self.assertEqual(tuple(int(value) for value in self.app.outer.cget("padding")), (10, 8))
+        self.assertLessEqual(self.app.top_bar.winfo_reqheight(), 84)
         self.assertLessEqual(self.app.toolbar_panel.winfo_reqwidth(), 1160)
-        self.assertLessEqual(self.app.toolbar_panel.winfo_reqheight(), 96)
+        self.assertLessEqual(self.app.toolbar_panel.winfo_reqheight(), 44)
+        self.assertLessEqual(self.app.location_bar.winfo_reqheight(), 42)
+        self.assertLessEqual(self.app.status_bar.winfo_reqheight(), 30)
         self.assertTrue(self.app.before_view.canvas.bind("<MouseWheel>"))
         if tk.TkVersion >= 9.0:
             self.assertTrue(self.app.before_view.canvas.bind("<TouchpadScroll>"))
@@ -112,6 +116,8 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         self.assertNotIn("打开 Before...", menu_labels)
         self.assertNotIn("打开 After...", menu_labels)
         self.assertTrue(self.app.folder_address_entry.winfo_exists())
+        self.assertTrue(self.app.location_home_button.winfo_exists())
+        self.assertEqual(str(self.app.location_home_button.cget("text")), "⌂")
         self.assertTrue(self.app.folder_thumbnail_strip.winfo_exists())
         self.assertFalse(hasattr(self.app, "folder_tree"))
         self.assertFalse(hasattr(self.app, "open_comparison_button"))
@@ -125,6 +131,14 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         self.assertFalse(self.app.metrics_grid.winfo_manager())
         self.app.before_view._render()
         self.assertTrue(self.app.before_view.canvas.find_withtag("viewer-chrome"))
+        self.assertEqual(str(self.app.before_view.canvas.cget("cursor")), "hand2")
+        with mock.patch(
+            "tunelab.image_inspector.ui.filedialog.askopenfilenames",
+            return_value=(),
+        ) as chooser:
+            result = self.app.before_view._on_left_press(SimpleNamespace(x=20, y=20))
+        self.assertEqual(result, "break")
+        chooser.assert_called_once()
         self.assertTrue(all(not variable.get() for variable in self.app.metric_vars.values()))
         label_texts = []
         widget_texts = []
@@ -148,12 +162,45 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
         self.assertNotIn("对比图", visible_copy)
         self.assertNotIn("详细数据", visible_copy)
         self.assertNotIn("结论", visible_copy)
+        self.assertNotIn("IMAGE INSPECTOR", visible_copy)
+        self.assertNotIn("并排检查像素、选区、直方图与 EXIF", visible_copy)
         self.assertNotIn("macOS 式图库选择", visible_copy)
         self.assertNotIn("Mean RGB 是 0–255", visible_copy)
         self.assertNotIn("将当前选区视为中性区域", widget_texts)
         self.assertFalse(hasattr(self.app, "pixel_tab"))
         self.assertFalse(hasattr(self.app, "conclusion_tab"))
         self.assertFalse(hasattr(self.app, "compare_text"))
+
+    def test_location_home_returns_to_empty_workspace_without_forgetting_open_dialog_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            paths = [folder / "home-1.png", folder / "home-2.png"]
+            for index, path in enumerate(paths):
+                Image.new("RGB", (96, 64), (50 + index * 30, 90, 130)).save(path)
+
+            self.app.open_folder(folder)
+            self.wait_until(lambda: self.app.images["before"] is not None and self.app._pending == 0)
+            self.assertTrue(self.app._folder_sidebar_is_visible())
+            self.assertEqual(self.app.folder_path_var.get(), str(folder.resolve()))
+            self.assertEqual(self.app.last_directory, str(folder.resolve()))
+
+            self.app.location_home_button.invoke()
+            self.root.update_idletasks()
+
+            self.assertEqual(self.app.folder_path_var.get(), "")
+            self.assertEqual(self.app.last_directory, str(folder.resolve()))
+            self.assertEqual(self.app.folder_paths, [])
+            self.assertEqual(self.app.folder_groups, [])
+            self.assertEqual(self.app.current_paths, [])
+            self.assertEqual(self.app.active_roles, ("before",))
+            self.assertTrue(all(image is None for image in self.app.images.values()))
+            self.assertFalse(self.app._folder_browser_available)
+            self.assertFalse(self.app._folder_sidebar_is_visible())
+            self.assertEqual(self.app.folder_thumbnail_strip.paths, [])
+            self.assertEqual(self.app.group_status_var.get(), "")
+            self.assertEqual(self.app.status_var.get(), EMPTY_WORKSPACE_STATUS)
+            self.assertTrue(self.app.before_view.canvas.find_withtag("viewer-chrome"))
+            self.assertEqual(str(self.app.before_view.canvas.cget("cursor")), "hand2")
 
     def test_one_to_four_image_layouts_without_toplevel(self) -> None:
         for count in range(1, 5):
@@ -437,7 +484,7 @@ class ImageInspectorUISmokeTests(unittest.TestCase):
             self.assertGreater(sash, self.app.main_pane.winfo_width() - sash)
             self.assertLessEqual(
                 (self.app.main_pane.winfo_width() - sash) / self.app.main_pane.winfo_width(),
-                0.36,
+                0.30,
             )
 
             self.app.sidebar_header_toggle_button.invoke()

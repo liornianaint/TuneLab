@@ -95,6 +95,11 @@ BORDER = SEPARATOR
 CANVAS_BG = "#1C1C1E"
 IMAGE_ROLES = ("before", "after", "compare3", "compare4")
 COMPARISON_ROLES = IMAGE_ROLES[1:]
+MIN_ANALYSIS_PANEL_RATIO = 0.20
+MAX_ANALYSIS_PANEL_RATIO = 0.27
+EMPTY_WORKSPACE_STATUS = (
+    "请打开 1–4 张图片，或从左侧图库选择；滚轮联动缩放，右键图片可旋转或镜像。"
+)
 IMAGE_FILE_TYPES = [
     ("图片", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.heic *.heif"),
     ("所有文件", "*.*"),
@@ -140,6 +145,7 @@ class ImageCanvas(ttk.Frame):
             Callable[[str, float, float, float, float, float], None]
         ] = None,
         context_callback: Optional[Callable[[str, int, int], None]] = None,
+        open_callback: Optional[Callable[[], None]] = None,
     ) -> None:
         super().__init__(master, style="InspectorImage.TFrame")
         self.role = role
@@ -148,6 +154,7 @@ class ImageCanvas(ttk.Frame):
         self.live_enabled = live_enabled
         self.zoom_callback = zoom_callback
         self.context_callback = context_callback
+        self.open_callback = open_callback
         self.image_data: Optional[ImageData] = None
         # Keep only the shared NumPy pixels as a render source.  A full Pillow
         # RGB image is a second full-resolution allocation (about 57 MB for one
@@ -231,6 +238,7 @@ class ImageCanvas(ttk.Frame):
 
     def set_image(self, image_data: ImageData) -> None:
         self.image_data = image_data
+        self.canvas.configure(cursor="crosshair")
         self._render_pixels = (
             image_data.render_preview if image_data.render_preview is not None else image_data.display_rgb
         )
@@ -493,6 +501,7 @@ class ImageCanvas(ttk.Frame):
         self.canvas.delete("analysis-overlay")
         self.canvas.delete("viewer-chrome")
         if self.image_data is None:
+            self.canvas.configure(cursor="hand2" if self.open_callback is not None else "arrow")
             width = max(1, self.canvas.winfo_width())
             height = max(1, self.canvas.winfo_height())
             centre_x = width / 2.0
@@ -505,7 +514,7 @@ class ImageCanvas(ttk.Frame):
                 fill="#2C2C2E",
                 outline="#48484A",
                 width=1,
-                tags=("viewer-chrome",),
+                tags=("viewer-chrome", "empty-open"),
             )
             self.canvas.create_text(
                 centre_x,
@@ -513,7 +522,7 @@ class ImageCanvas(ttk.Frame):
                 text="＋",
                 fill="#D1D1D6",
                 font=FONT_TITLE,
-                tags=("viewer-chrome",),
+                tags=("viewer-chrome", "empty-open"),
             )
             self.canvas.create_text(
                 centre_x,
@@ -521,7 +530,7 @@ class ImageCanvas(ttk.Frame):
                 text="打开图片开始检查",
                 fill="#D1D1D6",
                 font=FONT_BODY_BOLD,
-                tags=("viewer-chrome",),
+                tags=("viewer-chrome", "empty-open"),
             )
             self.canvas.create_text(
                 centre_x,
@@ -529,7 +538,7 @@ class ImageCanvas(ttk.Frame):
                 text="也可以打开文件夹后从图库选择",
                 fill="#8E8E93",
                 font=FONT_SMALL,
-                tags=("viewer-chrome",),
+                tags=("viewer-chrome", "empty-open"),
             )
             return
         if self.roi is not None:
@@ -790,6 +799,10 @@ class ImageCanvas(ttk.Frame):
         self._motion_position = None
 
     def _on_left_press(self, event: tk.Event) -> Optional[str]:
+        if self.image_data is None:
+            if self.open_callback is not None:
+                self.open_callback()
+            return "break"
         point = self.canvas_to_image(event.x, event.y)
         if point is None:
             return None
@@ -922,7 +935,7 @@ class FolderThumbnailStrip(ttk.Frame):
     """macOS-style vertical file browser with lazy thumbnail requests."""
 
     PREVIEW_SIZE = (78, 58)
-    CARD_WIDTH = 246
+    CARD_WIDTH = 232
     CARD_HEIGHT = 78
     MAX_CACHED_THUMBNAILS = 72
 
@@ -1668,9 +1681,7 @@ class ImageInspectorWorkspace:
         self._fit_after_id: Optional[str] = None
         self._image_cache = ImageDataCache()
         self._batch_rename_dialog: Optional[BatchRenameDialog] = None
-        self.status_var = tk.StringVar(
-            value="请打开 1–4 张图片，或从左侧图库选择；滚轮联动缩放，右键图片可旋转或镜像。"
-        )
+        self.status_var = tk.StringVar(value=EMPTY_WORKSPACE_STATUS)
 
         self._configure_styles()
         self._build_ui()
@@ -1728,6 +1739,30 @@ class ImageInspectorWorkspace:
         style.configure("InspectorCard.TLabel", background=PANEL, foreground=INK, font=FONT_BODY)
         style.configure("InspectorMutedCard.TLabel", background=PANEL, foreground=MUTED, font=FONT_SMALL)
         style.configure("InspectorCardTitle.TLabel", background=PANEL, foreground=INK, font=FONT_CARD_TITLE)
+        style.configure("InspectorToolbar.TFrame", background=PANEL, borderwidth=0)
+        style.configure(
+            "InspectorToolbar.TLabel",
+            background=PANEL,
+            foreground=INK,
+            font=FONT_SMALL,
+        )
+        style.configure(
+            "InspectorToolbarMuted.TLabel",
+            background=PANEL,
+            foreground=MUTED,
+            font=FONT_SMALL,
+        )
+        style.configure("InspectorToolbar.TButton", padding=(7, 2))
+        style.configure("InspectorToolbarIcon.TButton", padding=(4, 2))
+        style.configure("InspectorToolbar.TEntry", padding=(6, 2))
+        style.configure("InspectorToolbar.TCombobox", padding=(5, 2))
+        primary_options = style.configure("Primary.TButton")
+        if primary_options:
+            style.configure("InspectorToolbarPrimary.TButton", **primary_options)
+        style.configure("InspectorToolbarPrimary.TButton", padding=(9, 3))
+        primary_map = style.map("Primary.TButton")
+        if primary_map:
+            style.map("InspectorToolbarPrimary.TButton", **primary_map)
         style.configure(
             "InspectorMetric.TLabel",
             background=PANEL,
@@ -1738,7 +1773,13 @@ class ImageInspectorWorkspace:
         style.configure("InspectorTitle.TLabel", background=BG, foreground=INK, font=FONT_TITLE)
         style.configure("InspectorSubtitle.TLabel", background=BG, foreground=MUTED, font=FONT_BODY)
         style.configure("InspectorEyebrow.TLabel", background=BG, foreground=TERTIARY, font=FONT_NAV_SECTION)
-        style.configure("InspectorStatus.TLabel", background=INFO_BG, foreground=MUTED, padding=(10, 6), font=FONT_SMALL)
+        style.configure(
+            "InspectorStatus.TLabel",
+            background=PANEL,
+            foreground=MUTED,
+            padding=(0, 0),
+            font=FONT_SMALL,
+        )
         style.configure("InspectorMatchHigh.TLabel", background=PANEL, foreground=GREEN, font=FONT_BODY_BOLD)
         style.configure("InspectorMatchMedium.TLabel", background=PANEL, foreground=AMBER, font=FONT_BODY_BOLD)
         style.configure("InspectorMatchLow.TLabel", background=PANEL, foreground=RED, font=FONT_BODY_BOLD)
@@ -1859,36 +1900,72 @@ class ImageInspectorWorkspace:
         self.root.bind("<Alt-Right>", invoke(self.show_next_group), add="+")
 
     def _build_ui(self) -> None:
-        self.outer = ttk.Frame(self.root, padding=(18, 14), style="InspectorRoot.TFrame")
+        self.outer = ttk.Frame(self.root, padding=(10, 8), style="InspectorRoot.TFrame")
         self.outer.pack(fill="both", expand=True)
-        header = ttk.Frame(self.outer, style="InspectorRoot.TFrame")
-        header.pack(fill="x", pady=(0, 10))
-        heading = ttk.Frame(header, style="InspectorRoot.TFrame")
-        heading.pack(side="left", fill="x", expand=True)
-        ttk.Label(heading, text="IMAGE INSPECTOR", style="InspectorEyebrow.TLabel").pack(anchor="w")
-        ttk.Label(heading, text="图像分析器", style="InspectorTitle.TLabel").pack(anchor="w", pady=(2, 0))
-        ttk.Label(
-            heading,
-            text="并排检查像素、选区、直方图与 EXIF",
-            style="InspectorSubtitle.TLabel",
-        ).pack(anchor="w", pady=(2, 0))
-        if self.on_home is not None:
-            ttk.Button(header, text="⌂  首页", command=self.on_home, style="Quiet.TButton").pack(side="right", anchor="n")
 
-        toolbar = ttk.Frame(self.outer, padding=(10, 7), style="InspectorSurface.TFrame")
+        self.top_bar = ttk.Frame(self.outer, style="InspectorToolbar.TFrame")
+        self.top_bar.pack(fill="x", pady=(0, 5))
+
+        toolbar = ttk.Frame(self.top_bar, padding=(6, 2), style="InspectorToolbar.TFrame")
         self.toolbar_panel = toolbar
-        toolbar.pack(fill="x", pady=(0, 7))
-        ttk.Button(toolbar, text="打开…", command=self.open_images, style="Primary.TButton").grid(row=0, column=0, padx=(0, 4))
-        ttk.Button(toolbar, text="文件夹…", command=self.open_folder, style="Quiet.TButton").grid(row=0, column=1, padx=(0, 4))
-        ttk.Button(toolbar, text="批量重命名…", command=self.batch_rename_folder, style="Quiet.TButton").grid(row=0, column=2, padx=(0, 10))
-        ttk.Separator(toolbar, orient="vertical").grid(row=0, column=3, sticky="ns", padx=(0, 9))
-        ttk.Button(toolbar, text="−", command=self.zoom_out, width=3, style="Quiet.TButton").grid(row=0, column=4, padx=(0, 2))
-        ttk.Button(toolbar, text="1:1", command=self.one_to_one, style="Quiet.TButton").grid(row=0, column=5, padx=2)
-        ttk.Button(toolbar, text="+", command=self.zoom_in, width=3, style="Quiet.TButton").grid(row=0, column=6, padx=2)
-        ttk.Button(toolbar, text="适应", command=self.fit_images, style="Quiet.TButton").grid(row=0, column=7, padx=(2, 10))
-        ttk.Separator(toolbar, orient="vertical").grid(row=0, column=8, sticky="ns", padx=(0, 9))
-        ttk.Button(toolbar, text="清除选区", command=self.clear_roi, style="Quiet.TButton").grid(row=0, column=9, padx=(0, 8))
-        ttk.Label(toolbar, text="匹配范围", style="InspectorCard.TLabel").grid(row=0, column=10, padx=(0, 4))
+        toolbar.pack(fill="x")
+        ttk.Button(
+            toolbar,
+            text="打开…",
+            command=self.open_images,
+            style="InspectorToolbarPrimary.TButton",
+        ).grid(row=0, column=0, padx=(0, 3))
+        ttk.Button(
+            toolbar,
+            text="文件夹…",
+            command=self.open_folder,
+            style="InspectorToolbar.TButton",
+        ).grid(row=0, column=1, padx=(0, 3))
+        ttk.Button(
+            toolbar,
+            text="批量重命名…",
+            command=self.batch_rename_folder,
+            style="InspectorToolbar.TButton",
+        ).grid(row=0, column=2, padx=(0, 7))
+        ttk.Separator(toolbar, orient="vertical").grid(row=0, column=3, sticky="ns", padx=(0, 6))
+        ttk.Button(
+            toolbar,
+            text="−",
+            command=self.zoom_out,
+            width=3,
+            style="InspectorToolbarIcon.TButton",
+        ).grid(row=0, column=4, padx=(0, 1))
+        ttk.Button(
+            toolbar,
+            text="1:1",
+            command=self.one_to_one,
+            style="InspectorToolbar.TButton",
+        ).grid(row=0, column=5, padx=1)
+        ttk.Button(
+            toolbar,
+            text="+",
+            command=self.zoom_in,
+            width=3,
+            style="InspectorToolbarIcon.TButton",
+        ).grid(row=0, column=6, padx=1)
+        ttk.Button(
+            toolbar,
+            text="适应",
+            command=self.fit_images,
+            style="InspectorToolbar.TButton",
+        ).grid(row=0, column=7, padx=(1, 7))
+        ttk.Separator(toolbar, orient="vertical").grid(row=0, column=8, sticky="ns", padx=(0, 6))
+        ttk.Button(
+            toolbar,
+            text="清除选区",
+            command=self.clear_roi,
+            style="InspectorToolbar.TButton",
+        ).grid(row=0, column=9, padx=(0, 6))
+        ttk.Label(toolbar, text="范围", style="InspectorToolbar.TLabel").grid(
+            row=0,
+            column=10,
+            padx=(0, 3),
+        )
         self.search_range_var = tk.StringVar(value=f"±{self.settings.search_range}")
         self.search_combo = ttk.Combobox(
             toolbar,
@@ -1896,8 +1973,9 @@ class ImageInspectorWorkspace:
             values=[f"±{value}" for value in MATCH_SEARCH_RANGES],
             width=6,
             state="readonly",
+            style="InspectorToolbar.TCombobox",
         )
-        self.search_combo.grid(row=0, column=11, padx=(0, 8))
+        self.search_combo.grid(row=0, column=11, padx=(0, 6))
         self.search_combo.bind("<<ComboboxSelected>>", lambda _event: self._settings_changed())
         self.live_pixel_var = tk.BooleanVar(value=self.settings.live_pixel)
         self.show_histogram_var = tk.BooleanVar(value=self.settings.show_histogram)
@@ -1914,69 +1992,93 @@ class ImageInspectorWorkspace:
         self.progress = ttk.Progressbar(toolbar, mode="indeterminate", length=80)
         self.progress.grid(row=0, column=12, sticky="e")
         self.progress.grid_remove()
+        self.workbench_home_button: Optional[ttk.Button] = None
+        if self.on_home is not None:
+            self.workbench_home_button = ttk.Button(
+                toolbar,
+                text="⌂  首页",
+                command=self.on_home,
+                style="InspectorToolbar.TButton",
+            )
+            self.workbench_home_button.grid(row=0, column=13, padx=(6, 0))
 
-        location_bar = ttk.Frame(self.outer, padding=(8, 6), style="InspectorSurface.TFrame")
+        ttk.Separator(self.top_bar, orient="horizontal").pack(fill="x", padx=6)
+
+        location_bar = ttk.Frame(self.top_bar, padding=(6, 2), style="InspectorToolbar.TFrame")
         self.location_bar = location_bar
-        location_bar.pack(fill="x", pady=(0, 8))
-        ttk.Label(location_bar, text="⌂", style="InspectorCard.TLabel").grid(row=0, column=0, padx=(0, 6))
-        self.folder_path_var = tk.StringVar(value=self.last_directory or "")
-        self.folder_address_entry = ttk.Entry(location_bar, textvariable=self.folder_path_var)
-        self.folder_address_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        location_bar.pack(fill="x")
+        self.location_home_button = ttk.Button(
+            location_bar,
+            text="⌂",
+            width=3,
+            command=self.reset_workspace,
+            style="InspectorToolbarIcon.TButton",
+        )
+        self.location_home_button.grid(row=0, column=0, padx=(0, 4))
+        # Keep the remembered folder for native open dialogs, but do not make
+        # an unopened workspace look as though that directory is already active.
+        self.folder_path_var = tk.StringVar(value="")
+        self.folder_address_entry = ttk.Entry(
+            location_bar,
+            textvariable=self.folder_path_var,
+            style="InspectorToolbar.TEntry",
+        )
+        self.folder_address_entry.grid(row=0, column=1, sticky="ew", padx=(0, 6))
         self.folder_address_entry.bind("<Return>", self._open_folder_from_address)
         self.folder_sidebar_toggle_button = ttk.Button(
             location_bar,
             text="显示图库",
             command=self.toggle_folder_sidebar,
             state="disabled",
-            style="Quiet.TButton",
+            style="InspectorToolbar.TButton",
         )
-        self.folder_sidebar_toggle_button.grid(row=0, column=2, padx=(0, 4))
+        self.folder_sidebar_toggle_button.grid(row=0, column=2, padx=(0, 3))
         self.previous_group_button = ttk.Button(
             location_bar,
             text="‹ 上一组",
             command=self.show_previous_group,
             state="disabled",
-            style="Quiet.TButton",
+            style="InspectorToolbar.TButton",
         )
-        self.previous_group_button.grid(row=0, column=3, padx=(0, 4))
+        self.previous_group_button.grid(row=0, column=3, padx=(0, 3))
         self.group_status_var = tk.StringVar(value="")
         ttk.Label(
             location_bar,
             textvariable=self.group_status_var,
-            style="InspectorMutedCard.TLabel",
+            style="InspectorToolbarMuted.TLabel",
             width=22,
             anchor="center",
-        ).grid(row=0, column=4, padx=4)
+        ).grid(row=0, column=4, padx=3)
         self.next_group_button = ttk.Button(
             location_bar,
             text="下一组 ›",
             command=self.show_next_group,
             state="disabled",
-            style="Quiet.TButton",
+            style="InspectorToolbar.TButton",
         )
-        self.next_group_button.grid(row=0, column=5, padx=(4, 4))
+        self.next_group_button.grid(row=0, column=5, padx=3)
         self.sidebar_toggle_button = ttk.Button(
             location_bar,
             text="收起检查器",
             command=self.toggle_analysis_sidebar,
-            style="Quiet.TButton",
+            style="InspectorToolbar.TButton",
         )
-        self.sidebar_toggle_button.grid(row=0, column=6, padx=(6, 0))
+        self.sidebar_toggle_button.grid(row=0, column=6, padx=(4, 0))
         location_bar.columnconfigure(1, weight=1)
 
-        status_bar = ttk.Frame(self.outer, padding=(8, 5), style="InspectorSurface.TFrame")
+        status_bar = ttk.Frame(self.outer, padding=(5, 2), style="InspectorSurface.TFrame")
         self.status_bar = status_bar
-        status_bar.pack(side="bottom", fill="x", pady=(7, 0))
+        status_bar.pack(side="bottom", fill="x", pady=(4, 0))
         ttk.Label(
             status_bar,
             textvariable=self.status_var,
-            style="InspectorSubtitle.TLabel",
+            style="InspectorStatus.TLabel",
             anchor="w",
         ).pack(side="left", fill="x", expand=True)
         ttk.Label(
             status_bar,
             textvariable=self.match_status_var,
-            style="InspectorSubtitle.TLabel",
+            style="InspectorStatus.TLabel",
             anchor="e",
         ).pack(side="right", padx=(12, 0))
 
@@ -2005,6 +2107,7 @@ class ImageInspectorWorkspace:
                 live_enabled=self.live_pixel_var.get,
                 zoom_callback=self._zoom_views_from,
                 context_callback=self._show_image_context_menu,
+                open_callback=self.open_images,
             )
         self.before_view = self.views["before"]
         self.after_view = self.views["after"]
@@ -2031,8 +2134,8 @@ class ImageInspectorWorkspace:
 
         self.sidebar_frame = ttk.Frame(
             self.main_pane,
-            width=350,
-            padding=(10, 0, 0, 0),
+            width=310,
+            padding=(8, 0, 0, 0),
             style="InspectorSurface.TFrame",
         )
         sidebar_header = ttk.Frame(self.sidebar_frame, style="InspectorSurface.TFrame")
@@ -2343,14 +2446,14 @@ class ImageInspectorWorkspace:
             "delta": "Delta",
             "change": "变化方向",
         }
-        widths = {"metric": 80, "reference": 58, "target": 58, "delta": 58, "change": 80}
+        widths = {"metric": 72, "reference": 54, "target": 54, "delta": 54, "change": 70}
         for column in columns:
             alignment = "w" if column == "metric" else "e"
             self.compare_tree.heading(column, text=headings[column], anchor=alignment)
             self.compare_tree.column(
                 column,
                 width=widths[column],
-                minwidth=52,
+                minwidth=46,
                 anchor=alignment,
                 stretch=False,
             )
@@ -2561,10 +2664,13 @@ class ImageInspectorWorkspace:
             right_visible = str(self.sidebar_frame) in panes
             if left_visible:
                 # Match the calm, narrow source list used by Photos/Finder.
-                left_width = min(286, max(256, int(width * 0.18)))
+                left_width = min(266, max(242, int(width * 0.165)))
                 self.main_pane.sashpos(0, left_width)
             if right_visible:
-                ratio = min(0.32, max(0.22, float(self._sidebar_ratio)))
+                ratio = min(
+                    MAX_ANALYSIS_PANEL_RATIO,
+                    max(MIN_ANALYSIS_PANEL_RATIO, float(self._sidebar_ratio)),
+                )
                 right_width = int(width * ratio)
                 right_sash = len(panes) - 2
                 self.main_pane.sashpos(right_sash, width - right_width)
@@ -2594,7 +2700,10 @@ class ImageInspectorWorkspace:
                 try:
                     sash_index = len(self.main_pane.panes()) - 2
                     sash = self.main_pane.sashpos(sash_index)
-                    self._sidebar_ratio = min(0.32, max(0.22, (width - sash) / width))
+                    self._sidebar_ratio = min(
+                        MAX_ANALYSIS_PANEL_RATIO,
+                        max(MIN_ANALYSIS_PANEL_RATIO, (width - sash) / width),
+                    )
                 except tk.TclError:
                     pass
             self.main_pane.forget(self.sidebar_frame)
@@ -2726,6 +2835,46 @@ class ImageInspectorWorkspace:
         if selected:
             self.open_folder(selected)
         return "break"
+
+    def reset_workspace(self) -> None:
+        """Return the inspector to its unopened state without touching files."""
+
+        if self._fit_after_id is not None:
+            try:
+                self.root.after_cancel(self._fit_after_id)
+            except tk.TclError:
+                pass
+            self._fit_after_id = None
+        for future in tuple(self._futures):
+            future.cancel()
+
+        self._hide_folder_thumbnails()
+        self.folder_path_var.set("")
+        self.folder_paths = []
+        self.folder_groups = []
+        self.folder_group_index = 0
+        self.current_paths = []
+        self.folder_group_start = 0
+        self.folder_group_size = len(IMAGE_ROLES)
+        self.folder_group_mode = False
+        self.folder_groups_aligned = True
+        self._metric_mode = "none"
+
+        for role in IMAGE_ROLES:
+            self._invalidate_role(role, clear_image=True, refresh=False)
+        self._image_cache.clear()
+        for histogram in (
+            *self.histogram_canvases.values(),
+            *self.luminance_histogram_canvases.values(),
+        ):
+            histogram.set_histogram(None, "尚无数据")
+
+        self._set_image_count(1)
+        self._update_group_navigation()
+        self._refresh_match_status()
+        self._refresh_outputs()
+        self.notebook.select(self.info_tab)
+        self.status_var.set(EMPTY_WORKSPACE_STATUS)
 
     def _update_group_navigation(self) -> None:
         """Keep the address-bar navigation state in sync with loaded images."""
@@ -3938,6 +4087,10 @@ class ImageInspectorWorkspace:
             if str(self.sidebar_frame) in panes and len(panes) > 1 and self.main_pane.winfo_width() > 0:
                 width = self.main_pane.winfo_width()
                 panel_ratio = (width - self.main_pane.sashpos(len(panes) - 2)) / width
+                panel_ratio = min(
+                    MAX_ANALYSIS_PANEL_RATIO,
+                    max(MIN_ANALYSIS_PANEL_RATIO, panel_ratio),
+                )
                 self._sidebar_ratio = panel_ratio
         except (AttributeError, tk.TclError):
             pass
