@@ -5,6 +5,7 @@ import tkinter as tk
 import math
 import os
 import platform
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -2988,9 +2989,21 @@ def main() -> None:
     configure_macos_application_identity()
     root = tk.Tk()
     application = TuneLabApp(root)
+    smoke_errors: list[str] = []
     if os.environ.get("TUNELAB_SMOKE_TEST") == "1":
-        root.after_idle(application.close)
+        def validate_packaged_application() -> None:
+            if (
+                platform.system() == "Darwin"
+                and getattr(sys, "frozen", False)
+                and not application.update_controller.start_native_updater()
+            ):
+                smoke_errors.append("Sparkle 自动更新控制器未能启动。")
+            root.after_idle(application.close)
+
+        root.after_idle(validate_packaged_application)
     root.mainloop()
+    if smoke_errors:
+        raise RuntimeError(smoke_errors[0])
 
 
 if __name__ == "__main__":
