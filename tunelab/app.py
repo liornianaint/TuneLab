@@ -20,8 +20,7 @@ from .ccm.imatest import ImatestCSVError, infer_cct, parse_imatest_csv
 from .ccm.models import CCRegion, ImatestDataset, Matrix3, OptimizationConfig, OptimizationResult, PatchResult
 from .ccm.optimizer import (
     OptimizationError,
-    evaluate_ccm_correction,
-    evaluate_protected_ccm_correction,
+    optimize_colorchecker_target_match,
     optimize_ccm,
 )
 from .ccm.qualcomm_xml import QualcommCCDocument, QualcommXMLError
@@ -30,15 +29,11 @@ from .ccm.settings import CcmSettings, application_data_dir, load_settings, save
 from .colorchecker.engine import (
     ColorCheckerDetection,
     ColorCheckerError,
-    RestorationPlan,
     SimulationResult,
-    build_calibrated_restoration_plan,
     build_comparison_dataset,
     detect_colorchecker,
-    restoration_evaluation_config,
     sample_patch_means,
     simulate_correction,
-    simulate_restoration_response,
     standard_colorchecker_reference,
 )
 from .colorchecker.ui import PreviewPane
@@ -829,10 +824,6 @@ class TuneLabApp:
         self.reference_detection: Optional[ColorCheckerDetection] = None
         self.reference_is_standard = False
         self.simulation: Optional[SimulationResult] = None
-        self.restoration_plan: Optional[RestorationPlan] = None
-        # Full-strength real-shot response is a preview-only aid.  The
-        # separately validated restoration_plan remains the sole XML result.
-        self.restoration_preview_plan: Optional[RestorationPlan] = None
         self.document: Optional[QualcommCCDocument] = None
         self.selected_region: Optional[CCRegion] = None
         self.result: Optional[OptimizationResult] = None
@@ -1249,7 +1240,7 @@ class TuneLabApp:
         ttk.Label(header, text="CCM / ColorChecker 校正", style="Title.TLabel").pack(side="left")
         ttk.Label(
             header,
-            text="CSV 与实拍图片共享 Delta CCM 优化、保护诊断与 Qualcomm CC13 回写流程",
+            text="CSV 使用工程保护优化；ColorChecker 图片默认直接逼近标准色卡",
             style="Subtitle.TLabel",
         ).pack(side="left", padx=(14, 0), pady=(5, 0))
         ttk.Button(header, text="返回首页", command=self.show_home_workspace, style="Quiet.TButton").pack(side="right")
@@ -1351,7 +1342,24 @@ class TuneLabApp:
         secondary.grid_remove()
         parameters.columnconfigure(8, weight=1)
 
+        self.target_match_panel = ttk.Frame(
+            outer,
+            padding=(10, 8),
+            style="Card.TFrame",
+        )
+        ttk.Label(
+            self.target_match_panel,
+            text=(
+                "标准色卡逼近 · 24 色块等权最小化平均 ΔE00 · "
+                "不启用色块回退、Pass Rate、重点 Patch、策略、正则与饱和度门禁 · "
+                "保留系数范围、Neutral 轴和 Matrix Health"
+            ),
+            style="Card.TLabel",
+        ).pack(fill="x")
+        self.target_match_panel.pack_forget()
+
         info = ttk.Frame(outer, style="Root.TFrame")
+        self.info_panel = info
         info.pack(fill="x", pady=(0, 4))
         info.columnconfigure(0, weight=1, uniform="source-info")
         info.columnconfigure(1, weight=1, uniform="source-info")
@@ -1399,7 +1407,7 @@ class TuneLabApp:
         image_header.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         image_header.columnconfigure(0, weight=1)
         self.image_metrics_var = tk.StringVar(
-            value="导入测试 ColorChecker 后可查看原图、改后模拟图和标准/自定义目标；模拟不替代上机重拍。"
+            value="导入测试 ColorChecker 后，默认直接逼近标准/自定义目标的 24 色块平均 ΔE00。"
         )
         ttk.Label(
             image_header,
@@ -1413,13 +1421,6 @@ class TuneLabApp:
             variable=self.show_checker_overlay_var,
             command=self._redraw_image_previews,
         ).grid(row=0, column=1, padx=(12, 8))
-        self.full_restoration_preview_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            image_header,
-            text="完整实拍还原（仅预览）",
-            variable=self.full_restoration_preview_var,
-            command=self._render_image_simulation,
-        ).grid(row=0, column=2, padx=(0, 8))
         self.export_simulation_button = ttk.Button(
             image_header,
             text="导出模拟图...",
@@ -1427,10 +1428,10 @@ class TuneLabApp:
             state="disabled",
             style="Quiet.TButton",
         )
-        self.export_simulation_button.grid(row=0, column=3)
+        self.export_simulation_button.grid(row=0, column=2)
 
         self.image_input_controls = ttk.Frame(image_header, style="Root.TFrame")
-        self.image_input_controls.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(5, 0))
+        self.image_input_controls.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(5, 0))
         self.image_input_controls.columnconfigure(3, weight=1)
         ttk.Label(self.image_input_controls, text="ColorChecker 目标", style="Subtitle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 5))
         ttk.Button(
@@ -2114,10 +2115,22 @@ class TuneLabApp:
         if mode == "image":
             self.input_open_button.configure(text="1  打开测试图")
             self.image_input_controls.grid()
+            self.parameters_panel.pack_forget()
+            self.target_match_panel.pack(
+                fill="x",
+                pady=(0, 8),
+                before=self.info_panel,
+            )
             self.dataset = self.image_dataset
         else:
             self.input_open_button.configure(text="1  打开 CSV")
             self.image_input_controls.grid_remove()
+            self.target_match_panel.pack_forget()
+            self.parameters_panel.pack(
+                fill="x",
+                pady=(0, 8),
+                before=self.info_panel,
+            )
             self.dataset = self.csv_dataset
         self.result = None
         self._clear_result()
@@ -2306,7 +2319,7 @@ class TuneLabApp:
             pane.redraw()
 
     def _render_image_simulation(self) -> None:
-        """Render either the XML-safe result or the explicit preview-only response."""
+        """Render the actual target-matching Delta CCM in linear sRGB."""
 
         self.simulation = None
         self.export_simulation_button.configure(state="disabled")
@@ -2317,25 +2330,11 @@ class TuneLabApp:
             )
             return
         try:
-            preview_plan = self.restoration_plan
-            using_full_preview = False
-            if (
-                self.full_restoration_preview_var.get()
-                and self.restoration_preview_plan is not None
-            ):
-                preview_plan = self.restoration_preview_plan
-                using_full_preview = True
-            if preview_plan is not None:
-                simulation = simulate_restoration_response(
-                    self.test_detection.image,
-                    preview_plan,
-                )
-            else:
-                simulation = simulate_correction(
-                    self.test_detection.image,
-                    self.result.correction_matrix,
-                    domain="linear",
-                )
+            simulation = simulate_correction(
+                self.test_detection.image,
+                self.result.correction_matrix,
+                domain="linear",
+            )
             simulated_means = sample_patch_means(simulation.rgb, self.test_detection)
         except ColorCheckerError as exc:
             self.simulation_preview.clear()
@@ -2344,25 +2343,8 @@ class TuneLabApp:
             return
 
         self.simulation = simulation
-        if simulation.domain == "real-shot-response":
-            assert preview_plan is not None
-            if using_full_preview and self.restoration_plan is None:
-                response_label = "实拍响应仿真 100%（仅预览；未用于 XML）"
-                response_meta = "实拍 Before→After 响应 100%（仅预览；未用于 XML）"
-            elif (
-                using_full_preview
-                and self.restoration_plan is not None
-                and self.restoration_plan.strength < 1.0 - 1e-12
-            ):
-                safe_strength = self.restoration_plan.strength
-                response_label = f"实拍响应仿真 100%（仅预览；XML {safe_strength:.0%}）"
-                response_meta = f"实拍 Before→After 响应 100%（仅预览；XML {safe_strength:.0%}）"
-            else:
-                response_label = f"实拍响应仿真 {preview_plan.strength:.0%}（与 XML 一致）"
-                response_meta = f"实拍 Before→After 响应 {preview_plan.strength:.0%}（与 XML 一致）"
-        else:
-            response_label = "线性 CCM 仿真"
-            response_meta = "linear sRGB 近似"
+        response_label = "标准色卡逼近"
+        response_meta = "本轮 Delta CCM · linear sRGB 近似"
         self.simulation_preview.set_image(
             self.test_detection.image,
             rgb=simulation.rgb,
@@ -2392,7 +2374,7 @@ class TuneLabApp:
         regressed = sum(after > before + 0.05 for before, after in zip(before_errors, after_errors))
         self.image_metrics_var.set(
             f"{response_label}预览 ΔE00 {mean_before:.2f} → {mean_after:.2f} · 改善/回退 {improved}/{regressed} · "
-            f"clip {simulation.clipped_pixel_ratio:.2%}；写回仍以色块优化与工程门禁为准。"
+            f"clip {simulation.clipped_pixel_ratio:.2%}；预览与本轮写回使用同一 Delta CCM。"
         )
 
     def export_simulation(self) -> None:
@@ -2563,93 +2545,30 @@ class TuneLabApp:
         self._persist_settings()
         self.optimize_button.configure(state="disabled", text="优化中…")
         source_name = "图片色块" if self.dataset_source == "image" else "CSV 色块"
-        profile_hint = "，并优先验证实拍 Profile" if self.dataset_source == "image" else ""
-        self._set_status(
-            f"正在用{source_name}搜索参数{profile_hint}，并验证 ΔE/ΔC/Δh、回退与 Matrix 工程约束…"
-        )
+        if self.dataset_source == "image":
+            self._set_status(
+                "正在让 24 个图片色块直接逼近标准/自定义目标，并验证系数范围、Neutral 轴与 Matrix Health…"
+            )
+        else:
+            self._set_status(
+                f"正在用{source_name}搜索参数，并验证 ΔE/ΔC/Δh、回退与 Matrix 工程约束…"
+            )
         self.root.update_idletasks()
         try:
-            self.restoration_plan = None
-            self.restoration_preview_plan = None
-            profile_rejection = ""
             if self.dataset_source == "image":
-                try:
-                    cct = float(self.cct_var.get())
-                    requested_plan = build_calibrated_restoration_plan(
-                        self.selected_region.matrix,
-                        cct,
-                        strength=solve_config.max_blend,
-                    )
-                    source_compatible = requested_plan.exact_profile and not any(
-                        "起始矩阵不同" in warning for warning in requested_plan.warnings
-                    )
-                    if source_compatible:
-                        self.restoration_preview_plan = build_calibrated_restoration_plan(
-                            self.selected_region.matrix,
-                            cct,
-                            strength=1.0,
-                        )
-                    profile_config = restoration_evaluation_config(
-                        self.selected_region.matrix,
-                        requested_plan.optimized_matrix,
-                    )
-                    if requested_plan.already_calibrated:
-                        result = evaluate_ccm_correction(
-                            self.dataset,
-                            self.selected_region.matrix,
-                            requested_plan.correction_matrix,
-                            composition="pre",
-                            config=profile_config,
-                            search_method="calibrated-restoration-already-applied",
-                            blend=requested_plan.strength,
-                            prediction_domain="linear",
-                            extra_warnings=requested_plan.warnings,
-                        )
-                    else:
-                        result = evaluate_protected_ccm_correction(
-                            self.dataset,
-                            self.selected_region.matrix,
-                            requested_plan.correction_matrix,
-                            composition="pre",
-                            config=profile_config,
-                            search_method="calibrated-restoration",
-                            blend=requested_plan.strength,
-                            prediction_domain="linear",
-                            extra_warnings=(
-                                *requested_plan.warnings,
-                                "3000K/4000K 实拍矩阵仅作为候选方向；写回前仍执行统一 ΔE/ΔC/Δh、Neutral、Pass Rate 与 Matrix 保护。",
-                            ),
-                        )
-                    self.restoration_plan = build_calibrated_restoration_plan(
-                        self.selected_region.matrix,
-                        cct,
-                        strength=result.blend,
-                    )
-                    self.result = result
-                except (ValueError, ColorCheckerError, OptimizationError) as exc:
-                    profile_rejection = str(exc)
-                    self.restoration_plan = None
-
-            if self.result is None or self.dataset_source != "image" or profile_rejection:
+                self.result = optimize_colorchecker_target_match(
+                    self.dataset,
+                    self.selected_region.matrix,
+                    composition=composition,
+                    config=solve_config,
+                )
+            else:
                 self.result = optimize_ccm(
                     self.dataset,
                     self.selected_region.matrix,
                     composition=composition,
                     config=solve_config,
                 )
-                if profile_rejection:
-                    self.result.warnings.append(
-                        f"实拍 Profile 未通过或不适用，已自动改用统一优化：{profile_rejection}"
-                    )
-            if self.restoration_preview_plan is not None:
-                if self.restoration_plan is None:
-                    self.result.warnings.append(
-                        "完整 Before→After 实拍响应仅用于模拟图预览，未绕过安全门禁，也未写入 XML。"
-                    )
-                elif self.restoration_plan.strength < 1.0 - 1e-12:
-                    self.result.warnings.append(
-                        f"模拟图默认显示 100% 实拍响应；XML 仍只采用门禁接受的 {self.restoration_plan.strength:.0%} 强度。"
-                    )
             self.xml_diff = self.document.diff_with_matrix(
                 self.selected_region.index,
                 self.result.optimized_matrix,
@@ -2677,15 +2596,13 @@ class TuneLabApp:
 
     def _clear_result(self) -> None:
         self.simulation = None
-        self.restoration_plan = None
-        self.restoration_preview_plan = None
         if hasattr(self, "simulation_preview"):
             self.simulation_preview.clear()
         if hasattr(self, "export_simulation_button"):
             self.export_simulation_button.configure(state="disabled")
         if hasattr(self, "image_metrics_var"):
             self.image_metrics_var.set(
-                "导入测试 ColorChecker 后可查看原图、改后模拟图和标准/自定义目标；模拟不替代上机重拍。"
+                "导入测试 ColorChecker 后，默认直接逼近标准/自定义目标的 24 色块平均 ΔE00。"
             )
         self.lab_view.fit([])
         self.before_plot.selected_zone = None
@@ -2713,6 +2630,7 @@ class TuneLabApp:
     def _render_result(self) -> None:
         assert self.result is not None
         result = self.result
+        target_match = result.search_method.startswith("colorchecker-target-match")
         self.before_plot.selected_zone = None
         self.after_plot.selected_zone = None
         self.original_panel.set_matrix(result.original_matrix)
@@ -2724,7 +2642,7 @@ class TuneLabApp:
         self.kpi_vars[2].set(f"{result.mean_improvement_percent:+.1f}%")
         self.kpi_vars[3].set(f"{result.improved_count} / {result.regressed_count}")
         self._fit_lab_view(result.patch_results)
-        focus_zones = self._current_focus_zones()
+        focus_zones = () if target_match else self._current_focus_zones()
         self.before_plot.draw(
             result.patch_results,
             mode="before",
@@ -2743,7 +2661,11 @@ class TuneLabApp:
             for column in range(3)
         )
         patch_gate_passed = not any(patch.regression_status == "FAIL" for patch in result.patch_results)
-        writable = result.matrix_health.status != "FAIL" and patch_gate_passed and matrix_changed
+        writable = (
+            result.matrix_health.status != "FAIL"
+            and (target_match or patch_gate_passed)
+            and matrix_changed
+        )
         self.save_xml_button.configure(state="normal" if writable else "disabled")
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -2785,13 +2707,18 @@ class TuneLabApp:
                 values=(check.name, check.status, check.value, check.limit, check.message),
                 tags=(check.status,),
             )
+        pass_rate_title = (
+            "Pass Rate（仅诊断，不参与标准色卡逼近）"
+            if target_match
+            else "Pass Rate"
+        )
         stats_lines = [
             f"Matrix Health: {result.matrix_health.status}",
             f"det={result.matrix_health.determinant:.6f} · cond={result.matrix_health.condition_number:.4f} · rank={result.matrix_health.rank}",
             f"Row Sum={', '.join(f'{value:.7f}' for value in result.matrix_health.row_sums)}",
             f"Fixed Point max ΔE00={result.matrix_health.fixed_point_max_delta_e:.5f} · coefficient error={result.matrix_health.fixed_point_max_error:.7f}",
             "",
-            "Pass Rate",
+            pass_rate_title,
         ]
         for index, threshold in enumerate(result.pass_rates.thresholds):
             stats_lines.append(
@@ -2808,7 +2735,11 @@ class TuneLabApp:
         stats_lines.extend(
             [
                 "",
-                "Loss Breakdown (Before → After)",
+                (
+                    "目标函数与诊断 (Before → After)"
+                    if target_match
+                    else "Loss Breakdown (Before → After)"
+                ),
                 f"· Total {result.loss_before.total:.3f} → {result.loss_after.total:.3f}",
                 f"· ΔE00 {result.loss_before.delta_e:.3f} → {result.loss_after.delta_e:.3f}; ΔC {result.loss_before.delta_c:.3f} → {result.loss_after.delta_c:.3f}; Δh {result.loss_before.delta_h:.3f} → {result.loss_after.delta_h:.3f}",
                 f"· Regression {result.loss_before.regression:.3f} → {result.loss_after.regression:.3f}; Saturation {result.loss_before.saturation:.3f} → {result.loss_after.saturation:.3f}",
@@ -2817,15 +2748,17 @@ class TuneLabApp:
             ]
         )
         self._set_statistics("\n".join(stats_lines))
-        strength_description = (
-            "直接工程边界坐标搜索（blend 不适用）"
-            if result.search_method == "engineering-boundary"
-            else f"Delta CCM 强度={result.blend:.0%}"
-        )
+        if target_match:
+            strength_description = "24 色块等权平均 ΔE00 目标（强度/策略/正则门禁不适用）"
+        elif result.search_method == "engineering-boundary":
+            strength_description = "直接工程边界坐标搜索（blend 不适用）"
+        else:
+            strength_description = f"Delta CCM 强度={result.blend:.0%}"
+        patch_scope = "24 个色块" if target_match else "彩色色块 1-18"
         lines = [
             "优化摘要",
             f"· Strategy={result.strategy}；Method={result.search_method}；Regularization λ={result.regularization:g}；{strength_description}",
-            f"· 彩色色块 1-18 的平均 ΔE00：{result.mean_before:.3f} → {result.mean_after:.3f}",
+            f"· {patch_scope}的平均 ΔE00：{result.mean_before:.3f} → {result.mean_after:.3f}",
             f"· 改善 {result.improved_count} 个，回退 {result.regressed_count} 个；平均改善 {result.mean_improvement_percent:+.1f}%",
             f"· Matrix Health={result.matrix_health.status}；Chroma ratio={result.saturation_ratio_before:.3f}→{result.saturation_ratio_after:.3f}",
             "",
@@ -2848,27 +2781,11 @@ class TuneLabApp:
         else:
             lines.append("· 无额外警告。")
         if self.dataset_source == "image":
-            if self.restoration_preview_plan is not None and self.restoration_plan is not None:
-                model_boundary = (
-                    "· 图片输入由自动识别的 24 色块构造；目标逐块匹配测试亮度。"
-                    f"整图可在 100% Before→After 完整预览与 XML 接受的 {self.restoration_plan.strength:.0%} "
-                    "安全响应之间切换；完整预览不参与求解、门禁或写回。"
-                )
-            elif self.restoration_preview_plan is not None:
-                model_boundary = (
-                    "· 图片输入由自动识别的 24 色块构造；当前 100% Before→After 响应只用于完整预览，"
-                    "实拍 Profile 未用于 XML；写回仍来自统一优化及其安全门禁。"
-                )
-            elif self.restoration_plan is not None:
-                model_boundary = (
-                    "· 图片输入由自动识别的 24 色块构造；当前整图使用与 XML 安全强度一致的 "
-                    "Before→After 响应仿真；预览不参与求解或门禁。"
-                )
-            else:
-                model_boundary = (
-                    "· 图片输入由自动识别的 24 色块构造；目标逐块匹配测试亮度。当前整图使用 linear-sRGB Delta CCM 近似预览，"
-                    "不参与求解或门禁。"
-                )
+            model_boundary = (
+                "· 图片输入直接使用标准/自定义 ColorChecker 的 24 个目标 sRGB 色值，"
+                "等权最小化平均 ΔE00；单色块回退、Pass Rate、重点 Patch 与饱和度不作为门禁。"
+                "整图始终使用本轮实际 Delta CCM 的 linear-sRGB 近似预览，不能复现 RAW→JPEG 的完整 ISP。"
+            )
         else:
             model_boundary = (
                 "· CSV 是经过完整 ISP 的 sRGB 输出；本工具在线性 sRGB 域拟合 Delta CCM，再与 XML 原矩阵组合。"
@@ -2892,10 +2809,13 @@ class TuneLabApp:
             "success"
             if writable and result.matrix_health.status == "PASS"
             else "warning"
-            if result.matrix_health.status != "FAIL" and patch_gate_passed
+            if result.matrix_health.status != "FAIL" and (target_match or patch_gate_passed)
             else "fail"
         )
-        write_state = "可安全写回" if writable else "无可安全写回的矩阵变化"
+        if target_match:
+            write_state = "可写回（标准色卡逼近）" if writable else "无可写回的矩阵变化"
+        else:
+            write_state = "可安全写回" if writable else "无可安全写回的矩阵变化"
         self._set_status(
             f"✓ 优化完成 | 平均 ΔE00 {result.mean_before:.3f} → {result.mean_after:.3f} "
             f"（{result.mean_improvement_percent:+.1f}%） | Matrix {result.matrix_health.status} | {write_state} | "
@@ -2910,7 +2830,10 @@ class TuneLabApp:
         if self.result.matrix_health.status == "FAIL":
             messagebox.showerror("工程检查未通过", "Matrix Health=FAIL，禁止写回 XML。")
             return
-        if any(
+        target_match = getattr(self.result, "search_method", "").startswith(
+            "colorchecker-target-match"
+        )
+        if not target_match and any(
             patch.regression_status == "FAIL"
             for patch in getattr(self.result, "patch_results", ())
         ):
@@ -2919,7 +2842,15 @@ class TuneLabApp:
         path = self.document.source_path
         if not messagebox.askyesno(
             "覆盖原 CC XML",
-            f"将只更新当前 Region 的 9 个矩阵值，并覆盖原文件：\n{path}\n\n是否继续？",
+            (
+                f"将只更新当前 Region 的 9 个矩阵值，并覆盖原文件：\n{path}\n\n"
+                + (
+                    "当前为标准色卡逼近：单色块回退与 Pass Rate 不作为写回门禁。\n\n"
+                    if target_match
+                    else ""
+                )
+                + "是否继续？"
+            ),
             parent=self.root,
         ):
             return
@@ -2976,12 +2907,13 @@ class TuneLabApp:
         messagebox.showinfo(
             "CCM / ColorChecker 算法边界",
             "1. 先稳定 AWB、曝光与 Gamma，再优化 CC。\n"
-            "2. 输入可选 Imatest measured/ideal CSV，或自动识别完整 24 色块的测试图；图片目标会逐块匹配测试亮度。\n"
-            "3. CSV 与图片共用 Delta CCM 多目标优化和 ΔE/ΔC/Δh、Neutral、Pass Rate 回退保护。\n"
-            "4. CCT 只来自测试图/CSV 或手动输入，标准及自定义目标不决定 Region。\n"
-            "5. 图片模式会优先验证 3000K/4000K 实拍 Profile；它不能绕过色块与 Matrix 门禁，无安全候选时自动回落到通用优化。\n"
-            "6. 图片模式会生成实拍响应或 linear-sRGB 改后预览；预览不参与求解与写回门禁，也不替代烧录后的上机重拍。\n"
-            "7. CCT gap 属于运行时插值区，保存时必须明确选择某个端点 region。",
+            "2. 图片输入直接使用标准/自定义 ColorChecker 的 24 个目标 sRGB 色值，不再逐块匹配测试亮度。\n"
+            "3. CSV 保留 ΔE/ΔC/Δh、Neutral、Pass Rate 与色块回退保护的工程多目标优化。\n"
+            "4. 图片模式只以 24 色块等权平均 ΔE00 为目标；单色块回退、Pass Rate、重点 Patch、策略、正则与饱和度不作为门禁。\n"
+            "5. 图片模式仍保留系数范围、Neutral 轴、可逆性与 Matrix Health，避免生成数值失控的矩阵。\n"
+            "6. CCT 只来自测试图/CSV 或手动输入，标准及自定义目标不决定 Region。\n"
+            "7. 图片预览始终使用本轮实际 Delta CCM 的 linear-sRGB 近似，不能复现完整 RAW→JPEG ISP，也不替代烧录后的上机重拍。\n"
+            "8. CCT gap 属于运行时插值区，保存时必须明确选择某个端点 region。",
         )
 
 

@@ -3,16 +3,16 @@
 ## 1. 数据流
 
 ```text
-Imatest CSV ───────> CSV Adapter ───┐
-                                    ├─> Unified 24-patch Dataset ─> Protected Optimizer
-ColorChecker Image ─> MCC24 Adapter ┘                                  │
-                                                                        │
-Qualcomm XML ───────> Trigger Tree ─> Selected CCT Region ─> Old CCM ───┤
-                                                                        ↓
-                                      a*b* / Image Simulation / Reports / History
-                                                                        │
-                                                                        ↓
-                                        Surgical XML Writer + Read-back Validation
+Imatest CSV ───────> CSV Adapter ───> Protected multi-objective optimizer ─┐
+                                                                          │
+ColorChecker Image ─> MCC24 Adapter ─> Direct 24-patch ΔE00 optimizer ─────┤
+                                                                          │
+Qualcomm XML ───────> Trigger Tree ─> Selected CCT Region ─> Old CCM ──────┤
+                                                                          ↓
+                                        a*b* / Image Simulation / Reports / History
+                                                                          │
+                                                                          ↓
+                                          Surgical XML Writer + Read-back Validation
 ```
 
 `tunelab/` 按产品壳层和调试领域分层：
@@ -51,20 +51,17 @@ M_new = A × M_old               # CC13 行主序/列向量
 
 这使工具能在没有 RAW 和 sensor spectral response 的情况下给出工程上可用的首轮方向，同时明确保留“必须上机复测”的边界。
 
-图片输入与 CSV 输入不再拥有两套页面或两套优化生命周期。MCC24 自动识别测试图的 24 个中心色块；目标默认由引擎生成 ColorChecker Classic 24 标准 8-bit sRGB 色块及确定几何，也可切换为自动识别的自定义目标图。目标色块的 linear-sRGB 亮度逐块匹配到测试图，再构造与 Imatest 完全相同的 measured/ideal dataset，交给同一个 `optimize_ccm()`。内置目标没有 CCT 语义；自定义目标文件名也不参与 Region 推断，CCT 只来自测试图或用户输入。
+图片输入与 CSV 输入共用页面、结果模型、报告、History 和 XML 写回，但选择不同的默认求解目标。MCC24 自动识别测试图的 24 个中心色块；目标默认由引擎生成 ColorChecker Classic 24 标准 8-bit sRGB 色块及确定几何，也可切换为自动识别的自定义目标图。图片 dataset 直接保留目标的 24 个 sRGB 色值，不做逐色块亮度替换。内置目标没有 CCT 语义；自定义目标文件名也不参与 Region 推断，CCT 只来自测试图或用户输入。
 
-CSV 固定调用统一的 ΔE/ΔC/Δh `optimize_ccm()` 路径。图片模式在 2800K–4500K 内先以 3000K/4000K 实拍 Profile 的 Delta CCM 作为候选方向，再通过 `evaluate_protected_ccm_correction()` 执行与通用优化一致的 Patch Regression、Neutral、Pass Rate 和 Matrix 门禁；候选可确定性回退强度，完全不适用或无安全点时才调用 `optimize_ccm()`。两条路径都固定使用 `M_new = A × M_old`。
+CSV 固定调用 ΔE/ΔC/Δh `optimize_ccm()` 工程保护路径。图片模式固定调用 `optimize_colorchecker_target_match()`，唯一排序目标是 24 色块等权平均 ΔE00；Patch Regression、Pass Rate、重点 Patch、Strategy、Regularization、blend 和 Saturation 不参与拒绝或排名。求解仍投影到系数范围与 Neutral 轴，并拒绝 Matrix Health=FAIL。两条路径都固定使用 `M_new = A × M_old`。
 
-ColorChecker 页签只在图片输入时存在，并等宽显示原图、改后仿真和目标图；CSV 输入只显示色差对比页签。当 Region 匹配 3000K/4000K 实拍起始矩阵时，预览层默认用 Before/After 响应模型显示 100% 完整实拍还原；独立的 `restoration_plan` 仍仅保存 Patch Regression、Neutral、Pass Rate 和 Matrix 门禁实际接受的安全强度，且是 XML 写回的唯一来源。关闭完整还原开关后，预览使用与 XML 一致的安全强度；Profile 不适用时使用 linear-sRGB Delta CCM 近似。任何预览都不参与求解、安全门禁或 XML 写回。
+ColorChecker 页签只在图片输入时存在，并等宽显示原图、改后模拟和目标图；CSV 输入只显示色差对比页签。预览层始终在 linear sRGB 中应用本轮实际 Delta CCM，因此预览和 XML 指向同一个矩阵，不再存在独立 Profile/完整实拍响应路径。预览不能重现 RAW→JPEG 完整 ISP，也不参与求解或 Matrix Health 判断。
 
 ## 3. 约束与稳健性
 
-- 通用自动拟合仍要求 Delta CCM 与最终 CCM 每行和严格等于 1。
-- ideal 线性亮度先匹配 measured 亮度，防止用 CC 追逐曝光/Gamma 误差。
-- Ridge 正则化把 `A` 拉向单位阵，避免 18 个色块上的过拟合。
-- 自动搜索多个正则化与 blend 候选，并直接搜索最终 Matrix 的三组行内系数对。
-- Loss 同时约束 ΔE/ΔC/Δh/P90、Regression、Saturation、矩阵幅度与 Smoothness。
-- 默认保护 13/14/15；所有候选必须通过 Pass Rate、局部/整体饱和度和 Patch Regression 硬门槛。
+- 两种求解都要求 Delta CCM 与最终 CCM 保持 Neutral 轴，默认每行和严格等于 1。
+- CSV 工程路径会先匹配 ideal/measured 线性亮度，使用 Ridge、blend、多目标 Loss、13/14/15 权重、Pass Rate、饱和度和 Patch Regression 保护。
+- 图片目标路径不匹配亮度，直接搜索 24 色块平均 ΔE00；局部回退、Pass Rate、重点 Patch 和饱和度只作为结果诊断。
 - 最终 Matrix 默认限制在 `[-3,3]`，并输出 PASS/WARNING/FAIL 工程检查。
 - Qualcomm `c_tab` 范围在保存前再次校验为 `[-15.99, 15.99]`。
 

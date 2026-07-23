@@ -12,6 +12,7 @@ from tunelab.ccm.optimizer import (
     NEUTRAL_PATCH_REGRESSION_LIMIT,
     _fit_target,
     compose_correction_matrix,
+    optimize_colorchecker_target_match,
     optimize_ccm,
     pass_rate_counts,
     saturation_target_chroma,
@@ -119,6 +120,42 @@ class OptimizerRuleTests(unittest.TestCase):
                     self.assertAlmostEqual(sum(row), 1.0, places=8)
                     self.assertGreaterEqual(min(row), -3.0)
                     self.assertLessEqual(max(row), 3.0)
+
+    def test_image_target_match_uses_only_equal_weight_24_patch_delta_e(self) -> None:
+        dataset = d65_dataset()
+        identity = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        baseline_config = OptimizationConfig()
+        unrelated_controls_changed = OptimizationConfig(
+            strategy="aggressive",
+            regularization=100.0,
+            max_blend=0.20,
+            saturation_factor=0.50,
+            focus_patches=(1, 2, 3, 4),
+            focus_weight=50.0,
+            max_patch_regression=0.01,
+            max_regressed_patches=0,
+        )
+
+        baseline = optimize_colorchecker_target_match(
+            dataset,
+            identity,
+            config=baseline_config,
+        )
+        changed = optimize_colorchecker_target_match(
+            dataset,
+            identity,
+            config=unrelated_controls_changed,
+        )
+
+        self.assertTrue(baseline.search_method.startswith("colorchecker-target-match"))
+        self.assertLess(baseline.mean_after, baseline.mean_before)
+        self.assertEqual(len(baseline.patch_results), 24)
+        self.assertTrue(all(patch.priority_weight == 1.0 for patch in baseline.patch_results))
+        self.assertFalse(any(patch.regression_status == "FAIL" for patch in baseline.patch_results))
+        self.assertEqual(baseline.optimized_matrix, changed.optimized_matrix)
+        self.assertAlmostEqual(baseline.mean_after, changed.mean_after, places=12)
+        for row in baseline.optimized_matrix:
+            self.assertAlmostEqual(sum(row), 1.0, places=8)
 
     def test_missing_default_reportlab_dependency_has_actionable_error(self) -> None:
         dataset = d65_dataset()
