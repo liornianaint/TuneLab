@@ -52,7 +52,7 @@ class UpdateModelTests(unittest.TestCase):
         self.assertEqual(release.version, "1.2.0")
         self.assertEqual(release.name, "TuneLab 1.2")
         self.assertEqual(captured["timeout"], 3.0)
-        self.assertIn("TuneLab/1.0.0", captured["request"].get_header("User-agent"))
+        self.assertIn("TuneLab/1.1.0", captured["request"].get_header("User-agent"))
 
         payload["html_url"] = "https://example.com/untrusted-download"
         release = fetch_latest_release(
@@ -68,10 +68,10 @@ class UpdateModelTests(unittest.TestCase):
             fetch_latest_release(opener=opener)
 
     def test_check_result_uses_the_formal_local_version(self) -> None:
-        release = ReleaseInfo("1.0.1", "v1.0.1", "TuneLab 1.0.1", RELEASES_PAGE_URL)
+        release = ReleaseInfo("1.1.1", "v1.1.1", "TuneLab 1.1.1", RELEASES_PAGE_URL)
         with mock.patch("tunelab.updates.fetch_latest_release", return_value=release):
             result = check_for_updates()
-        self.assertEqual(result.current_version, "1.0.0")
+        self.assertEqual(result.current_version, "1.1.0")
         self.assertTrue(result.update_available)
 
 
