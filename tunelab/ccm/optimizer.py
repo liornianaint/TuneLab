@@ -195,6 +195,55 @@ def _fit_constrained_matrix(
     return tuple(rows)  # type: ignore[return-value]
 
 
+def _fit_direct_target_matrix(
+    dataset: ImatestDataset,
+    regularization: float,
+) -> Matrix3:
+    """Fit every ColorChecker patch directly to its declared target colour.
+
+    The protected CSV solver deliberately preserves each measured patch's
+    luminance before fitting chroma.  Image target matching has a different,
+    explicit objective: minimize distance to the displayed standard or custom
+    ColorChecker itself.  All 24 patches therefore participate with equal
+    weight and without per-patch luminance substitution.
+    """
+
+    patches = list(dataset.patches)
+    if len(patches) < 9:
+        raise OptimizationError("标准色卡逼近至少需要 9 个有效色块。")
+    measured = [srgb_to_linear(patch.measured_srgb) for patch in patches]
+    ideal = [srgb_to_linear(patch.ideal_srgb) for patch in patches]
+    gram = [[0.0] * 3 for _ in range(3)]
+    for vector in measured:
+        for row in range(3):
+            for col in range(3):
+                gram[row][col] += vector[row] * vector[col]
+    scale = max(sum(gram[index][index] for index in range(3)) / 3.0, 1e-6)
+    ridge = regularization * scale
+    rows: list[Vector3] = []
+    for output_channel in range(3):
+        system = [[0.0] * 4 for _ in range(4)]
+        right = [0.0] * 4
+        for row in range(3):
+            for col in range(3):
+                system[row][col] = gram[row][col] + (
+                    ridge if row == col else 0.0
+                )
+            # A correction row sum of one keeps the neutral axis neutral.
+            system[row][3] = 1.0
+            system[3][row] = 1.0
+            right[row] = sum(
+                vector[row] * target[output_channel]
+                for vector, target in zip(measured, ideal)
+            )
+            if row == output_channel:
+                right[row] += ridge
+        right[3] = 1.0
+        solution = _solve_linear(system, right)
+        rows.append((solution[0], solution[1], solution[2]))
+    return tuple(rows)  # type: ignore[return-value]
+
+
 def _predict(
     patch_rgb: Vector3,
     correction: Matrix3,
@@ -928,6 +977,274 @@ def optimize_ccm(
         matrix_health=best.health,
         loss_before=baseline.loss,
         loss_after=best.loss,
+        diagnostics=diagnostics,
+        rejected_candidates=dict(rejected),
+        explainability=explainability,
+        warnings=warnings,
+    )
+
+
+def _target_match_score(candidate: _Candidate) -> float:
+    """Return the sole image-mode objective: mean ΔE00 over all 24 patches."""
+
+    if not candidate.patch_results:
+        return math.inf
+    return mean(patch.delta_e_after for patch in candidate.patch_results)
+
+
+def _target_match_loss(patches: list[PatchResult]) -> LossBreakdown:
+    """Describe target distance without implying unused protection penalties."""
+
+    if not patches:
+        return LossBreakdown(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    errors = sorted(patch.delta_e_after for patch in patches)
+    p90_index = min(len(errors) - 1, max(0, math.ceil(len(errors) * 0.90) - 1))
+    delta_e = mean(errors)
+    return LossBreakdown(
+        total=delta_e,
+        delta_e=delta_e,
+        delta_c=mean(abs(patch.delta_c_after) for patch in patches),
+        delta_h=mean(abs(patch.delta_h_after) / 10.0 for patch in patches),
+        delta_l=mean(abs(patch.delta_l_after) / 10.0 for patch in patches),
+        p90=errors[p90_index],
+        regression=0.0,
+        saturation=0.0,
+        matrix_regularization=0.0,
+        smoothness=0.0,
+        engineering=0.0,
+    )
+
+
+def _refine_target_match_candidate(
+    seed: _Candidate,
+    dataset: ImatestDataset,
+    original: Matrix3,
+    composition: str,
+    config: OptimizationConfig,
+    rejected: Counter[str],
+) -> _Candidate:
+    """Refine a direct target fit while preserving row sums and Matrix Health."""
+
+    current = seed
+    for step in (0.30, 0.15, 0.075, 0.035, 0.015, 0.007, 0.003, 0.0015, 0.0007):
+        for _iteration in range(160):
+            best_step: Optional[_Candidate] = None
+            best_score = _target_match_score(current)
+            for row in range(3):
+                for first, second in ((0, 1), (0, 2), (1, 2)):
+                    for direction in (-1.0, 1.0):
+                        proposal = [list(values) for values in current.correction]
+                        proposal[row][first] += direction * step
+                        proposal[row][second] -= direction * step
+                        correction: Matrix3 = tuple(
+                            tuple(values) for values in proposal
+                        )  # type: ignore[assignment]
+                        candidate = _evaluate_candidate(
+                            dataset,
+                            original,
+                            correction,
+                            composition,
+                            config,
+                            0.0,
+                            1.0,
+                            search_method="colorchecker-target-match",
+                            prediction_domain="linear",
+                        )
+                        if candidate.health.status == "FAIL":
+                            rejected["matrix-health"] += 1
+                            continue
+                        score = _target_match_score(candidate)
+                        if score + 1e-10 < best_score:
+                            best_step = candidate
+                            best_score = score
+            if best_step is None:
+                break
+            current = best_step
+    return replace(
+        current,
+        regularization=0.0,
+        blend=1.0,
+        search_method="colorchecker-target-match",
+    )
+
+
+def optimize_colorchecker_target_match(
+    dataset: ImatestDataset,
+    original_matrix: Matrix3,
+    *,
+    composition: str = "pre",
+    config: Optional[OptimizationConfig] = None,
+) -> OptimizationResult:
+    """Minimize direct distance to a standard/custom ColorChecker target.
+
+    This is the default solver for image input.  It intentionally does not use
+    Patch Regression, Pass Rate, focus-patch, saturation, strategy, blend, or
+    regularization gates.  The final matrix must still remain inside the
+    configured coefficient bounds, preserve the neutral axis, and avoid a
+    Matrix Health FAIL so the result remains representable in Qualcomm XML.
+    """
+
+    if composition not in {"pre", "post_transposed"}:
+        raise OptimizationError(f"未知矩阵组合方式: {composition}")
+    resolved_config = config or OptimizationConfig()
+    resolved_config.validate()
+    if len(dataset.patches) < 9:
+        raise OptimizationError("标准色卡逼近至少需要 9 个有效色块。")
+
+    # Keep the literal source matrix throughout candidate evaluation so the
+    # reported patch prediction and the Delta CCM used by the preview are
+    # exactly the same transform.  Candidate projection normalizes the final
+    # XML matrix when a change is proposed.
+    working_original = original_matrix
+    baseline = _evaluate_candidate(
+        dataset,
+        working_original,
+        identity_matrix(),
+        composition,
+        resolved_config,
+        0.0,
+        0.0,
+        enforce_bounds=False,
+        search_method="baseline",
+        prediction_domain="linear",
+    )
+    rejected: Counter[str] = Counter()
+    seeds = [baseline]
+    for regularization in AUTO_REGULARIZATION:
+        correction = _fit_direct_target_matrix(dataset, regularization)
+        candidate = _evaluate_candidate(
+            dataset,
+            working_original,
+            correction,
+            composition,
+            resolved_config,
+            regularization,
+            1.0,
+            search_method="colorchecker-target-seed",
+            prediction_domain="linear",
+        )
+        if candidate.health.status == "FAIL":
+            rejected["matrix-health"] += 1
+            continue
+        seeds.append(candidate)
+
+    best_seed = min(seeds, key=_target_match_score)
+    refined_candidates = [
+        _refine_target_match_candidate(
+            seed,
+            dataset,
+            working_original,
+            composition,
+            resolved_config,
+            rejected,
+        )
+        for seed in (baseline, best_seed)
+    ]
+    best = min(refined_candidates, key=_target_match_score)
+    if _target_match_score(best) >= _target_match_score(baseline) - 1e-10:
+        best = replace(
+            baseline,
+            regularization=0.0,
+            blend=0.0,
+            search_method="colorchecker-target-match-baseline",
+        )
+
+    patch_results = [
+        replace(
+            patch,
+            priority_weight=1.0,
+            regression_status=(
+                "WARNING"
+                if patch.regression > resolved_config.regression_epsilon
+                else "PASS"
+            ),
+        )
+        for patch in best.patch_results
+    ]
+    before_errors = [patch.delta_e_before for patch in patch_results]
+    after_errors = [patch.delta_e_after for patch in patch_results]
+    before_ratio = _saturation_ratio(patch_results, after=False)
+    after_ratio = _saturation_ratio(patch_results, after=True)
+    diagnostics = build_module_diagnostics(
+        patch_results,
+        before_ratio,
+        after_ratio,
+        best.health,
+        1.0,
+    )
+    warnings = list(dataset.warnings)
+    warnings.append(
+        "标准色卡逼近模式只最小化 24 色块平均 ΔE00；单色块回退、Pass Rate、重点 Patch 与饱和度不作为拒绝条件。"
+    )
+    warnings.extend(
+        check.message + f" [{check.value}]"
+        for check in best.health.checks
+        if check.status != "PASS"
+    )
+    regressed_count = sum(
+        patch.regression > resolved_config.regression_epsilon
+        for patch in patch_results
+    )
+    if regressed_count:
+        warnings.append(
+            f"目标逼近允许平均值换取局部取舍：本轮有 {regressed_count} 个色块 ΔE00 上升。"
+        )
+    if best.search_method.endswith("baseline"):
+        warnings.append("当前矩阵已经是工程约束内最接近目标的候选，未生成新的矩阵变化。")
+
+    result_correction = _correction_for_final(
+        original_matrix,
+        best.optimized,
+        composition,
+    )
+    explainability = (
+        "Objective=标准/自定义 ColorChecker 24 色块等权平均 ΔE00；目标色值不做逐色块亮度替换。",
+        "不执行 Patch Regression、Neutral Regression、Pass Rate、重点 Patch、饱和度或多目标 Loss 门禁。",
+        f"只保留系数范围 [{resolved_config.coefficient_min:g}, {resolved_config.coefficient_max:g}]、Neutral 轴与 Matrix Health 非 FAIL 约束。",
+        f"选择 method={best.search_method}；平均 ΔE00 {_target_match_score(baseline):.3f}->{_target_match_score(best):.3f}。",
+        "Delta correction 已按原 XML 矩阵重新表达，严格满足 "
+        + ("M_new=A×M_old。" if composition == "pre" else "M_new=M_old×Aᵀ。"),
+        f"Matrix {best.health.status}: coeff=[{best.health.coefficient_min:.3f},{best.health.coefficient_max:.3f}], "
+        f"cond={best.health.condition_number:.3f}, det={best.health.determinant:.4f}。",
+    )
+    return OptimizationResult(
+        correction_matrix=result_correction,
+        original_matrix=original_matrix,
+        optimized_matrix=best.optimized,
+        composition=composition,
+        regularization=0.0,
+        blend=best.blend,
+        strategy="target-match",
+        search_method=best.search_method,
+        saturation_factor=1.0,
+        patch_results=patch_results,
+        mean_before=mean(before_errors),
+        mean_after=mean(after_errors),
+        max_before=max(before_errors),
+        max_after=max(after_errors),
+        improved_count=sum(
+            after < before - 1e-9
+            for before, after in zip(before_errors, after_errors)
+        ),
+        regressed_count=regressed_count,
+        pass_rates=_pass_rates(patch_results),
+        category_statistics=_category_statistics(patch_results),
+        saturation_ratio_before=before_ratio,
+        saturation_ratio_after=after_ratio,
+        matrix_health=best.health,
+        loss_before=_target_match_loss(
+            [
+                replace(
+                    patch,
+                    delta_e_after=patch.delta_e_before,
+                    delta_l_after=patch.delta_l_before,
+                    delta_c_after=patch.delta_c_before,
+                    delta_h_after=patch.delta_h_before,
+                )
+                for patch in patch_results
+            ]
+        ),
+        loss_after=_target_match_loss(patch_results),
         diagnostics=diagnostics,
         rejected_candidates=dict(rejected),
         explainability=explainability,

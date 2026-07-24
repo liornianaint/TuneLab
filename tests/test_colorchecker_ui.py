@@ -11,7 +11,7 @@ from PIL import Image
 
 from tunelab.app import CCM_WORKSPACE_TITLE, TuneLabApp
 from tunelab.ccm.qualcomm_xml import QualcommCCDocument
-from tunelab.colorchecker.engine import COLORCHECKER_CLASSIC_SRGB_8BIT, sample_patch_means
+from tunelab.colorchecker.engine import COLORCHECKER_CLASSIC_SRGB_8BIT
 from tunelab.ui_foundation import FONT_BODY, FONT_TITLE
 
 from .test_colorchecker_engine import synthetic_chart
@@ -97,10 +97,14 @@ class UnifiedColorCheckerUISmokeTests(unittest.TestCase):
         self.assertFalse(hasattr(self.app, "image_solver_var"))
         self.assertFalse(hasattr(self.app, "composition_var"))
         self.assertTrue(hasattr(self.app, "simulation_preview"))
-        self.assertTrue(self.app.full_restoration_preview_var.get())
+        self.assertFalse(hasattr(self.app, "full_restoration_preview_var"))
         self.assertEqual(self.app.simulation_preview.title_var.get(), "CCM 改后模拟图")
         self.assertLessEqual(self.app.controls_panel.winfo_reqheight(), 55)
+        self.assertEqual(self.app.parameters_panel.winfo_manager(), "pack")
+        self.assertEqual(self.app.target_match_panel.winfo_manager(), "")
         self.app._set_input_mode("image")
+        self.assertEqual(self.app.parameters_panel.winfo_manager(), "")
+        self.assertEqual(self.app.target_match_panel.winfo_manager(), "pack")
         self.assertEqual(
             [self.app.notebook.tab(tab, "text").strip() for tab in self.app.notebook.tabs()],
             ["ColorChecker 输入", "工程统计", "诊断与解释", "History / XML Diff"],
@@ -142,7 +146,7 @@ class UnifiedColorCheckerUISmokeTests(unittest.TestCase):
         self.assertTrue(self.app.reference_is_standard)
         self.assertEqual(self.app.cct_var.get(), "4000")
 
-    def test_image_end_to_end_uses_shared_optimizer_and_renders_full_image_simulation(self) -> None:
+    def test_image_end_to_end_uses_target_match_and_actual_delta_simulation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             measured_path = root / "4000K_Before.png"
@@ -162,7 +166,10 @@ class UnifiedColorCheckerUISmokeTests(unittest.TestCase):
         self.assertIsNotNone(self.app.test_preview.image_data)
         self.assertIsNotNone(self.app.simulation_preview.image_data)
         self.assertIsNotNone(self.app.reference_preview.image_data)
-        self.assertIn("仿真预览", self.app.image_metrics_var.get())
+        self.assertTrue(self.app.result.search_method.startswith("colorchecker-target-match"))
+        self.assertEqual(self.app.simulation.domain, "linear")
+        self.assertIn("标准色卡逼近预览", self.app.image_metrics_var.get())
+        self.assertIn("同一 Delta CCM", self.app.image_metrics_var.get())
         self.assertEqual(str(self.app.export_simulation_button.cget("state")), "normal")
         self.root.deiconify()
         self.app.notebook.select(self.app.image_tab)
@@ -190,48 +197,29 @@ class UnifiedColorCheckerUISmokeTests(unittest.TestCase):
             csv_tabs,
         )
 
-    def test_image_mode_automatically_restores_the_safe_real_shot_profile(self) -> None:
-        sources = Path(__file__).resolve().parents[1] / "sources"
-        before = sources / "4000K_Before.jpg"
-        after = sources / "4000K_After.jpg"
-        if not before.exists() or not after.exists():
-            self.skipTest("实拍 4000K ColorChecker 样本不存在。")
+    def test_image_mode_does_not_use_the_legacy_real_shot_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            xml_path = Path(directory) / "cc13.xml"
+            root = Path(directory)
+            measured_path = root / "4000K_warm.png"
+            xml_path = root / "cc13.xml"
+            chart = synthetic_chart()
+            warm = np.rint(
+                np.clip(chart.display_rgb.astype(np.float64) * np.asarray((1.15, 1.0, 0.8)), 0, 255)
+            ).astype(np.uint8)
+            Image.fromarray(warm, mode="RGB").save(measured_path)
             xml_path.write_text(PROFILE_SOURCE_CC_XML, encoding="utf-8")
-            self.app.load_test_image(str(before))
-            self.app.load_reference_image(str(after))
+            self.app.load_test_image(str(measured_path))
             self.app.load_xml(str(xml_path))
             self.app.run_optimization()
 
         self.assertIsNotNone(self.app.result)
-        self.assertTrue(self.app.result.search_method.startswith("calibrated-restoration"))
-        self.assertIsNotNone(self.app.restoration_plan)
-        self.assertIsNotNone(self.app.restoration_preview_plan)
-        self.assertEqual(self.app.restoration_preview_plan.strength, 1.0)
-        self.assertLess(self.app.restoration_plan.strength, 1.0)
+        self.assertTrue(self.app.result.search_method.startswith("colorchecker-target-match"))
+        self.assertEqual(self.app.result.strategy, "target-match")
+        self.assertFalse(hasattr(self.app, "restoration_plan"))
+        self.assertFalse(hasattr(self.app, "restoration_preview_plan"))
         self.assertIsNotNone(self.app.simulation)
-        self.assertEqual(self.app.simulation.domain, "real-shot-response")
-        self.assertIn("实拍响应仿真", self.app.image_metrics_var.get())
-        self.assertIn("100%", self.app.image_metrics_var.get())
-        self.assertIn("仅预览", self.app.image_metrics_var.get())
-        full_preview = self.app.simulation.rgb.copy()
-        full_means = np.asarray(sample_patch_means(full_preview, self.app.test_detection))
-        target_means = np.asarray([patch.mean_rgb for patch in self.app.reference_detection.patches])
-        accepted_matrix = self.app.result.optimized_matrix
-        accepted_strength = self.app.restoration_plan.strength
-        self.app.full_restoration_preview_var.set(False)
-        self.app._render_image_simulation()
-        self.assertEqual(self.app.result.optimized_matrix, accepted_matrix)
-        self.assertEqual(self.app.restoration_plan.strength, accepted_strength)
-        self.assertFalse(np.array_equal(self.app.simulation.rgb, full_preview))
-        safe_means = np.asarray(sample_patch_means(self.app.simulation.rgb, self.app.test_detection))
-        self.assertLess(
-            float(np.sqrt(np.mean((full_means - target_means) ** 2))),
-            float(np.sqrt(np.mean((safe_means - target_means) ** 2))),
-        )
-        self.assertIn(f"{accepted_strength:.0%}", self.app.image_metrics_var.get())
-        self.assertIn("与 XML 一致", self.app.image_metrics_var.get())
+        self.assertEqual(self.app.simulation.domain, "linear")
+        self.assertIn("标准色卡逼近", self.app.image_metrics_var.get())
         self.assertFalse(any(patch.regression_status == "FAIL" for patch in self.app.result.patch_results))
 
     def test_safe_image_result_overwrites_only_the_selected_xml_region(self) -> None:

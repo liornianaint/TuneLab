@@ -769,14 +769,29 @@ def _luminance_matched_reference(measured: Vector3, reference: Vector3) -> Vecto
 def build_comparison_dataset(
     measured: ColorCheckerDetection,
     reference: ColorCheckerDetection,
+    *,
+    match_reference_luminance: bool = False,
 ) -> ImatestDataset:
-    """Build a 24-patch dataset while excluding JPEG exposure differences."""
+    """Build a 24-patch dataset for direct or luminance-matched comparison.
+
+    Direct comparison is the image workflow default: every measured patch is
+    compared with the displayed standard/custom ColorChecker value.  The
+    optional luminance-matched path is retained for calibrated-profile
+    evaluation helpers, but it is no longer the default image optimizer.
+    """
 
     if len(measured.patches) != 24 or len(reference.patches) != 24:
         raise ColorCheckerError("测试图和目标都必须提供 24 个 ColorChecker 色块。")
     patches = []
     for measured_patch, reference_patch in zip(measured.patches, reference.patches):
-        target = _luminance_matched_reference(measured_patch.srgb, reference_patch.srgb)
+        target = (
+            _luminance_matched_reference(
+                measured_patch.srgb,
+                reference_patch.srgb,
+            )
+            if match_reference_luminance
+            else reference_patch.srgb
+        )
         patches.append(
             ColorPatch(
                 zone=measured_patch.zone,
@@ -785,9 +800,13 @@ def build_comparison_dataset(
                 name=measured_patch.name,
             )
         )
-    warnings = [
-        "目标色块已在 linear sRGB 中逐色块匹配测试图亮度；CCM 仅拟合色度差异。",
-    ]
+    warnings = (
+        ["目标色块已在 linear sRGB 中逐色块匹配测试图亮度；CCM 仅拟合色度差异。"]
+        if match_reference_luminance
+        else [
+            "标准色卡逼近直接使用目标的 24 个 sRGB 色值；曝光、Gamma、Tone Mapping 或 JPEG 裁切造成的差异也会计入 ΔE00。"
+        ]
+    )
     for detection in (measured, reference):
         if detection.warning:
             warnings.append(f"{detection.image.path.name}: {detection.warning}")

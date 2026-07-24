@@ -557,7 +557,7 @@ class DesktopUISmokeTests(unittest.TestCase):
         visit(dialog)
         self.assertIn("TuneLab", text)
         self.assertIn("版本", text)
-        self.assertIn("1.2.0", text)
+        self.assertIn("1.3.0", text)
         self.assertIn("联系", text)
         self.assertIn("kaiyi.jiang@thundersoft.com", text)
         self.assertIn("所有计算均在本地完成", text)

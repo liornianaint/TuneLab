@@ -142,15 +142,24 @@ class ColorCheckerEngineTests(unittest.TestCase):
         np.testing.assert_allclose(detection.patches[23].mean_rgb, CLASSIC_RGB[23], atol=2.0)
         self.assertGreaterEqual(detection.confidence, 0.45)
 
-    def test_paired_dataset_matches_reference_luminance_and_infers_cct(self) -> None:
+    def test_paired_dataset_defaults_to_direct_target_and_can_match_luminance(self) -> None:
         with mock.patch("tunelab.colorchecker.engine._mcc_polygons", return_value=None):
             measured = detect_colorchecker(synthetic_chart("3000K_Before.png"))
             reference = detect_colorchecker(synthetic_chart("target.png", colour_scale=0.72))
         dataset = build_comparison_dataset(measured, reference)
         self.assertEqual(dataset.inferred_cct, 3000)
         self.assertEqual(len(dataset.patches), 24)
-        self.assertIn("逐色块匹配测试图亮度", dataset.warnings[0])
-        for patch in dataset.patches:
+        self.assertIn("直接使用目标", dataset.warnings[0])
+        for patch, reference_patch in zip(dataset.patches, reference.patches):
+            np.testing.assert_allclose(patch.ideal_srgb, reference_patch.srgb, atol=1e-12)
+
+        luminance_matched = build_comparison_dataset(
+            measured,
+            reference,
+            match_reference_luminance=True,
+        )
+        self.assertIn("逐色块匹配测试图亮度", luminance_matched.warnings[0])
+        for patch in luminance_matched.patches:
             measured_luma = float(np.asarray(srgb_to_linear(patch.measured_srgb)) @ LUMA_WEIGHTS)
             target_luma = float(np.asarray(srgb_to_linear(patch.ideal_srgb)) @ LUMA_WEIGHTS)
             self.assertAlmostEqual(measured_luma, target_luma, places=5)

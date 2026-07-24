@@ -1,8 +1,18 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><!-- sparkle-sign-warning:
-IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
---><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
         <title>TuneLab</title>
+        <item>
+            <title>1.3.0</title>
+            <pubDate>Fri, 24 Jul 2026 02:18:26 +0800</pubDate>
+            <link>https://github.com/liornianaint/TuneLab/releases/tag/v1.3.0</link>
+            <sparkle:version>1.3.0</sparkle:version>
+            <sparkle:shortVersionString>1.3.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <sparkle:releaseNotesLink>https://github.com/liornianaint/TuneLab/releases/latest/download/TuneLab-1.3.0-macOS-arm64.md</sparkle:releaseNotesLink>
+            <enclosure url="https://github.com/liornianaint/TuneLab/releases/download/v1.3.0/TuneLab-1.3.0-macOS-arm64.zip" length="74751342" type="application/octet-stream" sparkle:edSignature="IPZkzwy904W6hrpt3Pib2gacloGBbvW0ZJq85QOKVaOdtyFRWuKE+/ijEf7A4b9NtpdkdbMrIj62a0HrPkedDQ=="/>
+        </item>
         <item>
             <title>1.2.0</title>
             <pubDate>Thu, 23 Jul 2026 23:09:40 +0800</pubDate>
@@ -11,7 +21,7 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
             <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/liornianaint/TuneLab/releases/download/v1.2.0/TuneLab-1.2.0-macOS-arm64.zip" length="74747089" type="application/octet-stream" sparkle:edSignature="kZD0EqObKl+WDpdJfOigMlLd5OTGBqHX7+GgSpBGucAiVkdHcK7mnCh/UbNAqOqQWpWhdzMV0Oxggyr//JxfAA=="></enclosure>
+            <enclosure url="https://github.com/liornianaint/TuneLab/releases/download/v1.2.0/TuneLab-1.2.0-macOS-arm64.zip" length="74747089" type="application/octet-stream" sparkle:edSignature="kZD0EqObKl+WDpdJfOigMlLd5OTGBqHX7+GgSpBGucAiVkdHcK7mnCh/UbNAqOqQWpWhdzMV0Oxggyr//JxfAA=="/>
         </item>
         <item>
             <title>1.1.0</title>
@@ -21,10 +31,10 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
             <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/liornianaint/TuneLab/releases/download/v1.1.0/TuneLab-1.1.0-macOS-arm64.zip" length="73726157" type="application/octet-stream" sparkle:edSignature="8eRBiXKslMtAC8idWSCR2jECU1qTGNV1hEBjYO83IIf7HhpJPmBdHMklXtgqYURDG1tDfakIRlrpGSmKxiiGAA=="></enclosure>
+            <enclosure url="https://github.com/liornianaint/TuneLab/releases/download/v1.1.0/TuneLab-1.1.0-macOS-arm64.zip" length="73726157" type="application/octet-stream" sparkle:edSignature="8eRBiXKslMtAC8idWSCR2jECU1qTGNV1hEBjYO83IIf7HhpJPmBdHMklXtgqYURDG1tDfakIRlrpGSmKxiiGAA=="/>
         </item>
     </channel>
 </rss><!-- sparkle-signatures:
-edSignature: d99px2YJQLizd87NnMGfruOrDG+oRmdyjkPCzuw3YAelBXiKgXiHmQBtI4HYu65x4DsFKx4F0svtayNWnzVgAw==
-length: 2035
+edSignature: e6udRvPtlAE1+iqmj2QMCyARJrENpzF8sy+xICv5j+OisuY2DqAPQ9Clc/xkO7raRXqgLhsA6zIKMAx+2RlWAA==
+length: 2721
 -->
